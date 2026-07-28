@@ -26,7 +26,7 @@ Supabase/Firebase, אנדרואיד, iOS, Electron, backend/IaC ו-CI/CD.
 <div dir="ltr">
 
 ```
-/plugin marketplace add <owner>/<repo>
+/plugin marketplace add Freespirits/claudeguard-il
 /plugin install claudeguard-il@claudeguard-il
 ```
 

@@ -25,7 +25,7 @@ Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
 Scans your whole repo, runs scanners, and can generate & apply fixes.
 
 ```
-/plugin marketplace add <owner>/<repo>        # this repository
+/plugin marketplace add Freespirits/claudeguard-il
 /plugin install claudeguard-il@claudeguard-il
 ```
 Then, in your project:
