@@ -2,6 +2,8 @@
 
 # 🛡️ ClaudeGuardIL
 
+![ClaudeGuardIL](assets/banner-he.png)
+
 **כלי אבטחה לאפליקציות vibecoding.** מפנים אותו לפרויקט ומקבלים דוח מדורג של פרצות אבטחה אמיתיות
 עם ראיות, ולצידן קוד הגנה מוכן להדבקה — לאתרים ואפליקציות web, פיצ'רים של AI/LLM,
 Supabase/Firebase, אנדרואיד, iOS, Electron, backend/IaC ו-CI/CD.

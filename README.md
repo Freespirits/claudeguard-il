@@ -1,5 +1,7 @@
 # 🛡️ ClaudeGuardIL
 
+![ClaudeGuardIL — security for vibecoded apps](assets/banner.png)
+
 **Security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
 report of real vulnerabilities with evidence, and paste-ready hardening code — for web, AI/LLM,
 Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
