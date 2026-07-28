@@ -320,27 +320,47 @@ for (const name of new Set([...envUsage.keys(), ...envDeclared.keys()])) {
   const usages = envUsage.get(name) || []
   const clientUses = usages.filter(u => clientReachable.has(u.file))
   const secretClass = classifySecretName(name)
+  const decl = envDeclared.get(name) || null
+  // A name that appears only in .env.example, carries no value, and is never read by any code
+  // describes a variable that does not exist yet. There is no secret to leak. Treating it as a
+  // live exposure manufactures a P0 out of documentation.
+  const exampleOnly = !!decl && decl.example === true && !decl.hasValue && usages.length === 0
   envVars.push({
     name, publicPrefix, secretClass,
     // `secretish` retained for compatibility, but consumers should prefer secretClass:
     // only 'high' may drive a P0 from the name alone (severity Law 3).
     secretish: secretClass === 'high' || secretClass === 'weak',
     publicByDesign: secretClass === 'public-by-design',
-    declared: envDeclared.get(name) || null,
+    declared: decl,
     usages,
     clientReachableUsages: clientUses.map(u => ({ ...u, strength: clientReachable.get(u.file)?.strength || 'weak' })),
-    // The two decisive exposure paths, kept separate so severity/confidence stay honest.
-    exposure: publicPrefix ? 'bundler-inlined-public-prefix'
-      : clientUses.length ? 'imported-into-client-bundle' : 'server-only',
-    // How much the exposure claim can carry (severity Law 3):
-    //   definitive — a public bundler prefix; the value IS inlined into client output, no graph needed.
-    //   strong     — the module is a client entrypoint or directly imported by one.
-    //   weak       — reached only transitively or through a re-export barrel; caps at P2/needs-review,
-    //                because tree-shaking may well drop it and a wrong P0 here is catastrophic.
-    exposureStrength: publicPrefix ? 'definitive'
-      : clientUses.length
-        ? (clientUses.some(u => clientReachable.get(u.file)?.strength === 'strong') ? 'strong' : 'weak')
-        : 'n/a',
+    // EXPOSURE SEMANTICS — corrected after testing against real repos.
+    //
+    // A bare `process.env.SECRET` inside a module that a client component imports is NOT a leak.
+    // Bundlers statically replace ONLY allowlisted prefixes (NEXT_PUBLIC_, VITE_, REACT_APP_...).
+    // Everything else is simply absent from client output and evaluates to undefined in the
+    // browser. Calling that "exposed" produced five confident P0s against a correctly-built repo
+    // that uses t3-env — the textbook guard AGAINST this very mistake. Reporting a best-practice
+    // pattern as a critical vulnerability is exactly how a security tool loses its audience.
+    //
+    //   bundler-inlined-public-prefix — DEFINITIVE. The value is compiled into client output.
+    //   next-config-inlined           — DEFINITIVE. next.config env:/publicRuntimeConfig, no prefix needed.
+    //   referenced-in-client-module   — NOT a leak. Usually a runtime-undefined bug instead.
+    //   server-only                   — not reachable from the client at all.
+    //   example-only                  — named in .env.example with no value and never used in
+    //                                   code. Nothing is exposed because nothing exists yet; at
+    //                                   most the TEMPLATE teaches an unsafe pattern (advisory).
+    exposure: exampleOnly ? 'example-only'
+      : publicPrefix ? 'bundler-inlined-public-prefix'
+        : clientUses.length ? 'referenced-in-client-module' : 'server-only',
+    // Severity Law 3 — only a `definitive` exposure may drive a P0 on its own.
+    exposureStrength: (publicPrefix && !exampleOnly) ? 'definitive' : 'n/a',
+    exampleOnly,
+    // Kept so a later rule can flag "this will be undefined in the browser" as a correctness
+    // bug (P3/P4), which is what it actually is — never as a leaked secret.
+    clientGraphStrength: clientUses.length
+      ? (clientUses.some(u => clientReachable.get(u.file)?.strength === 'strong') ? 'strong' : 'weak')
+      : 'n/a',
   })
 }
 
@@ -584,6 +604,27 @@ order by 1;`,
     : 'No schema source found (no migrations, no generated types, no Prisma/Drizzle schema). RLS state CANNOT be determined from this repo — run verifyQuery against your database.',
 }
 
+// ---------- env-guard libraries ----------
+//
+// t3-env (`createEnv({ server, client, runtimeEnv })`) is the recommended way to keep server
+// secrets out of client bundles: it throws if client code touches a server var. A project using
+// it is doing the RIGHT thing, and its `runtimeEnv` block necessarily names every server var —
+// so a naive reader sees "secrets referenced in a client-imported file" and cries wolf.
+// Recording the pattern lets downstream rules credit it instead of punishing it.
+const envGuards = []
+for (const [r, f] of files) {
+  if (!/createEnv\s*\(/.test(f.text)) continue
+  const { code } = stripJs(f.text)
+  envGuards.push({
+    file: r,
+    library: /@t3-oss\/env/.test(f.text) ? 't3-env' : 'createEnv-like',
+    declaresServerBlock: /\bserver\s*:\s*\{/.test(code),
+    declaresClientBlock: /\bclient\s*:\s*\{/.test(code),
+    // The whole point of the library: server vars are unreachable from client code.
+    protectsServerVars: /\bserver\s*:\s*\{/.test(code),
+  })
+}
+
 // ---------- Supabase client identity ----------
 //
 // WHY THIS EXISTS (false-positive blocker): `@supabase/ssr`'s createServerClient(url, ANON_KEY,
@@ -739,6 +780,7 @@ const model = {
       .map(t => ({ table: t, usedIn: tablesUsedInCode.get(t) })),
   },
   supabaseClients,
+  envGuards,
   nextConfig: nextConfigFindings,
   llmSites,
   limits: [

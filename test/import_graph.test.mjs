@@ -47,7 +47,9 @@ test('reachability THROUGH a barrel is weak, not strong', () => {
     'tree-shaking may well drop this; claiming a definite P0 here would be a false positive')
 
   const v = m.envVars.find(x => x.name === 'SUPABASE_SERVICE_ROLE_KEY')
-  assert.equal(v.exposureStrength, 'weak', 'weak graph evidence must cap severity below P0')
+  assert.equal(v.clientGraphStrength, 'weak', 'weak graph evidence must cap severity below P0')
+  assert.notEqual(v.exposureStrength, 'definitive',
+    'no public prefix, so nothing is inlined into client output — this is not a leak')
 })
 
 test('a DIRECT import into a client component is strong evidence', () => {
@@ -58,7 +60,10 @@ test('a DIRECT import into a client component is strong evidence', () => {
   })
   assert.equal(strengthOf(m, 'lib/db.ts'), 'strong')
   const v = m.envVars.find(x => x.name === 'SUPABASE_SERVICE_ROLE_KEY')
-  assert.equal(v.exposureStrength, 'strong')
+  assert.equal(v.clientGraphStrength, 'strong')
+  // Still not a leak: without a public prefix the bundler does not inline the value.
+  // The graph fact drives a "this is undefined in the browser" correctness rule, not a P0.
+  assert.equal(v.exposure, 'referenced-in-client-module')
 })
 
 test("a public bundler prefix is DEFINITIVE and needs no graph inference", () => {
