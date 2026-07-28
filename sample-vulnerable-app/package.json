@@ -2,13 +2,13 @@
   "name": "sample-vulnerable-app",
   "version": "0.0.0",
   "private": true,
-  "description": "Deliberately-insecure app to test ClaudeGuardIL. Do not deploy.",
+  "description": "Deliberately CODE-insecure app used to test ClaudeGuardIL. The vulnerabilities are in the code (exposed keys, no RLS, IDOR, prompt injection) — NOT in the dependencies, which are kept current. Never deploy this.",
   "scripts": { "dev": "next dev", "build": "next build", "start": "next start" },
   "dependencies": {
-    "next": "13.4.0",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "@supabase/supabase-js": "2.30.0",
-    "openai": "4.20.0"
+    "next": "^15.4.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "@supabase/supabase-js": "^2.48.0",
+    "openai": "^4.77.0"
   }
 }

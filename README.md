@@ -91,6 +91,12 @@ scripts/       build.mjs
 sample-vulnerable-app/  a deliberately-insecure app to test against
 ```
 
+## Why is there a "vulnerable app" in this repo?
+`sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be
+run against known-bad code. Its problems are at the **code** level (exposed `service_role` key,
+no RLS, IDOR, prompt injection, missing headers); its **dependencies are kept current**, so it
+shouldn't trip Dependabot. Never deploy it. See [`SECURITY.md`](SECURITY.md).
+
 ## Disclaimer
 Provided as-is, no warranty. A clean scan is **not** proof of safety. You are responsible for
 what you scan and for the scope of any live/DAST testing. Not affiliated with Anthropic.

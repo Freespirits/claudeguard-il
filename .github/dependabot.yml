@@ -1,0 +1,13 @@
+# Dependabot config.
+# The only npm manifest in this repo is sample-vulnerable-app/ — an intentional TEST FIXTURE
+# that is never installed or deployed. We keep its dependencies current (so the Security tab
+# stays clean) but disable automated version-update PRs for it, since it exists only to be
+# scanned by ClaudeGuardIL for CODE-level issues.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/sample-vulnerable-app"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0   # no automated PRs for the fixture
+    labels: ["sample-fixture"]
