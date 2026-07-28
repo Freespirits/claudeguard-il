@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Zero runtime dependencies is a hard constraint for this project — users must be able to
+      # run the engine without installing anything. So there is nothing to `npm install`.
+      # This step asserts that constraint rather than assuming it.
+      - name: Assert zero runtime dependencies
+        run: |
+          node -e "
+            const p = require('./package.json');
+            const deps = Object.keys(p.dependencies || {});
+            if (deps.length) {
+              console.error('Runtime dependencies are not allowed: ' + deps.join(', '));
+              process.exit(1);
+            }
+            console.log('ok: no runtime dependencies');
+          "
+
+      - name: Run tests
+        run: node --test "test/**/*.test.mjs"
+
+      # The build assembles core/ into both wrappers and zips the claude.ai skill.
+      # It exits non-zero on failure (it used to always exit 0, so CI could not catch a
+      # broken build).
+      - name: Build both wrappers
+        run: node scripts/build.mjs
+
+      # The generated trees must match core/ exactly. If a contributor hand-edits a generated
+      # reference file instead of core/, the next build silently discards their change — this
+      # catches that before it is merged.
+      - name: Assert generated wrappers are in sync with core/
+        run: |
+          if [ -n "$(git status --porcelain plugin/skills/claudeguard/references skill-dist)" ]; then
+            echo "✖ Generated files differ from core/ after a clean build."
+            echo "  You probably edited a generated copy instead of core/."
+            echo "  Fix: edit core/, then run 'node scripts/build.mjs' and commit the result."
+            git --no-pager diff --stat plugin/skills/claudeguard/references skill-dist
+            exit 1
+          fi
+          echo "ok: wrappers match core/"
+
+      # A security tool must never regress into hiding a finding. These two engine outputs are
+      # asserted directly because both were real bugs that reported a vulnerable app as safe.
+      - name: Smoke-test the engine against the vulnerable fixture
+        run: |
+          node plugin/scripts/project_model.mjs sample-vulnerable-app > /tmp/model.json
+          node -e "
+            const m = require('/tmp/model.json');
+            const fails = [];
+
+            // Regression: a commented-out 'enable row level security' once read as enabled.
+            for (const t of m.database.tables) {
+              if (t.rlsEnabled) fails.push('table ' + t.name + ' reported RLS enabled; fixture has none');
+            }
+
+            // Regression: the classic false positive that destroys trust with this audience.
+            const anon = m.envVars.find(v => v.name === 'NEXT_PUBLIC_SUPABASE_ANON_KEY');
+            if (!anon || anon.secretClass !== 'public-by-design') {
+              fails.push('the Supabase anon key must be public-by-design, never a leaked secret');
+            }
+
+            // The headline P0 must still be detected.
+            const sr = m.envVars.find(v => v.name.includes('SERVICE_ROLE'));
+            if (!sr || sr.secretClass !== 'high' || sr.exposure !== 'bundler-inlined-public-prefix') {
+              fails.push('the service_role key exposure must be detected as high/bundler-inlined');
+            }
+
+            if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
+            console.log('ok: engine still detects the planted P0s and still suppresses the known false positive');
+          "

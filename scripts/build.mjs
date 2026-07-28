@@ -27,6 +27,10 @@ const COPY = [
   ['report-template.md', 'file'],
 ]
 
+// Collect failures instead of swallowing them, so the process can exit non-zero at the end.
+const errors = []
+const fail = msg => { console.error('✖ ' + msg); errors.push(msg) }
+
 function assemble(refDir) {
   rmSync(refDir, { recursive: true, force: true })
   mkdirSync(refDir, { recursive: true })
@@ -59,18 +63,34 @@ try {
   }
   console.log('• wrote ' + zip)
 } catch (e) {
-  console.log('• zip step skipped (' + String(e.message || e).slice(0, 80) + '). The folder skill-dist/claudeguard/ is ready to zip manually — put SKILL.md at the archive root.')
+  fail('zip step failed: ' + String(e.message || e).slice(0, 120) +
+    '. skill-dist/claudeguard/ is ready to zip manually — put SKILL.md at the archive root.')
 }
 
-// Optional: validate the portable skill with the on-disk claude.ai validator if present.
+// Structural check: the claude.ai upload format requires SKILL.md at the archive ROOT, and the
+// reference tree must have actually been copied. Silent truncation here ships a skill that
+// looks fine and knows nothing.
+if (!existsSync(join(distSkill, 'SKILL.md'))) fail('skill-dist/claudeguard/SKILL.md is missing')
+for (const [name] of COPY) {
+  if (!existsSync(join(distRefs, name))) fail(`reference not assembled: references/${name}`)
+}
+
+// Validate the portable skill against the strict claude.ai frontmatter schema when the
+// validator is available locally. In --strict (CI), its absence is itself a failure.
 const validator = join(process.env.USERPROFILE || process.env.HOME || '', '.claude', 'plugins', 'marketplaces', 'claude-plugins-official', 'plugins', 'skill-creator', 'skills', 'skill-creator', 'scripts', 'quick_validate.py')
 if (existsSync(validator)) {
   try {
-    execSync(`python "${validator}" "${distSkill}"`, { stdio: 'inherit' })
+    // PYTHONUTF8=1: the validator reads files as cp1252 on Windows and crashes on our UTF-8.
+    execSync(`python "${validator}" "${distSkill}"`, { stdio: 'inherit', env: { ...process.env, PYTHONUTF8: '1' } })
     console.log('• claude.ai skill validation passed')
-  } catch { console.log('• validator reported issues (see above)') }
+  } catch { fail('claude.ai skill validation reported issues (see above)') }
 } else {
-  console.log('• (optional) run skill-creator quick_validate.py on skill-dist/claudeguard to double-check frontmatter')
+  console.log('• (optional) skill-creator quick_validate.py not found — skipping frontmatter validation')
 }
 
+if (errors.length) {
+  console.error(`\n✖ build failed with ${errors.length} error(s):`)
+  for (const e of errors) console.error('  - ' + e)
+  process.exit(1)   // CI depends on this: previously the build ALWAYS exited 0
+}
 console.log('done.')
