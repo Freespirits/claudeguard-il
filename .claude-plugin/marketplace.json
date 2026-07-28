@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claudeguard-il",
+  "owner": {
+    "name": "ClaudeGuardIL",
+    "url": "https://www.facebook.com/groups/cladue"
+  },
+  "metadata": {
+    "description": "Security auditor and guard-builder for vibecoded apps (web, AI/LLM, mobile, desktop, backend, CI/CD). Community project for the Israeli Claude / Claude Code / vibe-coding group. Not an official Anthropic product.",
+    "version": "0.1.0",
+    "homepage": "https://www.facebook.com/groups/cladue"
+  },
+  "plugins": [
+    {
+      "name": "claudeguard-il",
+      "source": "./plugin",
+      "description": "Audit any vibecoded app for vulnerabilities and missing guards, then generate paste-ready hardening code. Covers secrets, Supabase/Firebase RLS, auth/IDOR, LLM/prompt-injection, Android/iOS, Electron, IaC and CI/CD. Static by default; gated live and DAST tiers. Bilingual HE/EN reports.",
+      "category": "security",
+      "author": { "name": "ClaudeGuardIL" },
+      "homepage": "https://www.facebook.com/groups/cladue",
+      "keywords": ["security", "audit", "vibecoding", "supabase", "firebase", "llm", "owasp", "hardening", "rls"]
+    }
+  ]
+}

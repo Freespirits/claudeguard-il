@@ -1,0 +1,48 @@
+# ClaudeGuardIL — authorization scope for live (Tier 1) and DAST (Tier 2) testing.
+# Copy to `claudeguard.scope.yml` in your project root and fill it in. The live/DAST tiers
+# REFUSE to run without a valid scope file whose attestations are set to true.
+#
+# You may only test systems you own or are explicitly authorized in writing to test.
+# Testing systems you do not own may be illegal. When in doubt, don't.
+
+version: 1
+
+# Who is authorizing this test.
+authorized_by:
+  name: ""                     # your name
+  contact: ""                  # email confirming you can be reached
+  date: ""                     # YYYY-MM-DD
+
+# The ONLY hosts that may be probed. Exact hostnames (optionally with a port).
+# Wildcards are limited to a single leading label, e.g. "*.staging.example.com".
+# Requests to any host not listed here are refused.
+targets:
+  - "localhost:3000"
+  # - "app.example.com"
+  # - "*.staging.example.com"
+
+# Tier 1 — passive live. Read-only: TLS, headers, cookie flags, exposed files/routes,
+# public Supabase/Firebase reads. No payloads. Requires ownership attestation.
+passive_live:
+  enabled: false
+  i_own_or_control_these_targets: false   # must be true to run Tier 1
+
+# Tier 2 — active DAST. Sends real attack traffic (injection, auth/IDOR, fuzzing).
+# Requires explicit written-authorization attestation AND ownership. Dry-run by default.
+active_dast:
+  enabled: false
+  i_am_authorized_in_writing: false       # must be true to run Tier 2
+  i_own_or_control_these_targets: false   # must be true to run Tier 2
+  dry_run: true                           # true = plan only, send nothing. Set false to execute.
+  max_requests_per_second: 2              # be gentle; the runner also enforces a hard cap
+  avoid_destructive: true                 # skip payloads that could delete/modify data
+
+# Hosts that are ALWAYS refused, even if mistakenly listed above (defense-in-depth).
+# The runner additionally refuses well-known third-party providers by default.
+never_touch:
+  - "*.supabase.co"        # provider infra — audit YOUR project's rules, not their servers
+  - "*.firebaseio.com"
+  - "*.vercel.app"         # unless it is your own preview and you set it in targets explicitly
+  - "*.amazonaws.com"
+  - "api.openai.com"
+  - "api.anthropic.com"

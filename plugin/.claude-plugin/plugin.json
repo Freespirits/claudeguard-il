@@ -1,0 +1,9 @@
+{
+  "name": "claudeguard-il",
+  "version": "0.1.0",
+  "description": "Security auditor and guard-builder for vibecoded apps. Finds vulnerabilities and missing guards across web, AI/LLM, Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD, then generates paste-ready hardening code. Community project, not an official Anthropic product.",
+  "author": { "name": "ClaudeGuardIL", "url": "https://www.facebook.com/groups/cladue" },
+  "homepage": "https://www.facebook.com/groups/cladue",
+  "license": "MIT",
+  "keywords": ["security", "audit", "vibecoding", "supabase", "firebase", "llm", "owasp", "hardening", "rls", "dast"]
+}

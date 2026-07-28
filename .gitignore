@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# real authorization scope files carry ownership/authorization attestations — never commit
+claudeguard.scope.yml
+
+# build artifact — regenerate with: node scripts/build.mjs
+claudeguard-skill.zip
+
+# noise
+*.log
+.DS_Store
+Thumbs.db
+
+# NOTE: sample-vulnerable-app/.env is committed on purpose (fake test fixture).

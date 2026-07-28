@@ -1,0 +1,17 @@
+{
+  "description": "ClaudeGuardIL: advisory secret-leak warning when writing files. Advisory only (never blocks). Disable the plugin's hooks if you find it noisy.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You are about to modify a file. Inspect $TOOL_INPUT. If the new content hardcodes a real secret (an API key such as sk-, sk-ant-, AKIA, AIza; a private key block; a Supabase service_role JWT; a database URL containing a password; or a NEXT_PUBLIC_/VITE_/PUBLIC_ variable assigned a secret value), OR writes real values into a committed .env file, add one short advisory line in Hebrew and English warning that a secret may be getting hardcoded/exposed and suggesting a server-only environment variable (see the secrets-management guard). Otherwise say nothing. This is advisory only: always allow the write to proceed.",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
