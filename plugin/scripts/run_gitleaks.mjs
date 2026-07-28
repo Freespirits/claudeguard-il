@@ -15,17 +15,31 @@ function hasGitleaks() {
   } catch { return false }
 }
 
+function parseGitleaksRows(out) {
+  const rows = JSON.parse(out || '[]')
+  return rows.map(r => ({
+    file: r.File, line: r.StartLine, rule: r.RuleID, masked: mask(r.Secret || r.Match || ''),
+  }))
+}
+
 function runGitleaks() {
   try {
     const out = execSync(`gitleaks detect --source "${root}" --no-banner --report-format json --report-path -`,
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 })
-    const rows = JSON.parse(out || '[]')
-    return rows.map(r => ({
-      file: r.File, line: r.StartLine, rule: r.RuleID, masked: mask(r.Secret || r.Match || ''),
-    }))
+    return parseGitleaksRows(out)
   } catch (e) {
-    // gitleaks exits non-zero when it finds leaks; stdout still holds the JSON if piped to a file.
-    return null
+    // gitleaks exits with a NON-ZERO code precisely WHEN IT FINDS LEAKS, so execSync throws on
+    // the successful-and-interesting path. The results are still on stdout.
+    //
+    // Previously this returned null, silently fell back to the regex scanner, and STILL reported
+    // engine:"gitleaks" — so any repo with real leaks got regex-quality coverage while the report
+    // claimed otherwise. A security tool overstating its own coverage is the same betrayal as a
+    // false negative.
+    const out = e?.stdout
+    if (out && String(out).trim()) {
+      try { return parseGitleaksRows(String(out)) } catch { /* fall through to real failure */ }
+    }
+    return null // genuine failure (not installed, bad args, crash) — caller falls back honestly
   }
 }
 
@@ -94,16 +108,25 @@ function fallbackScan() {
   return findings
 }
 
-const engine = hasGitleaks() ? 'gitleaks' : 'fallback-regex'
-let findings = engine === 'gitleaks' ? runGitleaks() : null
-if (findings == null) findings = fallbackScan()
+// Report the engine that ACTUALLY produced the findings, never the one we hoped to use.
+const gitleaksAvailable = hasGitleaks()
+let findings = gitleaksAvailable ? runGitleaks() : null
+const gitleaksSucceeded = findings !== null
+if (!gitleaksSucceeded) findings = fallbackScan()
+
+const engine = gitleaksSucceeded ? 'gitleaks' : 'fallback-regex'
+const note = gitleaksSucceeded
+  ? 'Scanned with gitleaks (includes git history).'
+  : gitleaksAvailable
+    ? 'gitleaks is installed but failed to run — used built-in patterns instead. Git history was NOT scanned.'
+    : 'gitleaks not installed — used built-in patterns. Install gitleaks for git-history + broader coverage.'
 
 console.log(JSON.stringify({
-  engine: findings === null ? 'fallback-regex' : engine,
+  engine,
+  gitleaksAvailable,
+  scannedGitHistory: gitleaksSucceeded,
   root,
   count: findings.length,
   findings,
-  note: engine === 'fallback-regex'
-    ? 'gitleaks not installed — used built-in patterns. Install gitleaks for git-history + broader coverage.'
-    : 'Scanned with gitleaks.',
+  note,
 }, null, 2))

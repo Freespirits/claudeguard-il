@@ -1,0 +1,14 @@
+{
+  "name": "claudeguard-il",
+  "version": "0.2.0-dev",
+  "private": true,
+  "type": "module",
+  "description": "Security auditor and guard-builder for vibecoded apps. Community project, not an official Anthropic product.",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "build": "node scripts/build.mjs",
+    "scan": "node plugin/scripts/project_model.mjs"
+  }
+}
