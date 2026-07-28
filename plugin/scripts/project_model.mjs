@@ -13,7 +13,7 @@
 // Usage: node project_model.mjs [path] [--json]
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
-import { stripSql } from './lib/strip_comments.mjs'
+import { stripSql, stripJs } from './lib/strip_comments.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -120,6 +120,35 @@ if (tsconf?.compilerOptions?.paths) {
 }
 if (!aliasRoots.length) aliasRoots.push({ prefix: '@/', targets: ['src/', './'] })
 
+// ---------- workspace packages (Turborepo / pnpm workspaces) ----------
+//
+// Scaffolds emitted by v0/Cursor are frequently monorepos where apps/web imports `@repo/db`.
+// A bare specifier previously resolved to null, so EVERY cross-package edge was lost — meaning
+// client reachability and helper-closure analysis silently under-reported in exactly the
+// multi-file repos where we claim an advantage over reading one file at a time.
+const workspaceGlobs = []
+if (Array.isArray(pkg?.workspaces)) workspaceGlobs.push(...pkg.workspaces)
+else if (Array.isArray(pkg?.workspaces?.packages)) workspaceGlobs.push(...pkg.workspaces.packages)
+try {
+  const ws = readFileSync(join(ROOT, 'pnpm-workspace.yaml'), 'utf8')
+  for (const m of ws.matchAll(/^\s*-\s*['"]?([^'"\n]+)['"]?\s*$/gm)) workspaceGlobs.push(m[1].trim())
+} catch { /* no pnpm workspace */ }
+
+// name -> package directory (repo-relative). Resolved by reading each candidate package.json.
+const workspacePackages = new Map()
+for (const g of workspaceGlobs) {
+  const base = g.replace(/\/\*+$/, '')
+  let entries = []
+  try { entries = readdirSync(join(ROOT, base), { withFileTypes: true }) } catch { continue }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue
+    const dir = `${base}/${e.name}`.replace(/^\.\//, '')
+    const wp = readJson(`${dir}/package.json`)
+    if (wp?.name) workspacePackages.set(wp.name, dir)
+  }
+}
+const unresolvedWorkspaceImports = []
+
 function resolveImport(fromRel, spec) {
   if (!spec) return null
   let candidates = []
@@ -132,7 +161,15 @@ function resolveImport(fromRel, spec) {
         for (const t of a.targets) candidates.push(join(t, tail).split(sep).join('/'))
       }
     }
-    if (!candidates.length) return null // bare package
+    // Workspace package: `@repo/db` or `@repo/db/client` -> packages/db[/client]
+    for (const [name, dir] of workspacePackages) {
+      if (spec === name || spec.startsWith(name + '/')) {
+        const tail = spec.slice(name.length).replace(/^\//, '')
+        candidates.push(tail ? `${dir}/${tail}` : dir)
+        candidates.push(tail ? `${dir}/src/${tail}` : `${dir}/src`)
+      }
+    }
+    if (!candidates.length) return null // genuine third-party package
   }
   for (const c of candidates) {
     const norm = c.replace(/^\.\//, '')
@@ -156,7 +193,14 @@ for (const [r, f] of files) {
     if (!spec) continue
     const target = resolveImport(r, spec)
     if (target && target !== r) set.add(target)
-    else if (!spec.startsWith('.')) bare.add(spec.split('/').slice(0, spec.startsWith('@') ? 2 : 1).join('/'))
+    else if (!spec.startsWith('.')) {
+      bare.add(spec.split('/').slice(0, spec.startsWith('@') ? 2 : 1).join('/'))
+      // A workspace package we know about but could NOT resolve to a file is a coverage hole,
+      // not a third-party dependency. Surface it rather than losing the edge silently.
+      for (const name of workspacePackages.keys()) {
+        if (spec === name || spec.startsWith(name + '/')) unresolvedWorkspaceImports.push({ file: r, spec })
+      }
+    }
   }
   imports.set(r, set); bareImports.set(r, bare)
   for (const t of set) {
@@ -191,14 +235,54 @@ for (const [r, f] of files) {
   const c = directClientSignal(r, f); if (c) clientSeed.set(r, c)
   const s = directServerSignal(r, f); if (s) serverSeed.set(r, s)
 }
-// Anything imported (transitively) by a client module is in the client bundle.
+// A "barrel" is a pure re-export hub (lib/index.ts). Reachability THROUGH one is weak evidence:
+// importing { cn } from '@/lib' does not mean the bundler ships lib/db.ts's service-role client,
+// because tree-shaking drops unused re-exports. Treating it as strong evidence fabricates a P0
+// on a correct app — and a wrong P0 makes people rotate keys and announce breaches.
+function isBarrel(rel) {
+  const f = files.get(rel)
+  if (!f) return false
+  const { code } = stripJs(f.text)
+  const lines = code.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  if (!lines.length) return false
+  const reexport = lines.filter(l => /^export\s+(\*|\{)[^=]*\bfrom\b/.test(l)).length
+  return reexport / lines.length >= 0.6
+}
+// `import 'server-only'` makes a client import a BUILD ERROR, so a chain through it cannot exist.
+function hasServerOnly(rel) {
+  const f = files.get(rel)
+  return !!f && /['"]server-only['"]/.test(f.text)
+}
+
+const barrelCache = new Map()
+const isBarrelCached = r => (barrelCache.has(r) ? barrelCache.get(r) : (barrelCache.set(r, isBarrel(r)), barrelCache.get(r)))
+
+/**
+ * BFS over the import graph, recording HOW strong each reachability claim is.
+ *   strong — the file itself is a client entrypoint, or is directly imported by one.
+ *   weak   — reached only transitively, or through a re-export barrel.
+ * Severity Law 3: only `strong` may drive a P0; `weak` caps at P2/needs-review.
+ */
 function propagate(seed) {
-  const out = new Map(seed)
+  const out = new Map()
+  for (const [k, why] of seed) out.set(k, { why, strength: 'strong', depth: 0, viaBarrel: false })
   const q = [...seed.keys()]
   while (q.length) {
     const cur = q.shift()
+    const curInfo = out.get(cur)
     for (const dep of imports.get(cur) || []) {
-      if (!out.has(dep)) { out.set(dep, `imported-by:${cur}`); q.push(dep) }
+      if (out.has(dep)) continue
+      // A module marked server-only can never be in the client bundle — stop the chain.
+      if (hasServerOnly(dep)) continue
+      const depth = curInfo.depth + 1
+      const viaBarrel = curInfo.viaBarrel || isBarrelCached(cur)
+      out.set(dep, {
+        why: `imported-by:${cur}`,
+        strength: depth <= 1 && !viaBarrel ? 'strong' : 'weak',
+        depth,
+        viaBarrel,
+      })
+      q.push(dep)
     }
   }
   return out
@@ -244,10 +328,19 @@ for (const name of new Set([...envUsage.keys(), ...envDeclared.keys()])) {
     publicByDesign: secretClass === 'public-by-design',
     declared: envDeclared.get(name) || null,
     usages,
-    clientReachableUsages: clientUses,
+    clientReachableUsages: clientUses.map(u => ({ ...u, strength: clientReachable.get(u.file)?.strength || 'weak' })),
     // The two decisive exposure paths, kept separate so severity/confidence stay honest.
     exposure: publicPrefix ? 'bundler-inlined-public-prefix'
       : clientUses.length ? 'imported-into-client-bundle' : 'server-only',
+    // How much the exposure claim can carry (severity Law 3):
+    //   definitive — a public bundler prefix; the value IS inlined into client output, no graph needed.
+    //   strong     — the module is a client entrypoint or directly imported by one.
+    //   weak       — reached only transitively or through a re-export barrel; caps at P2/needs-review,
+    //                because tree-shaking may well drop it and a wrong P0 here is catastrophic.
+    exposureStrength: publicPrefix ? 'definitive'
+      : clientUses.length
+        ? (clientUses.some(u => clientReachable.get(u.file)?.strength === 'strong') ? 'strong' : 'weak')
+        : 'n/a',
   })
 }
 
@@ -350,9 +443,17 @@ for (const p of sqlFiles) {
     }
   })
 }
+// Snapshot which tables migrations actually proved, BEFORE other sources add more. RLS state is
+// only verifiable for these; provenance from a later source must not overwrite it.
+const tablesFromMigrations = new Set(tables.keys())
+
 // tables referenced from code (catches tables used but never seen in migrations)
 const TABLE_REF_RE = /\.from\(\s*['"]([a-zA-Z0-9_]+)['"]\s*\)/g
 const tablesUsedInCode = new Map()
+// Non-literal .from(x) — the table set cannot be enumerated from a generic CRUD helper.
+// This must be VISIBLE, never a silent skip, or we would claim complete coverage while blind.
+const DYNAMIC_TABLE_REF_RE = /\.from\(\s*(?!['"])([A-Za-z_$][\w$.]*)\s*\)/g
+const dynamicTableRefs = []
 for (const [r, f] of files) {
   let m; TABLE_REF_RE.lastIndex = 0
   while ((m = TABLE_REF_RE.exec(f.text))) {
@@ -360,6 +461,209 @@ for (const [r, f] of files) {
     if (!tablesUsedInCode.has(t)) tablesUsedInCode.set(t, [])
     tablesUsedInCode.get(t).push(r)
   }
+  DYNAMIC_TABLE_REF_RE.lastIndex = 0
+  while ((m = DYNAMIC_TABLE_REF_RE.exec(f.text))) {
+    const line = f.text.slice(0, m.index).split(/\r?\n/).length
+    dynamicTableRefs.push({ file: r, line, expr: m[1] })
+  }
+}
+
+// ---------- schema population from EVERY available source ----------
+//
+// WHY: the modal vibecoder creates tables in the Supabase DASHBOARD and has no
+// supabase/migrations/ at all. Enumerating tables only from .sql files finds 0-3 of them, so the
+// flagship "table has no RLS" detector silently produces nothing — while a coverage row implies
+// completeness. Worse is the partial case: 6 tables in migrations pass and the 7th, added in the
+// dashboard, never appears. "The LLM misses the 7th table" is exactly what we would do.
+//
+// database.types.ts (generated by `supabase gen types`) is the authoritative list because it is
+// produced FROM the live database, so it includes dashboard-created tables.
+const schemaSources = []
+if (sqlFiles.length) schemaSources.push('migrations')
+
+/** Extract the direct child keys of a `Tables: { ... }` block in generated Supabase types. */
+function tablesFromSupabaseTypes(text) {
+  const out = []
+  const anchor = /public\s*:\s*\{/.exec(text)
+  const start = anchor ? anchor.index : 0
+  const tIdx = text.indexOf('Tables:', start)
+  if (tIdx === -1) return out
+  const open = text.indexOf('{', tIdx)
+  if (open === -1) return out
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]
+    if (c === '{') {
+      depth++
+      if (depth === 2) {
+        // a direct child of Tables: capture the identifier preceding this brace
+        const head = text.slice(Math.max(0, i - 120), i)
+        const km = /([A-Za-z_][\w]*)\s*:\s*$/.exec(head)
+        if (km) out.push(km[1].toLowerCase())
+      }
+    } else if (c === '}') {
+      depth--
+      if (depth === 0) break
+    }
+  }
+  return out
+}
+
+const typeFiles = allPaths.filter(p =>
+  /(^|\/)(database|supabase)\.types\.ts$|(^|\/)types\/(supabase|database)\.ts$|(^|\/)supabase\/types\.ts$/i.test(p))
+for (const p of typeFiles) {
+  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const names = tablesFromSupabaseTypes(text)
+  if (!names.length) continue
+  if (!schemaSources.includes('supabase-types')) schemaSources.push('supabase-types')
+  for (const name of names) {
+    const t = tables.get(name) || { name, definedIn: null, rlsEnabled: false, rlsAt: null, policies: [] }
+    t.knownFrom = [...new Set([...(t.knownFrom || []), 'supabase-types'])]
+    if (!t.definedIn) t.definedIn = p
+    tables.set(name, t)
+  }
+}
+
+// Prisma / Drizzle projects manage schema in code, and have no Postgres RLS layer at all.
+for (const p of allPaths.filter(x => /schema\.prisma$/i.test(x))) {
+  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  let m; const re = /^\s*model\s+(\w+)\s*\{/gm
+  while ((m = re.exec(text))) {
+    if (!schemaSources.includes('prisma')) schemaSources.push('prisma')
+    const name = m[1].toLowerCase()
+    const t = tables.get(name) || { name, definedIn: p, rlsEnabled: false, rlsAt: null, policies: [] }
+    t.knownFrom = [...new Set([...(t.knownFrom || []), 'prisma'])]
+    tables.set(name, t)
+  }
+}
+for (const [r, f] of files) {
+  let m; const re = /pgTable\(\s*['"]([\w]+)['"]/g
+  while ((m = re.exec(f.text))) {
+    if (!schemaSources.includes('drizzle')) schemaSources.push('drizzle')
+    const name = m[1].toLowerCase()
+    const t = tables.get(name) || { name, definedIn: r, rlsEnabled: false, rlsAt: null, policies: [] }
+    t.knownFrom = [...new Set([...(t.knownFrom || []), 'drizzle'])]
+    tables.set(name, t)
+  }
+}
+// Tables seen only in code still count as enumerated subjects.
+for (const [name, usedIn] of tablesUsedInCode) {
+  const t = tables.get(name) || { name, definedIn: null, rlsEnabled: false, rlsAt: null, policies: [] }
+  t.knownFrom = [...new Set([...(t.knownFrom || []), 'code-reference'])]
+  t.usedIn = usedIn
+  tables.set(name, t)
+}
+if (tablesUsedInCode.size && !schemaSources.includes('code-reference')) schemaSources.push('code-reference')
+for (const t of tables.values()) {
+  if (tablesFromMigrations.has(t.name)) {
+    t.knownFrom = [...new Set(['migrations', ...(t.knownFrom || [])])]
+  } else if (!t.knownFrom) {
+    t.knownFrom = ['migrations']
+  }
+  // RLS state is only KNOWN when a migration proves it. A table discovered from generated types
+  // or a code reference says nothing about whether RLS is on — claiming `false` there would be a
+  // false positive, and claiming `true` would be a false negative. So: unknown.
+  t.rlsCertainty = tablesFromMigrations.has(t.name) ? 'from-migrations' : 'unknown-no-migration'
+}
+
+// If no schema source exists at all, that is ONE loud blocking unknown — not N quiet ones.
+const schemaCoverage = {
+  sources: schemaSources,
+  tablesEnumerated: tables.size,
+  dynamicTableRefs,
+  rlsVerifiable: schemaSources.includes('migrations'),
+  // Handed to the user verbatim when we cannot see the schema, so they can answer it themselves.
+  verifyQuery: `select c.relname,
+       c.relrowsecurity as rls_enabled,
+       (select count(*) from pg_policy p where p.polrelid = c.oid) as policies
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind = 'r'
+order by 1;`,
+  note: schemaSources.length
+    ? null
+    : 'No schema source found (no migrations, no generated types, no Prisma/Drizzle schema). RLS state CANNOT be determined from this repo — run verifyQuery against your database.',
+}
+
+// ---------- Supabase client identity ----------
+//
+// WHY THIS EXISTS (false-positive blocker): `@supabase/ssr`'s createServerClient(url, ANON_KEY,
+// { cookies }) is the OFFICIALLY RECOMMENDED pattern and produces a USER-SCOPED client where RLS
+// with auth.uid() is the correct and sufficient control. Without recognising it, every
+// `.eq('id', id)` in a correct app looks like an IDOR, and we would flood the idiomatic Supabase
+// app with false P1s. Volume is what destroys trust — not any single finding.
+const SUPABASE_FACTORIES = [
+  // factory name                          identity
+  ['createServerClient', 'anon-user-scoped'],
+  ['createBrowserClient', 'anon-user-scoped'],
+  ['createRouteHandlerClient', 'anon-user-scoped'],
+  ['createServerComponentClient', 'anon-user-scoped'],
+  ['createClientComponentClient', 'anon-user-scoped'],
+  ['createMiddlewareClient', 'anon-user-scoped'],
+  ['createPagesBrowserClient', 'anon-user-scoped'],
+  ['createPagesServerClient', 'anon-user-scoped'],
+]
+const supabaseClients = []
+for (const [r, f] of files) {
+  for (const [fn, identity] of SUPABASE_FACTORIES) {
+    const re = new RegExp(`\\b${fn}\\s*[(<]`, 'g')
+    let m
+    while ((m = re.exec(f.text))) {
+      supabaseClients.push({
+        file: r,
+        line: f.text.slice(0, m.index).split(/\r?\n/).length,
+        factory: fn,
+        identity,
+        // RLS is the correct control for this identity; IDOR must never be `confirmed` here.
+        rlsIsTheControl: true,
+      })
+    }
+  }
+  // Plain createClient(url, KEY) — identity depends entirely on WHICH key.
+  const re = /\bcreateClient\s*(?:<[^>]*>)?\s*\(([^)]{0,400})\)/gs
+  let m
+  while ((m = re.exec(f.text))) {
+    const args = m[1]
+    const usesServiceRole = /SERVICE_ROLE/i.test(args)
+    const usesAnon = /ANON/i.test(args)
+    supabaseClients.push({
+      file: r,
+      line: f.text.slice(0, m.index).split(/\r?\n/).length,
+      factory: 'createClient',
+      identity: usesServiceRole ? 'service-role' : usesAnon ? 'anon-public' : 'unknown-key',
+      // service_role BYPASSES RLS entirely, so RLS is not a control for it.
+      rlsIsTheControl: !usesServiceRole,
+    })
+  }
+}
+
+// ---------- next.config.js ----------
+//
+// `env:` and `publicRuntimeConfig` INLINE arbitrary server env vars into the client bundle — a P0
+// secret exposure with NO public prefix required, which defeats the entire prefix-based model.
+// Enumerable, high-value, and previously invisible to the engine.
+const nextConfigFindings = []
+for (const p of allPaths.filter(x => /(^|\/)next\.config\.(m|c)?[jt]s$/.test(x))) {
+  let raw; try { raw = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const { code } = stripJs(raw)
+  const at = re => {
+    const m = re.exec(code)
+    return m ? { line: code.slice(0, m.index).split(/\r?\n/).length, match: m[0].slice(0, 80) } : null
+  }
+  const add = (key, hit, severityHint, why) => { if (hit) nextConfigFindings.push({ file: p, key, ...hit, severityHint, why }) }
+  add('env', at(/\benv\s*:\s*\{/), 'P0-if-secret',
+    'next.config env: inlines these values into the CLIENT bundle regardless of prefix')
+  add('publicRuntimeConfig', at(/\bpublicRuntimeConfig\s*:\s*\{/), 'P0-if-secret',
+    'publicRuntimeConfig is shipped to the browser')
+  add('productionBrowserSourceMaps', at(/productionBrowserSourceMaps\s*:\s*true/), 'P3',
+    'source maps published to production')
+  add('ignoreBuildErrors', at(/ignoreBuildErrors\s*:\s*true/), 'P3',
+    'TypeScript errors suppressed at build time')
+  add('ignoreDuringBuilds', at(/ignoreDuringBuilds\s*:\s*true/), 'P3',
+    'ESLint suppressed at build time')
+  add('remotePatternsWildcard', at(/hostname\s*:\s*['"]\*\*?['"]/), 'P2',
+    'image remotePatterns allows any host')
+  const hasHeaders = /\bheaders\s*\(\s*\)/.test(code) || /\bheaders\s*:\s*async/.test(code)
+  nextConfigFindings.push({ file: p, key: 'securityHeadersConfigured', present: hasHeaders })
 }
 
 // ---------- LLM surface ----------
@@ -404,10 +708,20 @@ const model = {
     routes: routes.length, tables: tables.size, envVars: envVars.length, llmSites: llmSites.length,
   },
   framework, artifacts,
+  // Coverage is a first-class output: what we could NOT analyze must be as visible as what we
+  // could, or a clean report reads as "safe" when it is really "unexamined".
+  graphCoverage: {
+    workspacePackages: [...workspacePackages].map(([name, dir]) => ({ name, dir })),
+    unresolvedWorkspaceImports,
+    barrelCount: [...files.keys()].filter(isBarrelCached).length,
+  },
   boundary: {
     clientSeeds: [...clientSeed].map(([f, why]) => ({ file: f, why })),
     serverSeeds: [...serverSeed].map(([f, why]) => ({ file: f, why })),
     clientReachable: [...clientReachable.keys()],
+    clientReachableDetail: [...clientReachable].map(([file, i]) => ({ file, ...i })),
+    barrels: [...files.keys()].filter(isBarrelCached),
+    serverOnlyModules: [...files.keys()].filter(hasServerOnly),
   },
   envVars: envVars.sort((a, b) => a.name.localeCompare(b.name)),
   routes,
@@ -417,12 +731,15 @@ const model = {
     // trust `rlsEnabled === true` from parserVersion < 2: v1 matched commented-out statements and
     // could report RLS as on when it was off.
     parserVersion: 2,
-    schemaSources: sqlFiles.length ? ['migrations'] : [],
+    coverage: schemaCoverage,
+    schemaSources,
     tables: [...tables.values()],
     functions: sqlFunctions,
     tablesUsedInCodeOnly: [...tablesUsedInCode.keys()].filter(t => !tables.has(t))
       .map(t => ({ table: t, usedIn: tablesUsedInCode.get(t) })),
   },
+  supabaseClients,
+  nextConfig: nextConfigFindings,
   llmSites,
   limits: [
     'Heuristic parsing (regex + import resolution), not a type-aware AST. May miss dynamic requires, re-exports through barrels, and monorepo aliases.',
