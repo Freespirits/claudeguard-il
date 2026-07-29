@@ -86,3 +86,49 @@ jobs:
             if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
             console.log('ok: engine still detects the planted P0s and still suppresses the known false positive');
           "
+
+      # The engine finding a fact is only half the job — the grader has to turn it into a Finding
+      # a user will act on. This asserts the end of the pipeline against a real fixture directory
+      # rather than a synthetic one, and checks the coverage equation, which is the guarantee that
+      # a quiet report is not just an unexamined one.
+      - name: Smoke-test the grader against the vulnerable fixture
+        run: |
+          node plugin/scripts/grader.mjs sample-vulnerable-app > /tmp/graded.json
+          node -e "
+            const r = require('/tmp/graded.json');
+            const fails = [];
+
+            if (r.verdict.level !== 'critical') {
+              fails.push('verdict must be critical on the vulnerable fixture, got ' + r.verdict.level);
+            }
+            // The verdict counts only confirmed findings, so this also proves the RLS and
+            // service-role P0s are still landing at definitive evidence rather than sliding to
+            // needs-review, where they would stop driving the badge.
+            if (r.verdict.confirmedP0 < 3) {
+              fails.push('expected at least 3 confirmed P0s, got ' + r.verdict.confirmedP0);
+            }
+            for (const id of ['CG-DB-001', 'CG-ENV-001']) {
+              if (!r.findings.some(f => f.id === id && f.confidence === 'confirmed')) {
+                fails.push(id + ' must still be produced as a confirmed finding');
+              }
+            }
+
+            // LAW 2: every enumerated subject is accounted for exactly once.
+            for (const [name, set] of Object.entries(r.coverage)) {
+              const c = set.counts;
+              const sum = c.pass + c.fail + c.undeterminable + c.allowlisted;
+              if (sum !== set.enumerated) {
+                fails.push('coverage set \"' + name + '\" does not add up: ' + sum + ' != ' + set.enumerated);
+              }
+            }
+
+            // LAW 1 and LAW 3, asserted on real output rather than trusted from the source.
+            for (const f of r.findings) {
+              if (f.evidence.nameOnly && f.severity === 'P0') {
+                fails.push('LAW 3: ' + f.id + ' raised a P0 on name-only evidence');
+              }
+            }
+
+            if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
+            console.log('ok: grader verdict, confirmed P0s and coverage accounting all hold');
+          "

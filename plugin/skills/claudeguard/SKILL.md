@@ -12,6 +12,18 @@ explain each in Hebrew and English with evidence, and generate paste-ready harde
 > **Community project — NOT an official Anthropic product.** Say this in every report header.
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic.
 
+## The pipeline
+
+**Engine → Facts → Grader → Findings → Reviewers → Report.**
+
+The split matters and is not optional. A deterministic layer computes what can be computed and
+grades it; you review only what it could not decide. Re-grading its output yourself destroys the
+one thing v2 promises — that the same repo always produces the same severities.
+
+Read `references/methodology/README.md` before your first scan. In Claude Code the engine and
+grader are real scripts; on claude.ai you apply the same method by hand from
+`references/methodology/`.
+
 ## Workflow (follow in order)
 
 1. **Detect** what the project is. Look for `package.json` (web/Node), `next.config.*`,
@@ -20,31 +32,48 @@ explain each in Hebrew and English with evidence, and generate paste-ready harde
    and any LLM SDK usage (`openai`, `anthropic`, `@google/generative-ai`) or Supabase/Firebase.
    Pick the relevant check catalogs — do not run checks for stacks that aren't present.
 
-2. **Scan (Tier 0, static — the default and always safe).** For each relevant domain, read the
-   matching catalog in `references/checks/` and apply every check to the actual code/config.
-   Prefer real scanners when available (see Claude Code specifics); otherwise read the code
-   directly. Collect candidate findings with exact `file:line` evidence.
+2. **Enumerate and grade (Tier 0, static — the default and always safe).**
+   *In Claude Code:* run `node ${CLAUDE_PLUGIN_ROOT}/scripts/grader.mjs <path>`. It runs the engine
+   itself and returns `findings`, `coverage` and a `verdict`. Do not re-derive severity from it.
+   *On claude.ai:* follow `references/methodology/enumerate.md` and `grade.md` against the pasted
+   files, and declare your enumeration incomplete wherever it is.
 
-3. **Verify (adversarial).** Before reporting, re-check each candidate against the real code and
-   drop false positives. Common false positives to suppress: the Supabase **anon** key or
-   Firebase **apiKey** flagged as "leaked" (they are public by design — the real issue is the
-   RLS/rules), and dependency CVEs in code paths that are never reached. Set `confidence` per
-   `references/severity-model.md`. Only `confirmed` findings may be auto-fixed.
+3. **Review what the rules could not decide.** Work `coverage.<set>.undeterminable` — those are
+   subjects that were enumerated but not settled, each with a reason. This is where the real value
+   is: authorization that is present but wrong, workflow flaws, IDOR, prompt injection reaching a
+   consequential tool. Findings you add carry `provenance: reviewer` and `evidence.strength:
+   judgement`, which caps them at confidence `likely`. **A reviewer's reading is never `confirmed`,
+   no matter how sure it feels.** Consult `references/checks/` for what to look for per domain.
 
-4. **Report.** Rank by severity (P0→P4) and render using `references/report-template.md` with
-   labels from `references/i18n/he.md` and `references/i18n/en.md`. Lead with a one-line risk
-   verdict and a P0/P1 count. Every finding: what+why, evidence, exploit scenario, business
-   impact — in Hebrew **and** English — plus the guard to apply.
+4. **Refute, never promote.** Re-check findings against the real code and drop false positives —
+   see `references/methodology/false-positives.md` for the catalogue, above all the Supabase
+   **anon** key and Firebase **apiKey** (public by design; the real issue is RLS/rules) and
+   unreachable dependency CVEs. You may **refute** a finding. You may never raise its confidence:
+   confidence is a pure function of evidence, so an upgrade path would let a persuasive argument
+   manufacture certainty.
 
-5. **Guard / fix.** For each finding, point to the specific recipe in `references/guard-recipes/`
-   and include the paste-ready snippet. Applying fixes is opt-in and dry-run first (see
-   `cg-fix`).
+5. **Report.** Render using `references/report-template.md` with labels from
+   `references/i18n/{he,en}.md`. The headline verdict counts **only `confirmed`** findings;
+   `likely` and `needs-review` go in the quieter section below it. Always print the coverage
+   section — it is what stops a quiet report from being mistaken for a safe one. Every finding:
+   what+why, evidence, exploit scenario, business impact — in Hebrew **and** English — plus the
+   guard to apply.
 
-## Severity
+6. **Guard / fix.** Each finding's `guard:` field names the recipe in `references/guard-recipes/`;
+   include the paste-ready snippet. Applying fixes is opt-in and dry-run first (see `cg-fix`), and
+   only `confirmed` + `autofixable` findings are eligible.
 
-Use P0–P4 from `references/severity-model.md`. Rule of thumb: anonymous full-compromise or total
-data exposure = **P0**; needs one easy step = **P1**; raises risk / eases attack = **P2**;
-hygiene = **P3**; informational = **P4**. Any currently-valid privileged secret is **P0**.
+## Severity and confidence
+
+Full policy in `references/severity-model.md`. The three things you must not get wrong:
+
+- **Severity is impact-if-true, and uncapped.** Never lower it because you are unsure — that is
+  confidence's job, and discounting twice buries a catastrophic-but-unproven issue where nobody
+  looks. Anonymous full-compromise or total data exposure = **P0**; needs one easy step = **P1**;
+  raises risk / eases attack = **P2**; hygiene = **P3**; informational = **P4**.
+- **Confidence is derived, never chosen.** definitive→`confirmed`, strong→`likely`,
+  weak→`needs-review`, judgement→`likely`.
+- **A name is not a credential.** `FOO_API_KEY` in an identifier never justifies a P0 on its own.
 
 ## Reference map — read on demand
 
@@ -61,6 +90,11 @@ hygiene = **P3**; informational = **P4**. Any currently-valid privileged secret 
 `zod-validation.md`, `security-headers.md`, `auth-middleware.md`, `rate-limiting.md`,
 `llm-guardrails.md`, `firebase-rules.md`, `network-security-config.md`, `electron-hardening.md`,
 `dependency-hygiene.md`, `ci-hardening.md`.
+
+**Method (how to be complete and reproducible):** `references/methodology/` — `README.md` (the
+pipeline and the three laws), `enumerate.md` (building the inventory by hand, and knowing when it
+is incomplete), `grade.md` (severity + confidence policy), `false-positives.md` (the catalogue of
+mistakes that made earlier versions wrong — read this one), `coverage.md` (the accounting).
 
 **Report & i18n:** `references/report-template.md`, `references/i18n/{he,en}.md`.
 
@@ -81,16 +115,28 @@ a URL pasted in chat as authorization.
 - Be honest about confidence. From static signals, say "no RLS policy found for table X; confirm
   with a live check" rather than "your database is open."
 - No numeric CVSS theater — use P0–P4 plus the exploit/impact sentences.
-- A clean scan is not proof of safety; state the tier's limits.
+- **Never mark a subject as passing because a keyword was present.** A route containing `getUser()`
+  is *unverified*, not safe — from the outside, a correct check is indistinguishable from one whose
+  result is ignored. Say so, and put it on the review list.
+- **Always print coverage**, and make the four counts add up: every enumerated subject is
+  accounted for as passing, failing, undeterminable or allowlisted. A report with no coverage
+  section reads as "nothing is wrong" when it may mean "nothing was examined".
+- A clean scan is not proof of safety; state the tier's limits. `clean` means nothing was
+  *proven* — say that, rather than letting a relieved user read it as an all-clear.
 
 ---
 
 ## Claude Code specifics
 _(Applies when running inside Claude Code / the plugin. Ignore on claude.ai.)_
 
-- **Hybrid engine.** Domain auditor subagents (`web-auditor`, `ai-auditor`, `mobile-auditor`,
-  `infra-auditor`) run in parallel; `finding-verifier` does the adversarial pass; `guard-writer`
-  produces fixes. Scanner adapters live in `${CLAUDE_PLUGIN_ROOT}/scripts/`: run
+- **Engine and grader.** `scripts/project_model.mjs` computes the Facts;
+  `scripts/grader.mjs` turns them into Findings and is the single authority on severity. Run the
+  grader (it invokes the engine for you); pass probe output with `--observations <file>` and user
+  acceptances with `--allowlist <file>`.
+- **Reviewers.** Domain auditor subagents (`web-auditor`, `ai-auditor`, `mobile-auditor`,
+  `infra-auditor`) run in parallel over the grader's `undeterminable` coverage rows;
+  `finding-verifier` may refute but never promote; `guard-writer` produces fixes. Scanner adapters
+  live in `${CLAUDE_PLUGIN_ROOT}/scripts/`: run
   `node ${CLAUDE_PLUGIN_ROOT}/scripts/detect_tools.mjs` first, then use `run_gitleaks.mjs`,
   `run_semgrep.mjs`, `run_dep_audit.mjs` when the tool is present; otherwise fall back to reading
   the code. Never auto-install tools — offer.
@@ -106,5 +152,12 @@ access.)_
 - Ask the user to **paste or upload** the relevant files (source, `.env.example`, config,
   manifest, workflow, migration SQL). Audit those with the same catalogs and produce the same
   bilingual report + guards. You cannot scan a whole repo, run scanners, or apply fixes here.
-- Do the verification pass and severity ranking yourself (no `finding-verifier` subagent).
+- There is no engine here, so **you are the engine**: follow `references/methodology/` step by
+  step rather than reading files and forming an impression. Enumerate first, grade second.
+- Your enumeration is almost certainly incomplete, because you only see what was pasted. Say so
+  explicitly in the coverage section — `enumerate.md` §7 tells you how to declare it. A report
+  that looks complete but saw three of eleven files is the most dangerous output this skill can
+  produce.
+- Do the refutation pass yourself (no `finding-verifier` subagent), under the same rule: refute
+  only, never promote.
 - Tiers 1–2 are not available here; recommend running the plugin for live testing.

@@ -25,8 +25,9 @@ const MAX_FILE = 1.5 * 1024 * 1024
 // Env prefixes that a bundler inlines into client output — definitive public exposure.
 const PUBLIC_PREFIXES = ['NEXT_PUBLIC_', 'VITE_', 'PUBLIC_', 'EXPO_PUBLIC_', 'REACT_APP_', 'GATSBY_', 'NUXT_PUBLIC_']
 
-// Secret-name classification, TIERED on purpose (severity Law 3: a NAME alone may never justify
-// a P0 — only a value, or a name from the small high-confidence set, may).
+// Secret-name classification, TIERED on purpose. The tier is a FACT about how much the name alone
+// establishes; the grader is what refuses to raise a P0 on a name-only basis. Keeping the tiers
+// here and the policy there means a rule change never requires re-reading the engine.
 //
 //   high  — the name alone is near-conclusive that this grants privileged access.
 //   weak  — looks secret-ish, but is very often a publishable key
@@ -260,8 +261,10 @@ const isBarrelCached = r => (barrelCache.has(r) ? barrelCache.get(r) : (barrelCa
 /**
  * BFS over the import graph, recording HOW strong each reachability claim is.
  *   strong — the file itself is a client entrypoint, or is directly imported by one.
- *   weak   — reached only transitively, or through a re-export barrel.
- * Severity Law 3: only `strong` may drive a P0; `weak` caps at P2/needs-review.
+ *   weak   — reached only transitively, or through a re-export barrel, where tree-shaking may
+ *            drop the module entirely so the chain might not exist in the shipped bundle.
+ * This strength is Evidence, and the grader maps Evidence to confidence. The engine states how
+ * solid the observation is; it does not decide what to do about it.
  */
 function propagate(seed) {
   const out = new Map()
@@ -327,8 +330,8 @@ for (const name of new Set([...envUsage.keys(), ...envDeclared.keys()])) {
   const exampleOnly = !!decl && decl.example === true && !decl.hasValue && usages.length === 0
   envVars.push({
     name, publicPrefix, secretClass,
-    // `secretish` retained for compatibility, but consumers should prefer secretClass:
-    // only 'high' may drive a P0 from the name alone (severity Law 3).
+    // `secretish` retained for compatibility, but consumers should prefer secretClass, which
+    // distinguishes a near-conclusive name from one that is merely credential-shaped.
     secretish: secretClass === 'high' || secretClass === 'weak',
     publicByDesign: secretClass === 'public-by-design',
     declared: decl,
@@ -353,7 +356,8 @@ for (const name of new Set([...envUsage.keys(), ...envDeclared.keys()])) {
     exposure: exampleOnly ? 'example-only'
       : publicPrefix ? 'bundler-inlined-public-prefix'
         : clientUses.length ? 'referenced-in-client-module' : 'server-only',
-    // Severity Law 3 — only a `definitive` exposure may drive a P0 on its own.
+    // Evidence strength for the exposure claim. `definitive` because the bundler substitutes the
+    // value textually — no inference is involved, so no link in the chain can break.
     exposureStrength: (publicPrefix && !exampleOnly) ? 'definitive' : 'n/a',
     exampleOnly,
     // Kept so a later rule can flag "this will be undefined in the browser" as a correctness
@@ -388,6 +392,10 @@ for (const [r, f] of files) {
     hasValidation: VALIDATE_HINT.test(f.text),
     usesServiceRole: /SERVICE_ROLE|service_role/.test(f.text),
     readsIdParam: /(params|query)\s*[.\[]\s*['"]?\w*id/i.test(f.text) || /\[\w*id\w*\]/i.test(r),
+    // Whether the handler consumes a request body at all. Without this, "no schema validation"
+    // fires on handlers that take no input, which is noise on correct code — and noise is what
+    // makes people stop reading the report.
+    readsBody: /\breq(uest)?\.json\s*\(|\breq(uest)?\.body\b|\.formData\s*\(|await\s+\w+\.json\s*\(/.test(f.text),
     ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id)/.test(f.text),
   })
 }
@@ -679,10 +687,17 @@ for (const [r, f] of files) {
 
 // ---------- next.config.js ----------
 //
-// `env:` and `publicRuntimeConfig` INLINE arbitrary server env vars into the client bundle — a P0
-// secret exposure with NO public prefix required, which defeats the entire prefix-based model.
-// Enumerable, high-value, and previously invisible to the engine.
-const nextConfigFindings = []
+// `env:` and `publicRuntimeConfig` INLINE arbitrary server env vars into the client bundle with NO
+// public prefix required, which defeats the entire prefix-based model. Enumerable, high-value, and
+// previously invisible to the engine.
+//
+// These are FACTS, not Findings: each one records that a key is set and what setting it does, and
+// says nothing about how bad that is. Severity for every key below lives in grader.mjs and nowhere
+// else — the engine holding a `severityHint` was the last place the policy was duplicated, and a
+// duplicated policy is one that drifts. Whether `env:` is a P0 or a P2 depends on whether this repo
+// has anything privileged to inline, which is a judgement about the whole model rather than about
+// this file, so only the grader is in a position to make it.
+const nextConfigFacts = []
 for (const p of allPaths.filter(x => /(^|\/)next\.config\.(m|c)?[jt]s$/.test(x))) {
   let raw; try { raw = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
   const { code } = stripJs(raw)
@@ -690,28 +705,41 @@ for (const p of allPaths.filter(x => /(^|\/)next\.config\.(m|c)?[jt]s$/.test(x))
     const m = re.exec(code)
     return m ? { line: code.slice(0, m.index).split(/\r?\n/).length, match: m[0].slice(0, 80) } : null
   }
-  const add = (key, hit, severityHint, why) => { if (hit) nextConfigFindings.push({ file: p, key, ...hit, severityHint, why }) }
-  add('env', at(/\benv\s*:\s*\{/), 'P0-if-secret',
+  const add = (key, hit, why) => { if (hit) nextConfigFacts.push({ file: p, key, ...hit, why }) }
+  add('env', at(/\benv\s*:\s*\{/),
     'next.config env: inlines these values into the CLIENT bundle regardless of prefix')
-  add('publicRuntimeConfig', at(/\bpublicRuntimeConfig\s*:\s*\{/), 'P0-if-secret',
+  add('publicRuntimeConfig', at(/\bpublicRuntimeConfig\s*:\s*\{/),
     'publicRuntimeConfig is shipped to the browser')
-  add('productionBrowserSourceMaps', at(/productionBrowserSourceMaps\s*:\s*true/), 'P3',
+  add('productionBrowserSourceMaps', at(/productionBrowserSourceMaps\s*:\s*true/),
     'source maps published to production')
-  add('ignoreBuildErrors', at(/ignoreBuildErrors\s*:\s*true/), 'P3',
+  add('ignoreBuildErrors', at(/ignoreBuildErrors\s*:\s*true/),
     'TypeScript errors suppressed at build time')
-  add('ignoreDuringBuilds', at(/ignoreDuringBuilds\s*:\s*true/), 'P3',
+  add('ignoreDuringBuilds', at(/ignoreDuringBuilds\s*:\s*true/),
     'ESLint suppressed at build time')
-  add('remotePatternsWildcard', at(/hostname\s*:\s*['"]\*\*?['"]/), 'P2',
+  add('remotePatternsWildcard', at(/hostname\s*:\s*['"]\*\*?['"]/),
     'image remotePatterns allows any host')
   const hasHeaders = /\bheaders\s*\(\s*\)/.test(code) || /\bheaders\s*:\s*async/.test(code)
-  nextConfigFindings.push({ file: p, key: 'securityHeadersConfigured', present: hasHeaders })
+  nextConfigFacts.push({ file: p, key: 'securityHeadersConfigured', present: hasHeaders })
 }
 
 // ---------- LLM surface ----------
+//
+// An LLM call site is a file that IMPORTS a provider SDK or CALLS one — not merely any file that
+// mentions a provider's name. The earlier substring test matched `OPENAI_API_KEY`, so a t3-env
+// schema declaring that variable was classified as a call site and then reported for having no
+// rate limit. That is the recommended env pattern earning a finding, which is the exact failure
+// mode this project exists to avoid: the tool punishing correct code teaches people to ignore it.
+const LLM_PKGS = new Set(['openai', '@anthropic-ai/sdk', '@google/generative-ai', 'ai',
+  'cohere-ai', 'replicate', '@mistralai/mistralai', 'groq-sdk', '@huggingface/inference'])
+// A direct call into a provider API. Kept as an independent signal so a hand-rolled fetch client,
+// which imports nothing, is still enumerated.
+const LLM_CALL_RE = /(chat\.completions\.create|messages\.create|generateText|streamText|generateObject|streamObject|getGenerativeModel|embeddings\.create|api\.(?:openai|anthropic)\.com|generativelanguage\.googleapis\.com)/
+
 const llmSites = []
 for (const [r, f] of files) {
-  const isLLM = /(openai|anthropic|generative-ai|@ai-sdk|generateText|streamText|chat\.completions|messages\.create|getGenerativeModel)/i.test(f.text)
-  if (!isLLM) continue
+  const importsProvider = [...(bareImports.get(r) || [])]
+    .some(p => LLM_PKGS.has(p) || p.startsWith('@ai-sdk/'))
+  if (!importsProvider && !LLM_CALL_RE.test(f.text)) continue
   llmSites.push({
     file: r,
     clientReachable: clientReachable.has(r),
@@ -738,6 +766,82 @@ const artifacts = {
   migrations: sqlFiles,
   envFiles,
   lockfiles: allPaths.filter(p => /(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|requirements\.txt)$/.test(p)),
+}
+
+// ---------- mobile manifests ----------
+//
+// WHY THIS EXISTS: until now the engine recorded mobile only as a list of file PATHS, so no rule
+// could grade anything on a phone app and the coverage ledger had no mobile subject set at all.
+// That meant the whole mobile domain fell outside the completeness guarantee — the report could
+// say "everything accounted for" while never having opened a manifest.
+//
+// It also cost severity. A reviewer reading a manifest can only ever produce `judgement` evidence,
+// which caps at `likely` and can never reach the verdict. But `android:debuggable="true"` in a
+// shipped app is not a judgement call: it is a flag with one meaning, and it belongs at
+// `definitive` like any other compiler-guaranteed fact.
+//
+// These are attribute reads on XML/plist text, not a full parser. Each records its own line so the
+// finding can point at it exactly.
+function lineOf(text, index) { return text.slice(0, index).split(/\r?\n/).length }
+
+const androidManifests = []
+for (const p of artifacts.androidManifest) {
+  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  // Blank XML comments first. A commented-out permission that still matched would misreport the
+  // manifest, which is the same class of bug that once made a commented-out `enable row level
+  // security` read as enabled.
+  const code = text.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
+  const attr = re => { const m = re.exec(code); return m ? { value: m[1], line: lineOf(code, m.index) } : null }
+
+  // Every component that is reachable by another app on the device. `exported` without a
+  // permission is the mobile equivalent of an unauthenticated route.
+  const exported = []
+  const COMPONENT_RE = /<(activity|activity-alias|service|receiver|provider)\b([^>]*)>/gi
+  let cm
+  while ((cm = COMPONENT_RE.exec(code))) {
+    const [, kind, attrs] = cm
+    const isExported = /android:exported\s*=\s*"true"/i.test(attrs)
+    if (!isExported) continue
+    const nameM = /android:name\s*=\s*"([^"]+)"/i.exec(attrs)
+    exported.push({
+      kind,
+      name: nameM ? nameM[1] : '(unnamed)',
+      line: lineOf(code, cm.index),
+      // A permission-guarded export is a deliberate, controlled interface.
+      hasPermission: /android:(permission|readPermission|writePermission)\s*=/i.test(attrs),
+    })
+  }
+
+  androidManifests.push({
+    file: p,
+    debuggable: attr(/android:debuggable\s*=\s*"(true|false)"/i),
+    allowBackup: attr(/android:allowBackup\s*=\s*"(true|false)"/i),
+    usesCleartextTraffic: attr(/android:usesCleartextTraffic\s*=\s*"(true|false)"/i),
+    // Its PRESENCE is what matters: a network security config is how cleartext gets scoped to
+    // named domains instead of allowed globally.
+    networkSecurityConfig: attr(/android:networkSecurityConfig\s*=\s*"([^"]+)"/i),
+    exportedComponents: exported,
+  })
+}
+
+const iosPlists = []
+for (const p of artifacts.infoPlist) {
+  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const code = text.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
+  // In a plist, `<key>X</key><true/>` is the shape. Match the key and the value that follows it.
+  const boolKey = name => {
+    const m = new RegExp(`<key>\\s*${name}\\s*</key>\\s*<(true|false)\\s*/>`, 'i').exec(code)
+    return m ? { value: m[1] === 'true', line: lineOf(code, m.index) } : null
+  }
+  iosPlists.push({
+    file: p,
+    // ATS off globally means the app will talk plaintext HTTP to anywhere.
+    allowsArbitraryLoads: boolKey('NSAllowsArbitraryLoads'),
+    allowsArbitraryLoadsInWebContent: boolKey('NSAllowsArbitraryLoadsInWebContent'),
+    hasAtsBlock: /<key>\s*NSAppTransportSecurity\s*<\/key>/i.test(code),
+    // Domain-scoped exceptions are the correct way to allow one legacy host.
+    hasExceptionDomains: /<key>\s*NSExceptionDomains\s*<\/key>/i.test(code),
+  })
 }
 
 const model = {
@@ -781,8 +885,9 @@ const model = {
   },
   supabaseClients,
   envGuards,
-  nextConfig: nextConfigFindings,
+  nextConfig: nextConfigFacts,
   llmSites,
+  mobile: { android: androidManifests, ios: iosPlists },
   limits: [
     'Heuristic parsing (regex + import resolution), not a type-aware AST. May miss dynamic requires, re-exports through barrels, and monorepo aliases.',
     'Client/server classification is decisive for public env prefixes and "use client" chains; other cases are reported as weaker signals.',
