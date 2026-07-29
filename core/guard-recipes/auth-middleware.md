@@ -41,6 +41,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 }
 ```
 
+<a id="role-check"></a>
 ## Role / permission checks (stops privilege escalation)
 
 ```ts

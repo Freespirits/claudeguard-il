@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { auditBusinessLogic, loadIntent, proposeIntent, renderIntentYaml, TAXONOMY } from './business_logic.mjs'
 
 // ---------------------------------------------------------------------------
 // Policy tables — the whole severity model, in one readable place.
@@ -977,6 +978,193 @@ function gradeSupabaseClients(model, ledger, findings, allow) {
 // grades `definitive` like any other build-guaranteed fact.
 // ---------------------------------------------------------------------------
 
+// Gradle source sets that are NOT compiled into a release build. `npx react-native init` ships
+// `android/app/src/debug/AndroidManifest.xml` with `usesCleartextTraffic="true"` so Metro can talk
+// to the device, and `androidTest` manifests routinely set debuggable — grading either as if it
+// shipped put a `confirmed` finding and a `medium`/`high` verdict on a verbatim framework template.
+const NON_RELEASE_SOURCE_SETS = new Set(['debug', 'androidTest', 'test', 'benchmark'])
+
+// A permission is only a boundary if another app cannot simply hold it. `normal` (Android's default
+// when protectionLevel is omitted) is granted to every app at install with no prompt, and
+// `dangerous` is granted by a user tap — neither keeps anyone out. `checks/android.md` requires a
+// signature-level permission.
+const SIGNATURE_PROTECTION = /\bsignature\b|\bsignatureOrSystem\b|\bknownSigner\b/i
+
+/**
+ * The subject id for one exported component.
+ *
+ * It used to be `android-component:${file}:${name}`, and `name` falls back to a constant whenever
+ * the name attribute cannot be read. Two such components collided, which either swallowed the
+ * second row silently (coverage arithmetic short by one) or — when their dispositions differed —
+ * threw LAW 2 and produced NO REPORT AT ALL. The id is positional now, so two components can only
+ * collide by being the same element.
+ */
+const componentSubject = (man, c) => `android-component:${man.file}:${c.kind}:${c.line}:${c.name}`
+
+/**
+ * Walk every reachable component in one manifest. The mobile equivalent of walking every route.
+ * Returns a one-clause summary for the manifest's own ledger note, or null when there are none.
+ */
+function gradeExportedComponents(man, ledger, findings, allow) {
+  const counts = { fail: 0, pass: 0, undeterminable: 0, allowlisted: 0 }
+  // `Number(null)` and `Number('')` are both 0, which would read an UNKNOWN targetSdk as "30 or
+  // below" and turn an undeterminable row into a confident finding on every manifest that does not
+  // state one — which is nearly all of them, since the value normally lives in Gradle.
+  const targetSdk = /^\d+$/.test(String(man.targetSdkVersion ?? '')) ? Number(man.targetSdkVersion) : NaN
+
+  for (const c of man.exportedComponents || []) {
+    const cs = componentSubject(man, c)
+    const record = (disposition, note) => { counts[disposition]++; ledger.record('exportedComponents', cs, disposition, note) }
+
+    if (allow.has(cs)) { record('allowlisted', 'user allowlist'); continue }
+
+    // The home-screen entry point. Every Android app that exists has one, the platform requires it
+    // to be exported, and the remediation the old rule handed out — set `exported="false"` or
+    // require a permission — makes the app UNLAUNCHABLE. This was the single most damaging false
+    // positive in the tool: four untouched framework templates graded `medium` because of it.
+    if (c.isLauncher) {
+      record('allowlisted', `${c.kind} is the MAIN/LAUNCHER entry point; the platform requires it to be exported`)
+      continue
+    }
+
+    // `android:exported="@bool/…"` is resolved per build variant, so which one ships is not a fact
+    // this tier holds.
+    if (c.exportState === 'unresolved') {
+      record('undeterminable', `android:exported="${c.exportedAttr}" is a resource reference resolved per build variant — check what the release variant sets`)
+      continue
+    }
+
+    if (c.permission) {
+      // A permission-guarded export is a deliberate, controlled interface — but only if another app
+      // cannot simply hold the permission. When this manifest declares it, its protectionLevel is
+      // readable, and `normal` (Android's default when omitted) is granted to any app at install
+      // with no prompt. That is a checkmark over no guard at all.
+      const declared = (man.declaredPermissions || []).find(p => p.name === c.permission)
+      if (declared && !SIGNATURE_PROTECTION.test(declared.protectionLevel)) {
+        emitExportedComponentFinding(man, c, findings,
+          `android:permission="${c.permission}" is declared in this manifest with protectionLevel="${declared.protectionLevel}", which Android grants to any app at install, so the export is not guarded.`)
+        record('fail', `${c.kind} exported behind ${c.permission}, whose protectionLevel="${declared.protectionLevel}" is not a boundary`)
+        continue
+      }
+      // Structural pass: the guard is declared in the manifest and enforced by the platform, not
+      // inferred from a token in code.
+      record('pass', declared
+        ? `${c.kind} exported behind ${c.permission} (protectionLevel="${declared.protectionLevel}")`
+        : `${c.kind} exported behind the declared permission ${c.permission}`)
+      continue
+    }
+
+    // Exported BY DEFAULT: an intent-filter and no explicit `android:exported`. `checks/android.md`
+    // has always required this case and the engine could not see it, because the old component
+    // window stopped before the element's children. Android 12 (targetSdk 31) makes the missing
+    // attribute a build error, so a manifest in this state must be targeting 30 or lower — where
+    // the filter DOES export it. We cannot read targetSdk from Gradle, so unless the manifest
+    // states it, the honest answer is undeterminable rather than a confident finding.
+    if (c.exportState === 'default-exported') {
+      if (Number.isFinite(targetSdk) && targetSdk <= 30) {
+        emitExportedComponentFinding(man, c, findings,
+          `the ${c.kind} declares an <intent-filter> and no android:exported, and this manifest targets SDK ${targetSdk}, where that makes it exported to every app on the device.`)
+        record('fail', `${c.kind} exported by default through an intent-filter (targetSdk ${targetSdk})`)
+      } else {
+        record('undeterminable',
+          `${c.kind} declares an <intent-filter> and no android:exported — on targetSdk 30 and below that exports it to every app on the device; set android:exported explicitly and confirm which value the release build uses`)
+      }
+      continue
+    }
+
+    emitExportedComponentFinding(man, c, findings,
+      'android:exported="true" is set with no android:permission, so any app on the device may invoke it.')
+    record('fail', `${c.kind} exported with no permission`)
+  }
+
+  const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  if (!total) return null
+  const parts = Object.entries(counts).filter(([, n]) => n).map(([d, n]) => `${n} ${d}`)
+  return `${total} reachable component${total === 1 ? '' : 's'}: ${parts.join(', ')}`
+}
+
+function emitExportedComponentFinding(man, c, findings, why) {
+  // A content provider hands out data directly, so an unguarded one is worse than an activity.
+  findings.push(finding({
+    id: 'CG-AND-004', subject: componentSubject(man, c),
+    title_en: `Exported ${c.kind} "${c.name}" has no permission guard`,
+    title_he: `הרכיב המיוצא "${c.name}" מסוג ${c.kind} אינו מוגן בהרשאה`,
+    severity: c.kind === 'provider' ? 'P1' : 'P2', evidence: 'definitive',
+    why,
+    at: firstAt(man.file, c.line),
+    exploit: `A malicious app installed alongside yours invokes this ${c.kind} directly, with no user involvement.`,
+    impact: c.kind === 'provider'
+      ? 'Any installed app reads or writes the data this provider exposes.'
+      : 'Any installed app drives this component, bypassing whatever your UI would have required.',
+    guard: 'guard-recipes/network-security-config.md#exported',
+    cwe: 'CWE-926', owasp: 'M1',
+  }))
+}
+
+/**
+ * Grade the `res/xml/network_security_config.xml` a manifest points at.
+ *
+ * Before this the file was never in `artifacts`, never read and never declared, while its mere
+ * mention in the manifest bought a `pass` reading "no debuggable, cleartext or backup exposure
+ * declared" — over a config permitting cleartext to every host and trusting any CA the phone's
+ * owner installs. `checks/android.md` lists both, and the guard recipe is written around this
+ * exact file.
+ */
+function gradeNetworkSecurityConfigs(model, ledger, findings, allow) {
+  for (const nsc of model.mobile?.networkSecurityConfigs || []) {
+    const subject = `android-network-config:${nsc.file}`
+    if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
+    if (NON_RELEASE_SOURCE_SETS.has(nsc.sourceSet)) {
+      ledger.record('mobileArtifacts', subject, 'allowlisted',
+        `src/${nsc.sourceSet} source set — never compiled into a release build`)
+      continue
+    }
+    if (!nsc.readable) {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        'the manifest points at this network security config and it could not be read — open it and confirm cleartextTrafficPermitted="false" and no <certificates src="user"/>')
+      continue
+    }
+
+    const problems = []
+    if (nsc.baseCleartext) {
+      findings.push(finding({
+        id: 'CG-AND-002', subject,
+        title_en: 'App permits unencrypted HTTP to any host',
+        title_he: 'האפליקציה מתירה תעבורת HTTP לא מוצפנת לכל שרת',
+        severity: 'P2', evidence: 'definitive',
+        why: 'the network security config sets cleartextTrafficPermitted="true" on <base-config>, which applies to every destination.',
+        at: firstAt(nsc.file, nsc.baseCleartext.line, '<base-config cleartextTrafficPermitted="true">'),
+        exploit: 'Anyone on the same Wi-Fi reads and rewrites the app\'s traffic, including tokens.',
+        impact: 'Account takeover and content tampering on any untrusted network.',
+        guard: 'guard-recipes/network-security-config.md#cleartext',
+        cwe: 'CWE-319', owasp: 'M3', autofixable: true,
+      }))
+      problems.push('cleartext permitted to every host')
+    }
+    if (nsc.trustsUserCas) {
+      findings.push(finding({
+        id: 'CG-AND-005', subject,
+        title_en: 'App trusts certificate authorities the phone\'s owner installed',
+        title_he: 'האפליקציה סומכת על רשויות אישורים שהותקנו על ידי בעל המכשיר',
+        severity: 'P2', evidence: 'definitive',
+        why: '<certificates src="user"/> sits outside <debug-overrides>, so the release build trusts any CA added to the device\'s user store.',
+        at: firstAt(nsc.file, nsc.trustsUserCas.line, '<certificates src="user" />'),
+        exploit: 'Anyone who can get a certificate onto the device — an intercepting proxy, a work profile, a phishing page that asks the user to install a profile — reads and rewrites HTTPS traffic, and nothing about the connection looks wrong.',
+        impact: 'HTTPS stops being a control: tokens and request bodies are readable in transit.',
+        guard: 'guard-recipes/network-security-config.md#user-cas',
+        cwe: 'CWE-295', owasp: 'M3',
+      }))
+      problems.push('trusts user-installed CAs')
+    }
+
+    if (problems.length) { ledger.record('mobileArtifacts', subject, 'fail', problems.join(', ')); continue }
+    const scoped = nsc.domainCleartext.flatMap(d => d.domains)
+    ledger.record('mobileArtifacts', subject, 'pass', scoped.length
+      ? `cleartext scoped to ${scoped.join(', ')}; system trust anchors only`
+      : 'cleartext not permitted; no user trust anchors outside debug-overrides')
+  }
+}
+
 function gradeMobile(model, ledger, findings, allow) {
   ledger.declare('mobileArtifacts')
   ledger.declare('exportedComponents')
@@ -984,7 +1172,23 @@ function gradeMobile(model, ledger, findings, allow) {
   for (const man of model.mobile?.android || []) {
     const subject = `android-manifest:${man.file}`
     if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
+
+    // Debug/test source sets first: none of the release-flag rules below applies to a file that no
+    // release build compiles, and running them there is a false positive by construction.
+    if (NON_RELEASE_SOURCE_SETS.has(man.sourceSet)) {
+      ledger.record('mobileArtifacts', subject, 'allowlisted',
+        `src/${man.sourceSet} source set — merged into debug and test builds only, never into a release build`)
+      for (const c of man.exportedComponents || []) {
+        ledger.record('exportedComponents', componentSubject(man, c), 'allowlisted',
+          `declared in the src/${man.sourceSet} source set, which no release build compiles`)
+      }
+      continue
+    }
+
+    // `problems` produce findings and make the manifest row `fail`. `unresolved` produce no finding
+    // and make it `undeterminable` — the honest disposition for a value this tier cannot settle.
     const problems = []
+    const unresolved = []
 
     if (man.debuggable?.value === 'true') {
       findings.push(finding({
@@ -996,15 +1200,27 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(man.file, man.debuggable.line, 'android:debuggable="true"'),
         exploit: 'Anyone with the installed app attaches a debugger, reads memory and stored data, and steps through your logic.',
         impact: 'Every secret the app holds at runtime — tokens, keys, user data — is readable on any device.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/network-security-config.md#debuggable',
         cwe: 'CWE-489', owasp: 'M8', autofixable: true,
       }))
       problems.push('debuggable')
     }
 
+    // A value the manifest defers to a build variant (`@bool/cleartext`, `${placeholder}`) is
+    // UNKNOWN, not false. Reading it as absent printed "no debuggable, cleartext or backup exposure
+    // declared" over a manifest that declares exactly that, conditionally.
+    for (const [name, f] of [['debuggable', man.debuggable], ['allowBackup', man.allowBackup],
+      ['usesCleartextTraffic', man.usesCleartextTraffic]]) {
+      if (f && !f.resolved) {
+        unresolved.push(`android:${name}="${f.value}" is a resource reference resolved per build variant — check what the release variant sets`)
+      }
+    }
+
     // Cleartext is only a problem when nothing scopes it. A network security config is exactly the
-    // mechanism for allowing one legacy host without opening everything, so crediting it here is
-    // what keeps a correctly-configured app quiet.
+    // mechanism for allowing one legacy host without opening everything — but crediting its mere
+    // PRESENCE was LAW 1: a `pass` bought by a token. The referenced file is now resolved and
+    // graded as its own subject below; what is left here is the case where nothing scopes it, and
+    // the case where the reference names a file this repo does not contain.
     if (man.usesCleartextTraffic?.value === 'true' && !man.networkSecurityConfig) {
       findings.push(finding({
         id: 'CG-AND-002', subject,
@@ -1015,87 +1231,99 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(man.file, man.usesCleartextTraffic.line, 'android:usesCleartextTraffic="true"'),
         exploit: 'Anyone on the same Wi-Fi reads and rewrites the app\'s traffic, including tokens.',
         impact: 'Account takeover and content tampering on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/network-security-config.md#cleartext',
         cwe: 'CWE-319', owasp: 'M3', autofixable: true,
       }))
       problems.push('cleartext')
+    } else if (man.networkSecurityConfig && !man.networkSecurityConfigFile) {
+      unresolved.push(`networkSecurityConfig="${man.networkSecurityConfig.value}" names a resource this repo does not contain — open it and confirm cleartextTrafficPermitted="false" and no <certificates src="user"/>`)
     }
 
-    if (man.allowBackup?.value === 'true') {
-      findings.push(finding({
-        id: 'CG-AND-003', subject,
-        title_en: 'App data can be extracted with adb backup',
-        title_he: 'ניתן לחלץ את נתוני האפליקציה באמצעות adb backup',
-        severity: 'P3', evidence: 'definitive',
-        why: 'android:allowBackup="true" permits the platform backup agent to copy the app\'s private data.',
-        at: firstAt(man.file, man.allowBackup.line, 'android:allowBackup="true"'),
-        exploit: 'Someone with brief physical access to an unlocked device copies the app\'s private storage over USB.',
-        impact: 'Stored tokens and local data leave the device without root.',
-        guard: 'guard-recipes/network-security-config.md',
-        cwe: 'CWE-530', owasp: 'M9', autofixable: true,
-      }))
-      problems.push('allowBackup')
+    // `android:allowBackup` is the platform DEFAULT (`true`), so a manifest that sets it explicitly
+    // behaves identically to one that omits it — and the old rule fired on the first and stayed
+    // silent on the second, which graded the template author's typing habit rather than the app.
+    // It fired on Android Studio's own "Empty Activity" and on Capacitor. Since Android 12 `adb
+    // backup` no longer includes app data at all. What is actually worth a human minute is what the
+    // backup SET contains, which is what an undeterminable row with an instruction delivers.
+    if (man.allowBackup?.value === 'true' || man.allowBackup == null) {
+      const scoped = [man.dataExtractionRules && `dataExtractionRules="${man.dataExtractionRules.value}"`,
+        man.fullBackupContent && `fullBackupContent="${man.fullBackupContent.value}"`].filter(Boolean)
+      unresolved.push(scoped.length
+        ? `backup is on (the platform default) and scoped by ${scoped.join(' and ')} — open those rules and confirm tokens and credentials are excluded`
+        : 'backup is on (the platform default) and nothing scopes it — set android:allowBackup="false", or add dataExtractionRules that exclude tokens and credentials')
     }
 
+    // Components first, so the manifest's own row can say what happened to them. The old note
+    // ("no debuggable, cleartext or backup exposure declared") was emitted verbatim even when that
+    // manifest's own components failed in the other set, and read as an all-clear on the artifact.
+    const componentOutcome = gradeExportedComponents(man, ledger, findings, allow)
+
+    const note = problems.length ? problems.join(', ')
+      : unresolved.length ? unresolved.join('; ')
+        : 'no debuggable or cleartext flag set, and android:allowBackup="false"'
     ledger.record('mobileArtifacts', subject,
-      problems.length ? 'fail' : 'pass',
-      problems.length ? problems.join(', ') : 'no debuggable, cleartext or backup exposure declared')
-
-    // Each exported component is separately enumerable, so each gets its own row — the mobile
-    // equivalent of walking every route.
-    for (const c of man.exportedComponents || []) {
-      const cs = `android-component:${man.file}:${c.name}`
-      if (allow.has(cs)) { ledger.record('exportedComponents', cs, 'allowlisted', 'user allowlist'); continue }
-      if (c.hasPermission) {
-        // A permission-guarded export is a deliberate, controlled interface. This is a structural
-        // pass: the guard is declared in the manifest, not inferred from a token in code.
-        ledger.record('exportedComponents', cs, 'pass', `${c.kind} exported behind a declared permission`)
-        continue
-      }
-      // A content provider hands out data directly, so an unguarded one is worse than an activity.
-      const severity = c.kind === 'provider' ? 'P1' : 'P2'
-      findings.push(finding({
-        id: 'CG-AND-004', subject: cs,
-        title_en: `Exported ${c.kind} "${c.name}" has no permission guard`,
-        title_he: `הרכיב המיוצא "${c.name}" מסוג ${c.kind} אינו מוגן בהרשאה`,
-        severity, evidence: 'definitive',
-        why: `android:exported="true" is set with no android:permission, so any app on the device may invoke it.`,
-        at: firstAt(man.file, c.line),
-        exploit: `A malicious app installed alongside yours invokes this ${c.kind} directly, with no user involvement.`,
-        impact: c.kind === 'provider'
-          ? 'Any installed app reads or writes the data this provider exposes.'
-          : 'Any installed app drives this component, bypassing whatever your UI would have required.',
-        guard: 'guard-recipes/network-security-config.md',
-        cwe: 'CWE-926', owasp: 'M1',
-      }))
-      ledger.record('exportedComponents', cs, 'fail', `${c.kind} exported with no permission`)
-    }
+      problems.length ? 'fail' : unresolved.length ? 'undeterminable' : 'pass',
+      componentOutcome ? `${note} (${componentOutcome})` : note)
   }
+
+  gradeNetworkSecurityConfigs(model, ledger, findings, allow)
 
   for (const pl of model.mobile?.ios || []) {
     const subject = `ios-plist:${pl.file}`
     if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
 
+    // A plist Xcode wrote in the BINARY format — which is what ships inside an IPA — has no
+    // textual `<key>X</key><true/>` to read, so every ATS fact came back null and the plist earned
+    // a `pass` reading "ATS left at the secure platform default". That checkmark was bought by the
+    // file being unreadable, which is the one reason a checkmark may never rest on.
+    if (pl.format && pl.format !== 'xml') {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        `this plist is in ${pl.format === 'binary' ? 'the binary' : 'an unrecognised'} format, which the static tier cannot read — convert it (\`plutil -convert xml1\`) or open it in Xcode and confirm NSAppTransportSecurity, CFBundleURLTypes and any hardcoded values against checks/ios.md`)
+      continue
+    }
+
+    const problems = []
+
+    // On iOS 10+ NSAllowsArbitraryLoads is IGNORED when any of NSAllowsArbitraryLoadsInWebContent,
+    // NSAllowsArbitraryLoadsForMedia or NSAllowsLocalNetworking is present — the narrower key
+    // governs instead. So "ATS is off everywhere" stops being a definitive read of the file and
+    // becomes a claim about the deployment target, which lives in the pbxproj, not here. Severity
+    // is unchanged (impact-if-true is the same); the uncertainty is paid for in evidence, and the
+    // finding now names the assumption a five-second check settles.
+    const atsOverride = [
+      pl.allowsArbitraryLoadsInWebContent?.value === true && 'NSAllowsArbitraryLoadsInWebContent',
+      pl.allowsArbitraryLoadsForMedia?.value === true && 'NSAllowsArbitraryLoadsForMedia',
+      pl.allowsLocalNetworking?.value === true && 'NSAllowsLocalNetworking',
+    ].filter(Boolean)
+
     if (pl.allowsArbitraryLoads?.value === true) {
+      const overridden = atsOverride.length > 0
       findings.push(finding({
         id: 'CG-IOS-001', subject,
         title_en: 'App Transport Security is disabled for all hosts',
         title_he: 'מנגנון App Transport Security מבוטל עבור כל השרתים',
-        severity: 'P2', evidence: 'definitive',
-        why: 'NSAllowsArbitraryLoads is true, which turns off the platform requirement for HTTPS.',
+        severity: 'P2', evidence: overridden ? 'weak' : 'definitive',
+        why: overridden
+          ? `NSAllowsArbitraryLoads is true, but ${atsOverride.join(' / ')} is also set, and iOS 10 and later ignore NSAllowsArbitraryLoads whenever one of those is present.`
+          : 'NSAllowsArbitraryLoads is true, which turns off the platform requirement for HTTPS.',
         at: firstAt(pl.file, pl.allowsArbitraryLoads.line, 'NSAllowsArbitraryLoads'),
         exploit: 'Anyone on the same network reads and rewrites the app\'s traffic, including tokens.',
         impact: 'Account takeover and content tampering on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/ios-ats.md#arbitrary-loads',
         cwe: 'CWE-319', owasp: 'M3',
-        assumption: pl.hasExceptionDomains
-          ? 'That the NSExceptionDomains block does not already restrict this to hosts you control.'
-          : null,
+        assumption: overridden
+          ? `That this target still deploys to iOS 9, where NSAllowsArbitraryLoads is honoured. On iOS 10 and later ${atsOverride.join(' / ')} governs instead and this key does nothing.`
+          : pl.hasExceptionDomains
+            ? 'That the NSExceptionDomains block does not already restrict this to hosts you control.'
+            : null,
       }))
-      ledger.record('mobileArtifacts', subject, 'fail', 'ATS disabled globally')
-      continue
+      problems.push(overridden
+        ? `NSAllowsArbitraryLoads is set but ${atsOverride.join(' / ')} overrides it on iOS 10+`
+        : 'ATS disabled globally')
     }
 
+    // Not `else`: when both keys are set, the web-content key is the one iOS 10+ honours, so it is
+    // the accurate statement about the app and must not be swallowed by the broader finding.
     if (pl.allowsArbitraryLoadsInWebContent?.value === true) {
       findings.push(finding({
         id: 'CG-IOS-002', subject,
@@ -1106,10 +1334,19 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(pl.file, pl.allowsArbitraryLoadsInWebContent.line, 'NSAllowsArbitraryLoadsInWebContent'),
         exploit: 'Content loaded in a web view can be rewritten in transit and then runs in your app\'s context.',
         impact: 'Injected content inside the app, on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/ios-ats.md#web-content',
         cwe: 'CWE-319', owasp: 'M3',
       }))
-      ledger.record('mobileArtifacts', subject, 'fail', 'ATS disabled for web content')
+      problems.push('ATS disabled for web content')
+    }
+
+    if (problems.length) { ledger.record('mobileArtifacts', subject, 'fail', problems.join(', ')); continue }
+
+    // Per-domain `NSExceptionAllowsInsecureHTTPLoads` is a documented P2 in checks/ios.md when it
+    // is broad, and "broad" is a judgement no rule here makes. Declared rather than passed over.
+    if (pl.insecureHttpExceptions > 0) {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        `${pl.insecureHttpExceptions} NSExceptionDomains entr${pl.insecureHttpExceptions === 1 ? 'y allows' : 'ies allow'} insecure HTTP loads — open the block and confirm each host is one you control and genuinely cannot serve HTTPS`)
       continue
     }
 
@@ -1589,6 +1826,95 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Business logic — the one tier that cannot be proven, only reviewed.
+//
+// Every other rule asks a question the code answers by itself: is RLS on, is the key behind a public
+// prefix, does this handler compare a column. This one asks what the app is SUPPOSED to permit, and
+// the code cannot say. "User A can read user B's order" is a critical bug in a store and a
+// deliberate feature in an admin console — byte-identical code, opposite verdicts.
+//
+// So this layer never proves anything. It checks code against a STATED intent, and every finding it
+// makes is a reviewer's lead: `judgement` evidence, `reviewer` provenance, capped at `likely`, and
+// therefore unable to move the verdict, which counts only `confirmed`. The assertion under
+// OBSERVATION_POLICY enforces that at module load so a later edit cannot quietly promote a guess
+// about business rules into a certainty.
+// ---------------------------------------------------------------------------
+function gradeBusinessLogic(model, ledger, findings, allow, opts) {
+  const audit = auditBusinessLogic(model, {
+    intent: opts.intent ?? null,
+    intentError: opts.intentError ?? null,
+  })
+
+  ledger.declare('businessLogic')
+  ledger.declare('businessLogicScope')
+
+  const emit = o => {
+    const p = OBSERVATION_POLICY[o.kind]
+    // A kind with no policy is a wiring bug, not a finding. Declaring it keeps the arithmetic exact
+    // and makes the gap visible instead of dropping the observation on the floor.
+    if (!p) {
+      ledger.record('businessLogic', o.subject, 'undeterminable', `no policy owns business-logic kind "${o.kind}"`)
+      return
+    }
+    findings.push(finding({
+      id: p.id, subject: o.subject,
+      title_en: p.title_en, title_he: p.title_he,
+      severity: p.sev, evidence: p.evidence, provenance: p.provenance,
+      why: o.detail || p.title_en,
+      at: Array.isArray(o.at) ? o.at : [],
+      exploit: p.exploit, impact: p.impact, guard: p.guard,
+      cwe: p.cwe || null, owasp: p.owasp || null,
+      tier: 'business-logic', autofixable: false,
+      assumption: p.assumption || null,
+    }))
+  }
+
+  // Which handler touches which resource. Declared per route, because attributing a `.from('orders')`
+  // to one of twelve handlers sharing a file by proximity would be a guess wearing a fact's clothes.
+  for (const row of audit.scope) ledger.record('businessLogicScope', row.subject, row.disposition, row.note)
+
+  // The three classes no fact supports, the intent's free-form prose rules, resources the intent
+  // names that do not exist, and tables the intent says nothing about.
+  for (const row of [...audit.global, ...audit.extra]) {
+    ledger.record('businessLogic', row.subject, row.disposition, row.note)
+  }
+
+  const observed = new Map(audit.observations.map(o => [o.subject, o]))
+
+  for (const r of audit.resources) {
+    for (const c of r.classes) {
+      const subject = `bl:${r.resource}:${c.class}`
+      if (allow.has(subject)) {
+        ledger.record('businessLogic', subject, 'allowlisted', 'user allowlist')
+        continue
+      }
+      ledger.record('businessLogic', subject, c.disposition, c.note)
+      const o = observed.get(subject)
+      if (o) emit(o)
+    }
+  }
+
+  // An unconfirmed intent is a COVERAGE LIMITATION, never a finding — and this is the one place the
+  // distinction earns its keep. Emitting it as a finding put `CG-BIZ-010 P2` on every repository
+  // that has no claudeguard.intent.yml, which is every repository on its first run: the tool would
+  // have reported a security finding because the user had not configured it yet. Nothing about the
+  // app is wrong; something about our knowledge of it is, and that belongs in the coverage table.
+  //
+  // It is still recorded loudly. `businessLogic.status`, the assumptions list and the proposed
+  // intent file all travel in the report, so the section cannot be mistaken for a confirmed clean
+  // result — it just does not manufacture a P-level for a missing config file.
+  const banner = audit.observations.find(o => o.kind === 'bl-intent-unconfirmed')
+  if (banner) {
+    ledger.record('businessLogic', banner.subject, 'undeterminable',
+      audit.error
+        ? `claudeguard.intent.yml could not be read (${audit.error}), so it was ignored entirely and every ownership model below was assumed from column names`
+        : 'no claudeguard.intent.yml was provided, so every ownership model below was assumed from column names rather than confirmed by the author')
+  }
+
+  return audit
+}
+
 /**
  * GRADE OR DECLARE — the safety net.
  *
@@ -1622,6 +1948,58 @@ function declareUngradedSurfaces(model, ledger) {
   for (const f of model.iac?.k8sManifests || []) {
     ledger.record('ungradedSurfaces', `k8s:${f}`, 'undeterminable',
       'this is a Kubernetes manifest; the static tier does not grade privileged securityContexts, hostPath mounts, or secrets held in a manifest — review it against guard-recipes/container-iac.md')
+  }
+
+  // A mobile framework declared with zero manifests and zero plists enumerated. This is the modal
+  // shape for this audience — a managed Expo app has no `android/` or `ios/` directory at all —
+  // and every mobile subject set reported a confident 0, which the report renders as
+  // `mobileArtifacts | 0 | 0 | 0 | 0 | 0`: indistinguishable from "there is no mobile surface".
+  for (const gap of model.discovery?.mobile?.frameworkGaps || []) {
+    ledger.record('ungradedSurfaces', `mobile-framework:${gap.framework}`, 'undeterminable', gap.reason)
+  }
+
+  // Native and Dart source, and the Android build config. THE LARGEST HOLE the mobile audit found:
+  // `CODE_EXT` has no `.kt`, `.java`, `.swift`, `.m` or `.dart`, so an app whose live Stripe key,
+  // `addJavascriptInterface` bridge, plaintext token store and token logging all sat in
+  // MainActivity.kt and AppDelegate.swift produced `findings: []`, `verdict: clean`,
+  // `ungradedSurfaces: 0` — a report that reads as an examined-and-clean mobile app. One row per
+  // CLASS, because the honest statement is about the class, not about each file.
+  const NATIVE_SOURCE_CLASSES = [
+    ['kotlinJava', 'Kotlin/Java', 'hardcoded keys, WebView bridges (addJavascriptInterface, loadUrl with intent data), plaintext SharedPreferences, and tokens written to Log.*', 'checks/android.md'],
+    ['swiftObjc', 'Swift/Objective-C', 'hardcoded keys, secrets in UserDefaults instead of the Keychain, URL-scheme handlers that act on their parameters, and values printed with print/NSLog', 'checks/ios.md'],
+    ['dart', 'Dart', 'hardcoded keys and http:// endpoints — everything in the Dart bundle ships to the device and is readable', 'checks/android.md and checks/ios.md'],
+    ['androidResValues', 'Android resource value', 'API keys and backend credentials pasted into strings.xml, which are compiled into the APK and extractable with `strings`', 'checks/android.md'],
+    ['gradleConfig', 'Gradle build config', 'signing passwords and keystore paths in gradle.properties, and debug settings that survive into the release variant', 'checks/android.md'],
+  ]
+  for (const [key, label, what, ref] of NATIVE_SOURCE_CLASSES) {
+    const list = model.artifacts?.nativeSource?.[key] || []
+    if (!list.length) continue
+    ledger.record('ungradedSurfaces', `native-source:${key}`, 'undeterminable',
+      `${list.length} ${label} file${list.length === 1 ? '' : 's'} (e.g. ${list.slice(0, 3).join(', ')}) — the static tier does not read them; review against ${ref} for ${what}`)
+  }
+
+  // Manifest surfaces the engine now models and no rule grades. Permission SCOPE is a judgement
+  // about what the app is for, and a deep link's danger is in the handler the manifest only points
+  // at — but both were previously invisible, which is the one output grade-or-declare forbids.
+  for (const man of model.mobile?.android || []) {
+    if (NON_RELEASE_SOURCE_SETS.has(man.sourceSet)) continue
+    const perms = man.usesPermissions || []
+    if (perms.length) {
+      ledger.record('ungradedSurfaces', `android-permissions:${man.file}`, 'undeterminable',
+        `declares ${perms.length} permission${perms.length === 1 ? '' : 's'} (${perms.slice(0, 4).map(p => p.name).join(', ')}${perms.length > 4 ? ', …' : ''}) — the static tier does not grade permission scope; confirm each one is required by a feature the app actually ships`)
+    }
+    const links = (man.exportedComponents || []).flatMap(c => (c.deepLinks || []).map(d => ({ ...d, c })))
+    if (links.length) {
+      ledger.record('ungradedSurfaces', `android-deep-links:${man.file}`, 'undeterminable',
+        `${links.length} deep-link intent-filter${links.length === 1 ? '' : 's'} (${[...new Set(links.map(d => `${d.scheme || '*'}://${d.host || '*'}`))].slice(0, 4).join(', ')}) — a custom scheme is claimable by any other app on the device; read each handler and confirm it validates the URL before acting on it (checks/android.md, "Deep-link / intent redirection")`)
+    }
+  }
+
+  for (const pl of model.mobile?.ios || []) {
+    if (pl.urlSchemes?.length) {
+      ledger.record('ungradedSurfaces', `ios-url-schemes:${pl.file}`, 'undeterminable',
+        `declares the custom URL scheme${pl.urlSchemes.length === 1 ? '' : 's'} ${pl.urlSchemes.join(', ')} — any other app on the device can claim and invoke ${pl.urlSchemes.length === 1 ? 'it' : 'them'}; read the handler and confirm it validates parameters before performing an action (checks/ios.md, "URL schemes & universal links")`)
+    }
   }
 }
 
@@ -1733,6 +2111,94 @@ const OBSERVATION_POLICY = {
     guard: 'guard-recipes/security-headers.md#redirects', cwe: 'CWE-601',
   },
 
+  // ---- business logic ------------------------------------------------------
+  //
+  // THE CEILING, and it is the entire reason this tier is safe to ship. Every entry below is
+  // `evidence: 'judgement'` and `provenance: 'reviewer'`, so confidence is `likely` and can NEVER be
+  // `confirmed`: the tool did not PROVE the app's intent, it checked code against a STATED intent,
+  // and either could be wrong. Severity stays uncapped (impact-if-true) because the verdict counts
+  // only confirmed findings, so none of these can turn the badge red.
+  //
+  // An assertion below this table re-checks the cap at module load, because a future edit that
+  // "upgrades" one of these to `strong` would silently let a guess about business rules move the
+  // headline verdict.
+  'bl-object-level-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-001',
+    title_en: 'A user can reach a record the intent says belongs to someone else',
+    title_he: 'משתמש יכול להגיע לרשומה שלפי הכוונה שייכת למישהו אחר',
+    exploit: 'A signed-in user changes the id in the request and reads or edits another user\'s row.',
+    impact: 'Every row of this resource is reachable by any caller who can guess an id.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That the stated ownership model is correct, and that the check is not performed in a helper or an ORM call this pass does not follow.',
+  },
+  'bl-wrong-owner-column': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-002',
+    title_en: 'Ownership is checked against a column the intent does not name as the owner',
+    title_he: 'בדיקת הבעלות מתבצעת מול עמודה שאינה עמודת הבעלים לפי הכוונה',
+    exploit: 'A user in the same team or organisation reads rows the intent says belong to one person.',
+    impact: 'A cross-user read that passes review, because the code visibly filters something.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That the intent names the right owning column, and that the filter seen here is the one that governs the query.',
+  },
+  'bl-function-level-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-003',
+    title_en: 'An operation the intent reserves for another role is reachable',
+    title_he: 'פעולה שהכוונה שומרת לתפקיד אחר נגישה למשתמש רגיל',
+    exploit: 'A signed-in user calls the endpoint directly and performs an operation the UI never offers them.',
+    impact: 'Whatever the restricted operation does — issuing refunds, writing invoices, changing records the system owns.',
+    guard: 'guard-recipes/auth-middleware.md#role-check', cwe: 'CWE-285', owasp: 'A01:2021',
+    assumption: 'That the role check is not performed in a helper or middleware this pass does not follow, and that this endpoint is not driven by the system (list it under system_routes if it is).',
+  },
+  'bl-state-transition-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-004',
+    title_en: 'A user-reachable route drives a state change the intent reserves for someone else',
+    title_he: 'נתיב שנגיש למשתמש מבצע שינוי מצב שהכוונה שומרת לגורם אחר',
+    exploit: 'A user calls the endpoint and moves the record into a state only the system was meant to set — marking an order paid without paying.',
+    impact: 'The workflow the business depends on can be short-circuited from the browser.',
+    guard: 'guard-recipes/business-logic-intent.md#state-transitions', cwe: 'CWE-840', owasp: 'A01:2021',
+    assumption: 'That this route is reachable by a user rather than being the webhook or job the intent means; list it under system_routes if it is.',
+  },
+  'bl-tenant-isolation': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-005',
+    title_en: 'A query on a tenant-scoped resource does not filter the tenant column',
+    title_he: 'שאילתה על משאב מרובה-דיירים אינה מסננת את עמודת הדייר',
+    exploit: 'A user of one organisation reads or edits rows belonging to another organisation.',
+    impact: 'Cross-customer data exposure — the failure a B2B app cannot survive.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That tenant scoping is not applied by a helper, a view, or an RLS policy this pass could not read.',
+  },
+  'bl-value-tampering': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-006',
+    title_en: 'A value the intent does not let a user set is read from the request body',
+    title_he: 'ערך שהמשתמש אינו אמור לקבוע נקרא מגוף הבקשה',
+    exploit: 'The caller sends their own price, total or quantity and the server stores it.',
+    impact: 'Money. An order priced by the buyer, or a balance the client chooses.',
+    guard: 'guard-recipes/zod-validation.md#pick-allowed-fields', cwe: 'CWE-472', owasp: 'A04:2021',
+    assumption: 'That the value is not recomputed or overwritten server-side after being read, which this pass does not follow.',
+  },
+  'bl-mass-assignment': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-007',
+    title_en: 'The whole request body is written to the database with no field allowlist',
+    title_he: 'כל גוף הבקשה נכתב למסד הנתונים ללא רשימת שדות מותרים',
+    exploit: 'The caller adds a field the form never showed — role, owner_id, status — and it is written with the rest.',
+    impact: 'Privilege escalation and record takeover through a field nobody meant to expose.',
+    guard: 'guard-recipes/zod-validation.md#pick-allowed-fields', cwe: 'CWE-915', owasp: 'A04:2021',
+    assumption: 'That the object being spread was not already narrowed to safe fields by a validator this pass did not follow.',
+  },
+  // `bl-intent-unconfirmed` DELIBERATELY HAS NO POLICY, and must never be given one.
+  //
+  // It had one. Being `judgement` it capped at `likely` and so could not turn the badge red — that
+  // much was reasoned correctly. But it still printed `CG-BIZ-010 P2` in the findings list of every
+  // repository with no `claudeguard.intent.yml`, which is every repository on its first run. The
+  // tool reported a security finding because the user had not written an optional config file yet.
+  // Every cry-wolf test in the suite caught it the moment the layer was wired in.
+  //
+  // Nothing about the app is wrong in that situation; something about OUR KNOWLEDGE of it is, and
+  // that is a coverage limitation. `gradeBusinessLogic` records it as an `undeterminable` row and
+  // the report carries `businessLogic.status`, the assumptions list and a proposed intent file, so
+  // the section can never be mistaken for a confirmed clean result. A missing config file is not a
+  // vulnerability, and a finding list that says otherwise trains people to skim past the real ones.
+
   // ---- dynamic testing (Tier 2/3, behind the gate in dynamic_gate.mjs) --------------------
   //
   // These five are the reason dynamic testing is worth the liability it carries. A working PoC is
@@ -1825,6 +2291,18 @@ function refineExposedService(o) {
     }
   }
   return {}
+}
+
+// The ceiling, asserted at module load. `judgement` → `likely` is the only mapping that keeps a
+// business-logic finding out of the headline verdict, and `reviewer` is what tells the reader that a
+// judgement — not a proof — is behind it. A change that breaks either fails here, loudly, instead of
+// quietly shipping a guess as a certainty.
+for (const [kind, p] of Object.entries(OBSERVATION_POLICY)) {
+  if (!kind.startsWith('bl-')) continue
+  if (p.evidence !== 'judgement' || p.provenance !== 'reviewer') {
+    throw new Error(`business-logic policy "${kind}" must be evidence:judgement + provenance:reviewer — ` +
+      'the tool checked code against a STATED intent and did not prove it, so it can never be confirmed.')
+  }
 }
 
 function gradeObservations(observations, ledger, findings) {
@@ -2698,6 +3176,7 @@ export function grade(model, opts = {}) {
   gradeFirebaseRules(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
+  const businessLogic = gradeBusinessLogic(model, ledger, findings, allow, opts)
   // Runs LAST, on purpose: it declares what the rules above did not claim, so it must see the
   // finished picture rather than race the rules for a subject.
   declareUngradedSurfaces(model, ledger)
@@ -2750,6 +3229,20 @@ export function grade(model, opts = {}) {
     // could and could not SEE, versus how it graded what it saw. The renderer prints them as two
     // separate blocks so a partial scan cannot pass for a complete one. See ADR/methodology.
     discovery: model.discovery || null,
+    // The business-logic tier's own accounting: whether the intent was CONFIRMED by the author or
+    // assumed from column names, `rulesChecked / rulesTotal` per resource, and what was assumed
+    // rather than established. A business-logic section with no coverage line is the same false
+    // all-clear the rest of this tool exists to prevent — worse here, because these are the bugs a
+    // scanner is expected to miss, so a confident silence is most dangerous exactly here.
+    businessLogic: {
+      status: businessLogic.status,
+      error: businessLogic.error,
+      columnsKnown: businessLogic.columnsKnown,
+      resources: businessLogic.resources,
+      assumptions: businessLogic.assumptions,
+      // Printed verbatim so the user can paste it into claudeguard.intent.yml and correct it.
+      proposedIntent: businessLogic.proposedYaml,
+    },
     // Handed to the user verbatim when the schema could not be read, so they can answer the
     // question we could not.
     verifyQuery: model.database?.coverage?.verifyQuery || null,
