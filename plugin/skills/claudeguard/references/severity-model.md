@@ -5,16 +5,19 @@ The grader (`plugin/scripts/grader.mjs`) is the only component allowed to apply 
 plugin and the claude.ai skill both render what it emits. `CONTEXT.md` defines the vocabulary —
 this file is the policy written in that vocabulary.
 
-## The whole model in three sentences
+## The whole model in four sentences
 
 1. **Severity** says how bad it would be *if the finding is real*. It is never lowered because we
    are unsure.
 2. **Confidence** says how sure we are, and it is computed from **Evidence** alone — nothing else
    may set it.
-3. The **headline verdict counts only `confirmed` findings**. That is where the uncertainty gets
-   paid for, which is what makes rule 1 safe.
+3. The **graded verdict counts only `confirmed` findings**. That is where the uncertainty gets paid
+   for, which is what makes rule 1 safe.
+4. **`clean` is not the default.** Not turning the badge red is not the same as turning it green:
+   `clean` also requires that nothing unproven-but-catastrophic is still open and that discovery
+   coverage cleared its floor. Otherwise the level is **`unknown`**.
 
-Everything below is an elaboration of those three.
+Everything below is an elaboration of those four.
 
 ---
 
@@ -55,8 +58,9 @@ states the assumption that would make it a false positive, and it does *not* tur
 Worked example — `CG-DB-COVERAGE`. A repo with no migrations: the tables are visible in generated
 types, but nothing in the repo says whether RLS is on. Impact if RLS is off is total exposure, so
 severity is **P0**. Evidence is `weak`, so confidence is **needs-review**. It appears at the top of
-the report as a P0 the user must settle with one query — and the verdict stays `clean` unless
-something else was actually confirmed.
+the report as a P0 the user must settle with one query — the badge does not go red, because nothing
+was confirmed, and it does not go green either, because an unproven P0 is open: the level is
+**`unknown`**. See [LAW 4](#law-4).
 
 **The one hard ceiling (LAW 3).** Name-only evidence may never justify a P0. `FOO_API_KEY` in a
 variable name is not proof that a privileged credential exists. The grader throws if a rule tries.
@@ -113,10 +117,10 @@ Only `confirmed` findings are eligible for `/cg-fix`.
 
 ---
 
-## The verdict — only `confirmed` findings count
+## The verdict — only `confirmed` findings can grade it, and `clean` has to be earned
 
-This is the rule that pays for uncapped severity. The headline verdict and the badge are computed
-from `confirmed` findings **and nothing else**:
+This is the rule that pays for uncapped severity. The **graded** levels are computed from
+`confirmed` findings **and nothing else**:
 
 | Level | HE | Emitted when |
 |-------|----|--------------|
@@ -124,15 +128,124 @@ from `confirmed` findings **and nothing else**:
 | `high` | גבוה | any confirmed P1 (and no confirmed P0) |
 | `medium` | בינוני | any confirmed P2 (and nothing above) |
 | `low` | נמוך | at least one confirmed finding, all P3/P4 |
-| `clean` | נקי | no confirmed findings at all |
+| `unknown` | לא נבדק | nothing confirmed, but the repo was **not proven safe** — see LAW 4 |
+| `clean` | נקי | nothing confirmed, nothing unproven-and-catastrophic open, coverage above floor |
 
-The grader emits, alongside the level, `confirmedP0`, `confirmedP1`, and — deliberately in the same
-object — the counts of everything that did *not* count: `likely` and `needsReview`.
+The grader emits, alongside the level, `confirmedP0`, `confirmedP1`, `confirmedLevel` (the level the
+confirmed findings alone produce, `null` when there are none), the counts of everything that did
+*not* count (`likely`, `needsReview`, `unprovenP0`, `unprovenP1`), and the `discoveryCoverage`
+assessment the floor was applied to.
 
-**`clean` means "nothing was proven", not "nothing is wrong."** A repo with eleven unproven P0s and
-no migrations grades `clean`. The report must therefore never present `clean` on its own: it is
-shown next to the unconfirmed findings and next to Coverage, or it is a lie by omission. See
-`report-template.md`.
+<a id="law-4"></a>
+### LAW 4 — the `clean` verdict must not lie
+
+**The defect.** For as long as the verdict counted `confirmed` findings alone, a repository with a
+**fully unauthenticated DELETE endpoint graded 🟢 `clean`**. Every step was individually correct: the
+route rule raises a P1, and its evidence is `weak` because the absence of an auth token is not proof
+(the check could live in a helper this pass does not follow — LAW 1), so the confidence is
+`needs-review`, so it did not count, so the badge was green. The same held for a scan that could
+only read a third of the repo: nothing confirmed, badge green.
+
+That is a **false all-clear**, and it is the one failure mode this audience cannot detect for
+itself. A false positive costs a non-expert an afternoon. A false all-clear costs them the database.
+"Nothing was proven" and "nothing is wrong" were printing the same colour.
+
+**The rule.** The badge is a function of **coverage × confirmed**. `clean` requires all three:
+
+1. **zero `confirmed` findings** (unchanged), **and**
+2. **zero unproven P0/P1** — no finding whose severity is P0 or P1 at confidence `likely` or
+   `needs-review` is still open. (Allowlisted and refuted subjects raise no finding at all, so
+   anything left in the list is by definition unsettled.) **And**
+3. **discovery coverage at or above the floor** (below).
+
+If (1) holds but (2) or (3) does not, the level is **`unknown` / `לא נבדק`** — *not proven safe*. It
+is never rendered green. A repository **with** confirmed findings is unaffected: it keeps
+`critical` / `high` / `medium` / `low` exactly as before. `unknown` only ever replaces what used to
+be `clean`, so this can never make a report louder about any specific finding — the cry-wolf thesis
+is intact. One thing changed: a badge that used to claim more than the evidence supports now says so.
+
+Asserted at runtime at the end of `grade()`, beside the LAW 1/2/3 checks: a result whose level is
+`clean` while an unproven P0/P1 is open, or while coverage is below the floor, **throws**. A renderer
+or a future refactor cannot silently reintroduce the false all-clear, because the failure it would
+produce looks exactly like every other clean report.
+
+<a id="coverage-floor"></a>
+### The discovery-coverage floor, exactly
+
+Discovery coverage (`methodology/discovery.md`) asks *what did the engine manage to see* — a
+different axis from the pass/fail ledger's *of what it saw, what did it grade*. The floor reads
+`model.discovery` and is adequate only when **all** of the following hold:
+
+| Condition | Why |
+|---|---|
+| `discovery.counts` is present | An absent ledger is **not** neutral. A model that never says what it saw has not earned `clean`, and treating absence as adequate would make deleting one key the cheapest way to buy a green badge. |
+| `discovery.reconciles === true` | `filesParsed + configParsed + unsupported + oversized + readErrors === filesDiscovered`. A ledger that does not add up cannot support any verdict built on it. |
+| `filesDiscovered > 0` and at least one file was read | Pointing the tool at an empty or entirely unreadable directory used to grade `clean`. There was nothing behind that verdict. |
+| **read ratio ≥ 0.95** | `(filesParsed + configParsed) / (filesParsed + configParsed + oversized + readErrors)`. |
+
+Note what the denominator is **not**: it excludes `unsupported`. Images, lockfiles and binaries are
+deliberate, accounted-for exclusions — a repo is not under-read for owning a logo, and putting those
+in the denominator would flip correct apps to `unknown` for having assets, which is the cry-wolf
+failure wearing a different hat. What belongs in the denominator is only the files we *wanted* and
+failed to get: oversized ones and read errors. The threshold is **0.95** because more than one file
+in twenty that we meant to read and could not is a hole big enough to hide the finding, and at that
+point "we could not see enough to say" is the honest headline.
+
+Every `false` carries its reasons in `verdict.discoveryCoverage.reasons`, and the report prints
+them: a floor that fails without saying why is just another opaque verdict.
+
+**What LAW 4 does not do.** It does not consider unproven **P2 and below**. A missing CSP at
+`needs-review` is a real weakness and not a reason to withhold a clean bill of health; folding it in
+would make `unknown` the permanent answer, and a badge that never varies carries no information.
+
+**`clean` still means "nothing was proven", not "nothing is wrong."** LAW 4 narrows the gap; it does
+not close it. The report must never present `clean` on its own — it is shown next to the unconfirmed
+findings and next to Coverage, or it is a lie by omission. See `report-template.md`.
+
+---
+
+<a id="gate-mode"></a>
+## Gate mode — the exit code *is* the verdict
+
+`node grader.mjs <path> --gate` prints the report to stdout as usual, writes one human line to
+stderr, and sets the **process exit code** from the verdict:
+
+| Exit | When | Meaning |
+|------|------|---------|
+| `1` | any **confirmed** P0 or P1 | Proven bad. The thing this tool exists to stop. |
+| `2` | level is `unknown` | **Not proven safe** — an open unproven P0/P1, or discovery below the floor. |
+| `0` | `clean`, or only confirmed P2/P3/P4 | Nothing blocking. |
+
+It drops into a CI step or an agent's pre-deploy hook. Confirmed P2 and below deliberately do not
+block: a gate that fires on a missing `Referrer-Policy` is a gate somebody switches off, and then it
+protects nothing at all.
+
+**The agent-deploy property.** An agent cannot talk this gate green. A reviewer finding is capped at
+`judgement → likely` and can never reach `confirmed`, so no amount of agent output can lower the
+confirmed counts a `0` depends on; and an unsettled reviewer P0/P1 pushes a `clean` repo to
+`unknown`, i.e. from `0` to `2`. Every path more agent output can take raises the exit code, never
+lowers it. The only way to a `0` is better evidence in the repository.
+
+---
+
+<a id="run-record"></a>
+## The run record — what was run, not what is safe
+
+Every result carries a `runRecord`: `toolVersion`, `commit`, `generatedAt`, `modelHash`,
+`ledgerReconciles`, `confirmedP0`, `confirmedP1`, `verdict`. It exists so two people can establish
+that they are looking at the same run before they argue about a finding, and so a report pasted into
+an issue three weeks later can still be traced to the code that produced it.
+
+It attests **what was run**. It is never a statement that the repository is secure, and it carries a
+`note` saying so, because a signed-looking block at the bottom of a security report is exactly the
+thing a reader will over-trust.
+
+**It is deterministic by construction.** Two runs on the same model produce an identical record —
+including `modelHash`, which is a SHA-256 over the model serialised with every object key sorted, so
+the same facts hash the same however the JSON was assembled. `generatedAt` is `null` unless the
+**caller** supplies a clock (`opts.now`); the grader never reads one. A grader that reaches for
+`Date.now()` cannot be diffed against itself, and "re-run after the fix and trust the diff" is the
+only workflow this tool offers.
 
 ---
 
@@ -295,6 +408,29 @@ verifyQuery: "select c.relname, c.relrowsecurity as rls_enabled ..."   # null wh
 Subject sets currently enumerated: `envVars`, `nextConfigKeys`, `tables`, `dynamicTableRefs`,
 `sqlFunctions`, `routes`, `llmSites`, `supabaseClients`, `liveObservations`.
 
+<a id="decision-rate"></a>
+### Decision rate — the counter-pressure against a cheap `undeterminable`
+
+LAW 1 makes `undeterminable` the honest answer whenever a token is all the evidence there is. That
+is right, and it is also **the cheapest exit in this architecture**: a rule that abstains on every
+subject satisfies LAW 2, prints a complete coverage table, and has decided nothing. Nothing in the
+ledger distinguishes "we looked hard and could not settle it" from "we never tried".
+
+So the grader publishes, per subject set and overall, alongside `coverage`:
+
+```yaml
+decisionRate:
+  overall: { enumerated: 181, decided: 41, abstained: 128, allowlisted: 12, rate: 0.2265 }
+  bySet:
+    routes: { enumerated: 10, decided: 3, abstained: 7, allowlisted: 0, rate: 0.3 }
+```
+
+`decided` is `pass + fail`. `allowlisted` is reported but **not** counted as decided — the user
+decided it, we did not. `bench/run.mjs` prints the corpus-wide figure and gates on it: **it may not
+decrease.** Every other release gate protects against the tool getting louder or wronger; this one
+protects against it getting quieter. The floor is the value measured on the corpus, and it exists to
+be ratcheted upward by better evidence — never argued downward.
+
 ---
 
 ## Report ordering
@@ -302,8 +438,10 @@ Subject sets currently enumerated: `envVars`, `nextConfigKeys`, `tables`, `dynam
 Sort by severity (P0→P4), then confidence (`confirmed` → `likely` → `needs-review`), then `id`.
 Because the `id` prefix carries the domain, equal-ranked findings group by domain for free.
 
-The headline verdict and the badge count only `confirmed` findings — see the verdict rule above and
-`report-template.md` for how the unconfirmed ones are rendered without driving the badge.
+Only `confirmed` findings can produce a graded (red/orange/yellow/blue) badge — see the verdict rule
+above, and LAW 4 for why a quiet report is `unknown` rather than green when something unproven and
+catastrophic is still open. `report-template.md` covers how the unconfirmed findings are rendered
+without driving the badge.
 
 ---
 

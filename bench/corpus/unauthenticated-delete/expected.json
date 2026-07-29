@@ -1,0 +1,15 @@
+{
+  "notes": "INTENT: the `clean` verdict must not lie. This case is the smallest repository that broke it. One App Router file exports DELETE and GET with no authentication anywhere — no handler check, no middleware, no matcher — so anyone on the internet can destroy any project by id. The grader is right to grade it `needs-review` and not higher: the absence of an auth token is not proof (LAW 1), because the check could live in a helper this pass does not follow. But the verdict counted ONLY `confirmed` findings, so this repository printed 🟢 CLEAN over a wide-open DELETE, which is a false all-clear — the one failure a non-expert cannot detect for himself. Everything else here is deliberately quiet: next.config declares headers() so no confirmed P2 lands, the DELETE reads no body so nothing asks it to validate one, and the store is in-memory so there is no RLS surface. Under LAW 4 the level is `unknown` — nothing was proven wrong and nothing was proven safe. Note WHICH clause fires: discovery coverage is a full 100%, so this case is driven purely by the open unproven P1, not by the coverage floor. The `fixed` variant applies the same authentication as app-level middleware AND in the handler, and scopes the delete by owner; its routes are still `undeterminable` (a matcher existing is not proof it rejects anonymous callers) but nothing unproven is left open, so it grades `clean` — proving LAW 4 did not simply paint everything `unknown`.",
+  "vulnerable": {
+    "verdict": "unknown",
+    "mustFind": [
+      { "id": "CG-WEB-001", "severity": "P1", "confidence": "needs-review", "subject": "route:app/api/projects/[id]/route.ts", "at": "app/api/projects/[id]/route.ts" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "verdict": "clean",
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

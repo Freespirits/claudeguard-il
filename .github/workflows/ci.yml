@@ -146,6 +146,15 @@ jobs:
             console.log('ok: grader verdict, confirmed P0s, coverage accounting and discovery ledger all hold');
           "
 
+      # SHIP OR DECLARE, turned inward on the grader's own command line. A flag that no skill
+      # teaches and no document mentions is a feature nobody can find, and it rots: it keeps
+      # parsing, keeps consuming the next argv element, and quietly stops matching what the code
+      # behind it does. The first person to notice is a user whose scan silently ignored the file
+      # they passed. So every value-taking flag must be named by a plugin/skills/*/SKILL.md or
+      # listed in CLI_ONLY_FLAGS with a reason. Node builtins only, identical on Linux and Windows.
+      - name: Assert every value-taking grader flag is shipped or declared
+        run: node scripts/assert_cli_flags.mjs
+
       # GRADE OR DECLARE. Every artifact class the engine can discover must either be walked by a
       # rule or be declared as an ungraded row. The failure this prevents is silent: adding a new
       # artifact type to the engine and no rule for it widens the blind spot invisibly, because a
