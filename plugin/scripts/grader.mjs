@@ -37,6 +37,7 @@ import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { auditBusinessLogic, loadIntent, proposeIntent, renderIntentYaml, TAXONOMY } from './business_logic.mjs'
 
 // ---------------------------------------------------------------------------
 // Policy tables — the whole severity model, in one readable place.
@@ -1700,6 +1701,106 @@ const OBSERVATION_POLICY = {
     impact: 'Your domain lends its credibility to a phishing page.',
     guard: 'guard-recipes/security-headers.md#redirects', cwe: 'CWE-601',
   },
+
+  // ---- business logic ------------------------------------------------------
+  //
+  // THE CEILING, and it is the entire reason this tier is safe to ship. Every entry below is
+  // `evidence: 'judgement'` and `provenance: 'reviewer'`, so confidence is `likely` and can NEVER be
+  // `confirmed`: the tool did not PROVE the app's intent, it checked code against a STATED intent,
+  // and either could be wrong. Severity stays uncapped (impact-if-true) because the verdict counts
+  // only confirmed findings, so none of these can turn the badge red.
+  //
+  // An assertion below this table re-checks the cap at module load, because a future edit that
+  // "upgrades" one of these to `strong` would silently let a guess about business rules move the
+  // headline verdict.
+  'bl-object-level-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-001',
+    title_en: 'A user can reach a record the intent says belongs to someone else',
+    title_he: 'משתמש יכול להגיע לרשומה שלפי הכוונה שייכת למישהו אחר',
+    exploit: 'A signed-in user changes the id in the request and reads or edits another user\'s row.',
+    impact: 'Every row of this resource is reachable by any caller who can guess an id.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That the stated ownership model is correct, and that the check is not performed in a helper or an ORM call this pass does not follow.',
+  },
+  'bl-wrong-owner-column': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-002',
+    title_en: 'Ownership is checked against a column the intent does not name as the owner',
+    title_he: 'בדיקת הבעלות מתבצעת מול עמודה שאינה עמודת הבעלים לפי הכוונה',
+    exploit: 'A user in the same team or organisation reads rows the intent says belong to one person.',
+    impact: 'A cross-user read that passes review, because the code visibly filters something.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That the intent names the right owning column, and that the filter seen here is the one that governs the query.',
+  },
+  'bl-function-level-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-003',
+    title_en: 'An operation the intent reserves for another role is reachable',
+    title_he: 'פעולה שהכוונה שומרת לתפקיד אחר נגישה למשתמש רגיל',
+    exploit: 'A signed-in user calls the endpoint directly and performs an operation the UI never offers them.',
+    impact: 'Whatever the restricted operation does — issuing refunds, writing invoices, changing records the system owns.',
+    guard: 'guard-recipes/auth-middleware.md#role-check', cwe: 'CWE-285', owasp: 'A01:2021',
+    assumption: 'That the role check is not performed in a helper or middleware this pass does not follow, and that this endpoint is not driven by the system (list it under system_routes if it is).',
+  },
+  'bl-state-transition-authz': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-004',
+    title_en: 'A user-reachable route drives a state change the intent reserves for someone else',
+    title_he: 'נתיב שנגיש למשתמש מבצע שינוי מצב שהכוונה שומרת לגורם אחר',
+    exploit: 'A user calls the endpoint and moves the record into a state only the system was meant to set — marking an order paid without paying.',
+    impact: 'The workflow the business depends on can be short-circuited from the browser.',
+    guard: 'guard-recipes/business-logic-intent.md#state-transitions', cwe: 'CWE-840', owasp: 'A01:2021',
+    assumption: 'That this route is reachable by a user rather than being the webhook or job the intent means; list it under system_routes if it is.',
+  },
+  'bl-tenant-isolation': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-005',
+    title_en: 'A query on a tenant-scoped resource does not filter the tenant column',
+    title_he: 'שאילתה על משאב מרובה-דיירים אינה מסננת את עמודת הדייר',
+    exploit: 'A user of one organisation reads or edits rows belonging to another organisation.',
+    impact: 'Cross-customer data exposure — the failure a B2B app cannot survive.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+    assumption: 'That tenant scoping is not applied by a helper, a view, or an RLS policy this pass could not read.',
+  },
+  'bl-value-tampering': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-006',
+    title_en: 'A value the intent does not let a user set is read from the request body',
+    title_he: 'ערך שהמשתמש אינו אמור לקבוע נקרא מגוף הבקשה',
+    exploit: 'The caller sends their own price, total or quantity and the server stores it.',
+    impact: 'Money. An order priced by the buyer, or a balance the client chooses.',
+    guard: 'guard-recipes/zod-validation.md#pick-allowed-fields', cwe: 'CWE-472', owasp: 'A04:2021',
+    assumption: 'That the value is not recomputed or overwritten server-side after being read, which this pass does not follow.',
+  },
+  'bl-mass-assignment': {
+    sev: 'P1', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-007',
+    title_en: 'The whole request body is written to the database with no field allowlist',
+    title_he: 'כל גוף הבקשה נכתב למסד הנתונים ללא רשימת שדות מותרים',
+    exploit: 'The caller adds a field the form never showed — role, owner_id, status — and it is written with the rest.',
+    impact: 'Privilege escalation and record takeover through a field nobody meant to expose.',
+    guard: 'guard-recipes/zod-validation.md#pick-allowed-fields', cwe: 'CWE-915', owasp: 'A04:2021',
+    assumption: 'That the object being spread was not already narrowed to safe fields by a validator this pass did not follow.',
+  },
+  'bl-intent-unconfirmed': {
+    // A COVERAGE finding, not a claim about the app: it says the business-logic section rests on a
+    // guess. P2 because the impact-if-true is "a real authorization bug went unreported here", and
+    // `judgement` because raising it to `definitive` would make every repo without an optional
+    // config file grade `medium` — which is the cry-wolf failure this tool exists to avoid.
+    sev: 'P2', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-010',
+    title_en: 'Business-logic rules were assumed, not confirmed',
+    title_he: 'כללי הלוגיקה העסקית הונחו ולא אושרו',
+    exploit: 'Nothing directly. The audit below checked the code against rules this tool guessed, so a real authorization bug can sit inside a section that reads as clean.',
+    impact: 'Every ownership conclusion in the business-logic section is unanchored until you confirm the model.',
+    guard: 'guard-recipes/business-logic-intent.md#intent-file',
+    assumption: 'That the guessed ownership model happens to match what the app actually intends.',
+  },
+}
+
+// The ceiling, asserted at module load. `judgement` → `likely` is the only mapping that keeps a
+// business-logic finding out of the headline verdict, and `reviewer` is what tells the reader that a
+// judgement — not a proof — is behind it. A change that breaks either fails here, loudly, instead of
+// quietly shipping a guess as a certainty.
+for (const [kind, p] of Object.entries(OBSERVATION_POLICY)) {
+  if (!kind.startsWith('bl-')) continue
+  if (p.evidence !== 'judgement' || p.provenance !== 'reviewer') {
+    throw new Error(`business-logic policy "${kind}" must be evidence:judgement + provenance:reviewer — ` +
+      'the tool checked code against a STATED intent and did not prove it, so it can never be confirmed.')
+  }
 }
 
 function gradeObservations(observations, ledger, findings) {

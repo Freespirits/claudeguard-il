@@ -429,6 +429,94 @@ const RATE_HINT = /(ratelimit|rateLimit|limiter\.|rate_limit|Ratelimit|throttle)
 const VALIDATE_HINT = /(\.safeParse\(|\.parse\(|zod|yup|joi|valibot|superstruct|ajv|validateSync)/
 const METHOD_RE = /export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b|req\.method\s*===?\s*['"](GET|POST|PUT|PATCH|DELETE)['"]/g
 
+// ---------- business-logic facts, per route ----------
+//
+// These say what a handler MANIPULATES — which table, which column it compares, which body fields
+// it reads, which literal it writes. They make no claim about what the app is supposed to PERMIT;
+// that is the intent model's job, and only the app's author can state it
+// (core/methodology/business-logic.md).
+//
+// Modelled only for FILE-routed handlers (Next pages/app routes, serverless functions), where the
+// file IS the route so a file-level read is exact. An Express/Fastify/Hono file declares many
+// handlers, and attributing `.from('orders')` to one of them would be a guess — so those routes get
+// `null` and the business-logic layer DECLARES the gap instead of inventing a link.
+const BODY_SOURCE = String.raw`req(?:uest)?\s*\.\s*body|req(?:uest)?\s*\.\s*json\s*\(\s*\)`
+const FILTER_METHODS = 'eq|neq|gt|gte|lt|lte|like|ilike|is|in|contains|containedBy|filter'
+const WRITE_CALL = /\.\s*(?:insert|update|upsert|create|createMany|updateMany|save)\s*\(/
+
+function businessFactsForRouteFile(code, rawText, inCode) {
+  // Table references and body-field names live inside STRING literals for the first, and are plain
+  // identifiers for the rest. So table names are read from RAW text with the mask rejecting
+  // comments; identifiers are read from the stripped copy, where a name inside a string cannot
+  // masquerade as code.
+  const tablesTouched = []
+  {
+    const re = /\.from\(\s*['"]([A-Za-z0-9_]+)['"]\s*\)/g
+    let m
+    while ((m = re.exec(rawText))) {
+      if (!inCode(m.index)) continue
+      const t = m[1].toLowerCase()
+      if (!tablesTouched.includes(t)) tablesTouched.push(t)
+    }
+  }
+
+  // Columns the handler actually COMPARES. `ownershipFilter` answers "is any ownership-ish token
+  // present"; this answers "which column", which is what a wrong-owner-column check needs.
+  const eqColumns = []
+  {
+    const re = new RegExp(String.raw`\.\s*(?:${FILTER_METHODS})\s*\(\s*['"]([A-Za-z0-9_]+)['"]`, 'g')
+    let m
+    while ((m = re.exec(rawText))) {
+      if (!inCode(m.index)) continue
+      const c = m[1].toLowerCase()
+      if (!eqColumns.includes(c)) eqColumns.push(c)
+    }
+  }
+
+  // Variables that hold the request body, so `const { price } = body` is read as a body field and
+  // `const { price } = defaults` is not.
+  const bodyVars = new Set()
+  {
+    const re = new RegExp(String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:${BODY_SOURCE})`, 'g')
+    let m
+    while ((m = re.exec(code))) bodyVars.add(m[1])
+  }
+  const bodyAlt = [`(?:${BODY_SOURCE})`, ...[...bodyVars].map(v => `${v}\\b`)].join('|')
+
+  const bodyFields = []
+  const addField = raw => {
+    const name = raw.replace(/^\s*\.\.\./, '').split(/[:=]/)[0].trim().toLowerCase()
+    if (/^[a-z_][\w$]*$/.test(name) && !bodyFields.includes(name)) bodyFields.push(name)
+  }
+  {
+    const destructRe = new RegExp(String.raw`(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:${bodyAlt})`, 'g')
+    let m
+    while ((m = destructRe.exec(code))) for (const part of m[1].split(',')) addField(part)
+    const memberRe = new RegExp(String.raw`(?:${bodyAlt})\s*\.\s*([A-Za-z_$][\w$]*)`, 'g')
+    while ((m = memberRe.exec(code))) addField(m[1])
+  }
+
+  // `status: 'paid'` — the literal a handler writes. Matched on RAW text because the VALUE is a
+  // string, and rejected by the mask when the whole pair sits inside a comment or another string.
+  const literalAssignments = []
+  {
+    const re = /(?:^|[{,(\s])([A-Za-z_$][\w$]*)\s*:\s*(['"])([^'"\n]{0,64})\2/g
+    let m
+    while ((m = re.exec(rawText)) && literalAssignments.length < 60) {
+      const keyIdx = m.index + m[0].indexOf(m[1])
+      if (!inCode(keyIdx)) continue
+      literalAssignments.push({ key: m[1].toLowerCase(), value: m[3] })
+    }
+  }
+
+  // Mass assignment's tell: the whole request body handed to a write with no allowlist in between.
+  const spreadRe = new RegExp(String.raw`\.\.\.\s*(?:${bodyAlt})`)
+  const wholeBodyRe = new RegExp(String.raw`\.\s*(?:insert|update|upsert|create)\s*\(\s*(?:${bodyAlt})\s*[,)]`)
+  const spreadsBodyIntoWrite = (spreadRe.test(code) && WRITE_CALL.test(code)) || wholeBodyRe.test(code)
+
+  return { tablesTouched, eqColumns, bodyFields, literalAssignments, spreadsBodyIntoWrite }
+}
+
 const routes = []
 for (const [r, f] of files) {
   const kind = /^pages\/api\//.test(r) ? 'pages-api'
@@ -439,7 +527,8 @@ for (const [r, f] of files) {
   // must not inflate a correct route to a false P0, and a comment mentioning `user_id`/`auth.uid()`
   // must not silence a real IDOR — both were adversarial-audit bypasses. METHOD_RE stays on raw
   // text because `req.method === 'GET'` reads a method-name string literal.
-  const { code } = stripJs(f.text)
+  const { code, mask } = stripJs(f.text)
+  const inCode = idx => mask[idx] === CODE
   const methods = new Set(); let m; METHOD_RE.lastIndex = 0
   while ((m = METHOD_RE.exec(f.text))) methods.add(m[1] || m[2])
   const mutating = [...methods].some(x => x !== 'GET') || methods.size === 0
@@ -457,6 +546,8 @@ for (const [r, f] of files) {
     // makes people stop reading the report.
     readsBody: /\breq(uest)?\.json\s*\(|\breq(uest)?\.body\b|\.formData\s*\(|await\s+\w+\.json\s*\(/.test(code),
     ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id)/.test(code),
+    businessFacts: 'file-scoped',
+    ...businessFactsForRouteFile(code, f.text, inCode),
   })
 }
 // ---------- non-Next route inventory (Express / Fastify / Hono / Koa / NestJS) ----------
@@ -564,6 +655,16 @@ for (const [r, f] of files) {
       // the noise-on-correct-code failure that makes a report stop being read.
       readsBody: /\breq(uest)?\.body\b|\breq(uest)?\.json\s*\(|c\.req\.(json|parseBody|valid)\s*\(|ctx\.request\.body/.test(handlerText),
       ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id|req\.user)/.test(handlerText),
+      // One file declares many handlers here, and the handler text this pass keeps is the STRIPPED
+      // copy — table names and body-field literals live in strings, which stripping blanks. So the
+      // route→resource link is not modelled for call-declared routes, and the business-logic layer
+      // DECLARES that gap rather than attributing a `.from('orders')` to a handler by proximity.
+      businessFacts: 'not-modelled',
+      tablesTouched: null,
+      eqColumns: null,
+      bodyFields: null,
+      literalAssignments: null,
+      spreadsBodyIntoWrite: null,
     })
     frameworkRoutesByPkg.set(fwName, (frameworkRoutesByPkg.get(fwName) || 0) + 1)
   }
@@ -631,6 +732,83 @@ const middlewareMatcher = middlewareFiles.map(r => {
   return { file: r, matcher: mm ? (mm[1] || mm[2]).replace(/\s+/g, ' ').trim() : null }
 })
 
+// ---------- SQL column lists ----------
+//
+// WHY: the business-logic layer's intent proposer has to read `user_id` / `org_id` / `status` off
+// the schema, and until now the engine knew a table's NAME and nothing else. Columns are Facts in
+// the strictest sense — a name and a type. That `user_id` *means* ownership is an INTENT statement,
+// which only the app's author can make (core/methodology/business-logic.md); the engine says only
+// that the column exists.
+//
+// Table-level constraints share the parenthesised list with the columns, so they are skipped by
+// their leading keyword. Missing that would invent a column named `primary` on half the schemas in
+// the wild, and the proposer would then offer the user a schema that does not exist.
+const TABLE_CONSTRAINT_KW = /^(primary|unique|foreign|check|exclude|constraint|like|inherits|partition|deferrable|initially)\b/i
+// Where a column's TYPE stops and its constraints begin. The cut is made at the first CONSTRAINT
+// word rather than at the first space, so multi-word types (`double precision`,
+// `timestamp with time zone`, `character varying`) survive whole.
+const COLUMN_CONSTRAINT_KW = /\b(?:primary\s+key|references|not\s+null|null|default|unique|check|generated|collate|constraint|deferrable|storage|compression)\b/i
+
+/** Split on commas at paren depth 0 — `numeric(10,2)` must not split into two columns. */
+function splitTopLevel(s) {
+  const out = []
+  let depth = 0, start = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c === '(') depth++
+    else if (c === ')') depth--
+    else if (c === ',' && depth === 0) { out.push(s.slice(start, i)); start = i + 1 }
+  }
+  out.push(s.slice(start))
+  return out
+}
+
+/**
+ * The contents of the balanced `( … )` that starts at or after `from`, or null when the next
+ * non-space token is not `(`. Returning null is what keeps `create table x as select …` — which has
+ * no column list at all — from parsing a subquery's parentheses as columns.
+ */
+function balancedParen(text, from) {
+  let i = from
+  while (i < text.length && /\s/.test(text[i])) i++
+  if (text[i] !== '(') return null
+  let depth = 0
+  for (let j = i; j < text.length; j++) {
+    if (text[j] === '(') depth++
+    else if (text[j] === ')') { depth--; if (depth === 0) return text.slice(i + 1, j) }
+  }
+  return null
+}
+
+/** `id uuid primary key default gen_random_uuid()` -> { name: 'id', type: 'uuid' } */
+function parseColumnDef(part) {
+  const s = part.trim()
+  if (!s || TABLE_CONSTRAINT_KW.test(s)) return null
+  const m = /^(?:"([^"]+)"|`([^`]+)`|([A-Za-z_][\w$]*))\s*([\s\S]*)$/.exec(s)
+  if (!m) return null
+  const name = (m[1] || m[2] || m[3]).toLowerCase()
+  let rest = m[4] || ''
+  const cut = COLUMN_CONSTRAINT_KW.exec(rest)
+  if (cut) rest = rest.slice(0, cut.index)
+  const type = rest.trim().replace(/\s+/g, ' ').replace(/[,;]+$/, '')
+  return { name, type: type ? type.toLowerCase() : null }
+}
+
+/** Every column definition in a `create table … ( … )` statement. */
+function parseCreateTableColumns(stmt, afterNameIdx) {
+  const inner = balancedParen(stmt, afterNameIdx)
+  if (inner == null) return []
+  const out = []
+  const seen = new Set()
+  for (const part of splitTopLevel(inner)) {
+    const def = parseColumnDef(part)
+    if (!def || seen.has(def.name)) continue
+    seen.add(def.name)
+    out.push(def)
+  }
+  return out
+}
+
 // ---------- database model (Supabase/Postgres migrations) ----------
 const sqlFiles = allPaths.filter(p => /\.sql$/i.test(p))
 const tables = new Map()
@@ -680,8 +858,43 @@ for (const p of sqlFiles) {
     let m
     if ((m = /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(\w+)\.)?["']?(\w+)["']?/i.exec(stmt))) {
       const schema = (m[1] || 'public').toLowerCase(), name = m[2].toLowerCase()
-      if (schema === 'public' && !tables.has(name)) {
-        tables.set(name, { name, definedIn: `${p}:${lineOf(absStart + m.index)}`, rlsEnabled: false, rlsAt: null, policies: [] })
+      if (schema === 'public') {
+        if (!tables.has(name)) {
+          tables.set(name, { name, definedIn: `${p}:${lineOf(absStart + m.index)}`, rlsEnabled: false, rlsAt: null, policies: [], columns: [] })
+        }
+        const cols = parseCreateTableColumns(stmt, m.index + m[0].length)
+        if (cols.length) tables.get(name).columns = cols
+      }
+    }
+    // `alter table … add column` / `drop column`. Migrations use these constantly, and a schema
+    // read only from the original CREATE would hand the intent proposer a table without the very
+    // `user_id` a later migration added.
+    //
+    // Deliberately attaches ONLY to a table this parser already knows. Creating a stub here would
+    // enter a table into the enumerated set with `rlsEnabled: false` and `rlsCertainty:
+    // from-migrations` — a CONFIRMED P0 invented out of an ALTER whose CREATE lives in the Supabase
+    // dashboard. A missing column is a coverage gap; a fabricated P0 is a breach announcement.
+    if (/\balter\s+table\b/i.test(stmt)) {
+      const at = /alter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?(?:(\w+)\.)?["']?(\w+)["']?/i.exec(stmt)
+      const tName = at ? at[2].toLowerCase() : null
+      if (at && (at[1] || 'public').toLowerCase() === 'public' && tName && tables.has(tName)) {
+        const t = tables.get(tName)
+        t.columns = t.columns || []
+        const addRe = /\badd\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?(?!constraint\b|primary\b|foreign\b|unique\b|check\b|exclude\b)(?:"([^"]+)"|([A-Za-z_][\w$]*))\s+([^,;]*)/gi
+        let am2
+        while ((am2 = addRe.exec(stmt))) {
+          const raw = am2[1] ? `"${am2[1]}" ${am2[3] || ''}` : `${am2[2]} ${am2[3] || ''}`
+          const def = parseColumnDef(raw)
+          if (def && !t.columns.some(c => c.name === def.name)) t.columns.push(def)
+        }
+        // `drop column` requires the keyword: a bare `drop constraint fk_x` must not delete a column
+        // named `constraint`, and `drop` without `column` is not a column operation.
+        const dropRe = /\bdrop\s+column\s+(?:if\s+exists\s+)?(?:"([^"]+)"|([A-Za-z_][\w$]*))/gi
+        let dm2
+        while ((dm2 = dropRe.exec(stmt))) {
+          const gone = (dm2[1] || dm2[2]).toLowerCase()
+          t.columns = t.columns.filter(c => c.name !== gone)
+        }
       }
     }
     if ((m = /alter\s+table\s+(?:(\w+)\.)?["']?(\w+)["']?\s+enable\s+row\s+level\s+security/i.exec(stmt))) {
@@ -886,6 +1099,11 @@ for (const t of tables.values()) {
   // or a code reference says nothing about whether RLS is on — claiming `false` there would be a
   // false positive, and claiming `true` would be a false negative. So: unknown.
   t.rlsCertainty = tablesFromMigrations.has(t.name) ? 'from-migrations' : 'unknown-no-migration'
+  // Same discipline for COLUMNS: only a migration's column list establishes them. A table known
+  // from generated types, Prisma or a bare `.from('x')` has an unknown shape, and `[]` must be
+  // readable as "unknown", not as "this table has no columns" — hence the separate certainty field.
+  t.columns = t.columns || []
+  t.columnsKnownFrom = t.columns.length ? 'migrations' : null
 }
 
 // If no schema source exists at all, that is ONE loud blocking unknown — not N quiet ones.
@@ -1031,19 +1249,30 @@ for (const [r, f] of files) {
 // post-pass marks a route as reaching a service-role client when any module it transitively imports
 // builds one, so `gradeRoutes` can treat "no auth" as a P0 and detect the IDOR.
 {
-  const serviceRoleFiles = new Set(
-    supabaseClients.filter(c => c.identity === 'service-role').map(c => c.file))
-  for (const route of routes) {
-    if (route.usesServiceRole) { route.reachesServiceRoleClient = true; continue }
-    const seen = new Set([route.file]); const q = [route.file]; let found = false
-    while (q.length && !found) {
+  /** Does `from` reach any file in `targets` through the import graph (including itself)? */
+  const reaches = (from, targets) => {
+    if (targets.has(from)) return true
+    const seen = new Set([from]); const q = [from]
+    while (q.length) {
       for (const dep of imports.get(q.shift()) || []) {
         if (seen.has(dep)) continue
-        if (serviceRoleFiles.has(dep)) { found = true; break }
+        if (targets.has(dep)) return true
         seen.add(dep); q.push(dep)
       }
     }
-    route.reachesServiceRoleClient = found
+    return false
+  }
+  const serviceRoleFiles = new Set(
+    supabaseClients.filter(c => c.identity === 'service-role').map(c => c.file))
+  // The mirror fact, and the one the business-logic layer's false-positive guard turns on: an anon,
+  // USER-SCOPED client means RLS with auth.uid() is the control, so `.eq('id', id)` there is the
+  // officially recommended Supabase pattern and not an IDOR (FP-03). Without this fact the
+  // business-logic pass would flag the correct app — the worst possible false positive here.
+  const anonScopedFiles = new Set(
+    supabaseClients.filter(c => c.identity === 'anon-user-scoped').map(c => c.file))
+  for (const route of routes) {
+    route.reachesServiceRoleClient = route.usesServiceRole || reaches(route.file, serviceRoleFiles)
+    route.reachesAnonScopedClient = reaches(route.file, anonScopedFiles)
   }
 }
 
