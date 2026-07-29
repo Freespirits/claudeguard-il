@@ -10,7 +10,7 @@
 // meant the severity policy lived here as well as in the engine and the report, and the three
 // copies drifted. What a probe can honestly report is what came back on the wire; grader.mjs owns
 // the step from there to a severity. See CONTEXT.md, "Fact" and "Grader".
-import { loadScope, gateTier2, normalizeHost, parseArgs } from './_scope.mjs'
+import { loadScope, gateTier2, normalizeHost, canonicalUrl, parseArgs } from './_scope.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const url = args.url
@@ -22,15 +22,20 @@ if (!url) { console.error('Missing --url'); process.exit(2) }
 const loaded = loadScope(scopePath)
 if (!loaded.ok) { console.error('GATE FAILED: ' + loaded.error); process.exit(2) }
 
-const host = normalizeHost(url)
+// One parse for both the host the gate checks and the URL the attack traffic is sent to. Deriving
+// them separately from the same raw string is what let `https://staging.myapp.com:443@evil.com`
+// clear the gate as `staging.myapp.com` and land on evil.com.
+const canon = canonicalUrl(url)
+if (!canon) { console.error(`GATE FAILED: "${url}" is not a fetchable http(s) URL.`); process.exit(2) }
+
+const host = normalizeHost(canon)
 const gate = gateTier2(host, loaded.scope, { execute: executeFlag })
 
 // Build the (non-destructive, GET-only) probe plan.
 // The plan is printed verbatim on a dry run so the user can read exactly what would be sent before
 // authorizing it — that is its whole job. Its `id` labels a planned request; it is not a finding id
 // and nothing here decides how bad a result would be.
-const base = url.startsWith('http') ? url : 'https://' + url
-const origin = new URL(base).origin
+const base = canon
 const MARKER = 'cgil7391marker'
 const plan = [
   { id: 'CG-DAST-XSS', name: 'reflected-xss', method: 'GET', url: `${base}${base.includes('?') ? '&' : '?'}q=<b>${MARKER}</b>`, purpose: 'Check if a query value is reflected unescaped.' },

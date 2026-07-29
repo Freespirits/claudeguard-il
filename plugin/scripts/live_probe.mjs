@@ -9,7 +9,7 @@
 // the three copies drifted apart. Every check below now records only what was seen on the wire;
 // grader.mjs maps a `kind` to a severity and is the single authority on it.
 // See CONTEXT.md, "Fact" and "Grader".
-import { loadScope, gateTier1, normalizeHost, parseArgs } from './_scope.mjs'
+import { loadScope, gateTier1, normalizeHost, canonicalUrl, parseArgs } from './_scope.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const url = args.url
@@ -20,7 +20,13 @@ if (!url) { console.error('Missing --url'); process.exit(2) }
 const loaded = loadScope(scopePath)
 if (!loaded.ok) { console.error('GATE FAILED: ' + loaded.error); process.exit(2) }
 
-const host = normalizeHost(url)
+// The gate reads a host and the probe sends a URL. Deriving the two from the same raw string in
+// two places is what let `https://localhost:3000@169.254.169.254` be gated as `localhost:3000` and
+// sent to the cloud-metadata service. One parse, one authority, no gap.
+const target = canonicalUrl(url)
+if (!target) { console.error(`GATE FAILED: "${url}" is not a fetchable http(s) URL.`); process.exit(2) }
+
+const host = normalizeHost(target)
 const gate = gateTier1(host, loaded.scope)
 if (!gate.allowed) {
   console.error('GATE FAILED — Tier 1 preconditions not met:')
@@ -54,7 +60,7 @@ function observe(kind, subject, at, detail) {
 }
 
 // 1) main page headers / TLS
-const base = url.startsWith('http') ? url : 'https://' + url
+const base = target
 const res = await req(base)
 if (res.error) {
   console.log(JSON.stringify({ target: host, error: res.error, observations }, null, 2))

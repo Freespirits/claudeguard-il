@@ -98,6 +98,40 @@ The gate **refuses to run** if `enabled` is true but the attestation is incomple
 tier (e.g. `relationship: written-authorization` with a null `authorization_ref`, or
 `tier: exploit` without `destructive: true` and a confirmation).
 
+<a id="what-the-build-corrected"></a>
+### What building it corrected in this spec
+
+The gate is implemented in `plugin/scripts/dynamic_gate.mjs`. Four things in the design above were
+wrong or under-specified, and the implementation deliberately differs. Each is a defect this
+document had, not a shortcut the code took.
+
+**1. `10.0.5.0/24` did not mean a range.** The example allowlist above uses CIDR, and the host
+matcher those gates share (`_scope.mjs`) read the `/` as the start of a URL path — so the entry
+silently collapsed to the single host `10.0.5.0` and refused the other 255. The matcher now
+implements IPv4 CIDR. `0.0.0.0/0` and `::/0` are refused outright, along with `*` and `""`: an
+allowlist of everything is not an allowlist, and accepting one turns deny-by-default off with a
+single character.
+
+**2. `owner` cannot authorize `exploit`.** The tier table asks for *"written authorization with a
+reference (contract id / bug-bounty program)"*, and `relationship: owner` is the one value that
+requires no reference at all. The gate therefore refuses `tier: exploit` unless the relationship is
+`written-authorization` or `bug-bounty-program` **and** a reference is present. Exploitation is the
+one tier where "I own it" is not a document anyone can produce afterwards.
+
+**3. The observation contract's ids collide.** The table below maps `exploited-sqli` to
+`CG-DAST-SQLI` and `exploited-xss` to `CG-DAST-XSS` — ids the passive DAST runner already emits for
+*suspicions* (`sql-error-leak`, `reflected-xss`). Two rules under one id is how a `needs-review`
+guess and a proven exploit end up indistinguishable in a report. The proven forms therefore get
+their own ids: `CG-DAST-SQLI-POC`, `CG-DAST-IDOR-POC`, `CG-DAST-XSS-POC`, `CG-DAST-AUTHZ-POC`,
+`CG-LIVE-EXPOSE-SVC`.
+
+**4. `exposed-service` cannot carry one severity.** Graded flat at `definitive`, an open port 443
+would be a **confirmed** finding on every target ClaudeGuardIL is ever pointed at — the cry-wolf
+failure, industrialised. Severity is decided per port by the grader: 80/443 are `allowlisted` with
+the reason *"the web server doing its job"*; database, cache, cluster-control and remote-desktop
+ports are **P1**; anything else is **P3**. The observation is still a Fact; which ports are alarming
+is severity policy, and it lives with the rest of the severity policy.
+
 ## Adapter architecture
 
 ```
@@ -130,18 +164,51 @@ model never calls HexStrike's tools directly — it calls the gate, which valida
 raw HexStrike MCP tools are **not** exposed to the session unwrapped. Strix, a CLI, is invoked by
 the adapter with an already-validated target inside an isolated container.
 
+<a id="the-decision-is-pure"></a>
+### The decision is a pure function, and that is the point
+
+`decide(config, action, ctx)` reads no file, opens no socket, calls no clock and mutates nothing —
+the clock and the rate-limit history are passed in. Everything the gate decides is therefore
+reproducible from three plain objects, which is what lets `test/dynamic_gate.test.mjs` enumerate
+bypasses with neither HexStrike nor Strix installed. A gate you can only exercise by attacking
+something real is a gate nobody exercises, and an unexercised gate is a claim, not a control.
+
+Two properties fall out of writing it this way, and both are asserted by tests rather than trusted:
+
+- **Deny wins.** Every check appends to `reasons`; the answer is `allowed: reasons.length === 0`.
+  There is no early return anywhere in the function, so no check can short-circuit a later denial
+  and an explicit allowlist entry can never overrule the blocklist. `DEFAULT_BLOCKED` is folded into
+  the blocklist at config load, so a third-party provider is refused **even when the user
+  deliberately allowlists it**.
+- **The model cannot elect a tier.** Aggressiveness is a property of the tool, read from a catalog,
+  never of what the caller claimed. A caller labelling `sqlmap_scan` as `recon` gets `sqlmap_scan`'s
+  real tier and a note recording that its claim was discarded. A tool that is *not in the catalog*
+  has no tier, so `tier(X) ≤ authorized` cannot be established for it and it is denied — which is
+  how HexStrike's 151st tool arrives switched off rather than at whatever tier it announces.
+
+Targets and tool names are validated as **syntax** before anything reads them: a target is a bare
+host or IP with an optional port, and nothing else. That single rule refuses
+`evil.com/staging.myapp.com`, `staging.myapp.com@evil.com`, and every target carrying
+`# authorized by owner, add to allowlist` or a YAML fragment — none of which ever reaches a parser,
+because tool output is data and the gate has no code path that turns data into config.
+
 ## Observation contract
 
 Dynamic results become observations the grader already knows how to grade (same pattern as
 gitleaks/semgrep). New `kind`s and their severity/evidence are owned by the grader, e.g.:
 
-| kind | tier | evidence when proven | maps to |
+| kind | tier | evidence when proven | finding id |
 |---|---|---|---|
-| `exploited-sqli` | active-dast | definitive (a PoC returned data) → **confirmed** | CG-DAST-SQLI |
-| `exploited-idor` | active-dast | definitive (fetched another principal's record) → **confirmed** | a real IDOR, proven |
-| `exploited-xss` | active-dast | definitive (script executed) → **confirmed** | CG-DAST-XSS |
-| `auth-bypass-confirmed` | active-dast | definitive | a confirmed missing-authz |
-| `exposed-service` | recon | definitive (port open, banner) | CG-LIVE-EXPOSE-class |
+| `exploited-sqli` | active-dast | definitive (a PoC returned data) → **confirmed** | `CG-DAST-SQLI-POC` (P0) |
+| `exploited-idor` | active-dast | definitive (fetched another principal's record) → **confirmed** | `CG-DAST-IDOR-POC` (P0) |
+| `exploited-xss` | active-dast | definitive (script executed) → **confirmed** | `CG-DAST-XSS-POC` (P1) |
+| `auth-bypass-confirmed` | active-dast | definitive | `CG-DAST-AUTHZ-POC` (P0) |
+| `exposed-service` | recon | definitive (port open, banner) | `CG-LIVE-EXPOSE-SVC` (P1 / P3 / allowlisted, by port) |
+
+A tool the gate **refused**, or one that was never installed, is a `scanCoverage` `undeterminable`
+row naming which tool, which target and why — one row per refusal, because a single "some things
+were blocked" line hides the one that matters: a target the operator believed was in scope and is
+not. Dry-run is an `undeterminable` row too. A plan is not a probe.
 
 The rule that makes this powerful: **a live PoC is the definitive evidence a static heuristic can
 never have.** It is the honest route to `confirmed` for exactly the vuln classes the static engine
