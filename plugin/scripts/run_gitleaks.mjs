@@ -8,6 +8,12 @@ import { join, relative, extname } from 'node:path'
 
 const root = process.argv[2] || '.'
 
+// Every path we emit uses forward slashes, matching the engine (project_model.mjs normalises the
+// same way). Without this, a finding on Windows reads `lib\db.ts` while the engine's reads
+// `lib/db.ts`, which breaks the clickable `file:line` convention and makes the same file look like
+// two different ones across the report.
+const norm = p => String(p == null ? '' : p).split(/[\\/]/).join('/')
+
 function hasGitleaks() {
   try {
     const probe = process.platform === 'win32' ? 'where gitleaks' : 'command -v gitleaks'
@@ -18,7 +24,7 @@ function hasGitleaks() {
 function parseGitleaksRows(out) {
   const rows = JSON.parse(out || '[]')
   return rows.map(r => ({
-    file: r.File, line: r.StartLine, rule: r.RuleID, masked: mask(r.Secret || r.Match || ''),
+    file: norm(r.File), line: r.StartLine, rule: r.RuleID, masked: mask(r.Secret || r.Match || ''),
   }))
 }
 
@@ -101,7 +107,7 @@ function fallbackScan() {
     for (let i = 0; i < lines.length; i++) {
       for (const [rule, re] of RULES) {
         const m = lines[i].match(re)
-        if (m) findings.push({ file: relative(root, file) || file, line: i + 1, rule, masked: mask(m[0]) })
+        if (m) findings.push({ file: norm(relative(root, file) || file), line: i + 1, rule, masked: mask(m[0]) })
       }
     }
   }

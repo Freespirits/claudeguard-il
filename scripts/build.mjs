@@ -5,7 +5,7 @@
 // - copies core/ -> skill-dist/claudeguard/references/      (claude.ai wrapper)
 // - copies the portable SKILL.md into skill-dist/claudeguard/
 // - produces claudeguard-skill.zip with SKILL.md at the zip root (claude.ai upload format)
-import { cpSync, rmSync, mkdirSync, copyFileSync, existsSync } from 'node:fs'
+import { cpSync, rmSync, mkdirSync, copyFileSync, existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execSync } from 'node:child_process'
@@ -23,6 +23,9 @@ const COPY = [
   ['guard-recipes', 'dir'],
   ['i18n', 'dir'],
   ['authorization', 'dir'],
+  // The v2 rigour lives in plugin/scripts/, which the claude.ai skill cannot run. methodology/
+  // is that method written out for a reader with no interpreter, so both wrappers get it.
+  ['methodology', 'dir'],
   ['severity-model.md', 'file'],
   ['report-template.md', 'file'],
 ]
@@ -73,6 +76,65 @@ try {
 if (!existsSync(join(distSkill, 'SKILL.md'))) fail('skill-dist/claudeguard/SKILL.md is missing')
 for (const [name] of COPY) {
   if (!existsSync(join(distRefs, name))) fail(`reference not assembled: references/${name}`)
+}
+
+// Guard-link check: every `guard:` citation the grader emits must land on a section that exists.
+// That link is the whole payoff of a finding — it is what a panicking non-expert clicks to get
+// the paste-ready fix. A dangling one is worse than no link, because it spends the user's trust
+// and returns nothing, so it fails the build rather than being reported as a warning.
+const graderFile = join(repo, 'plugin', 'scripts', 'grader.mjs')
+
+/** GitHub's heading slug: lowercase, drop punctuation, spaces become dashes. */
+const slugify = text => text.trim().toLowerCase()
+  .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+  .replace(/\s+/g, '-')
+
+/**
+ * Every anchor a recipe file offers: explicit `<a id="…">` markers (the house convention, which
+ * keeps citations short and stable when a heading is reworded) plus the slug of each heading.
+ * Fenced code blocks are stripped first — `# .env.example (committed)` inside a ```bash block is
+ * a shell comment, and counting it as a heading would invent anchors that do not exist.
+ */
+function anchorsOf(markdown) {
+  const prose = markdown.replace(/^ {0,3}(```|~~~)[\s\S]*?^ {0,3}\1[^\n]*$/gm, '')
+  const anchors = new Set()
+  for (const m of prose.matchAll(/<a\s+(?:id|name)\s*=\s*"([^"]+)"/g)) anchors.add(m[1].toLowerCase())
+  for (const m of prose.matchAll(/^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$/gm)) anchors.add(slugify(m[1]))
+  return anchors
+}
+
+if (!existsSync(graderFile)) {
+  fail('plugin/scripts/grader.mjs is missing — guard links cannot be checked')
+} else {
+  const graderSrc = readFileSync(graderFile, 'utf8')
+  // Only the literals; `guard: p.guard` is an indirection into a policy table whose own entries
+  // are literals and are therefore already collected here.
+  const links = [...new Set([...graderSrc.matchAll(/\bguard:\s*'([^']+)'/g)].map(m => m[1]))].sort()
+  const anchorCache = new Map()
+
+  let broken = 0
+  for (const link of links) {
+    const [rel, anchor] = link.split('#')
+    if (!rel.startsWith('guard-recipes/')) {
+      fail(`guard link "${link}" in grader.mjs does not point into guard-recipes/`)
+      broken++
+      continue
+    }
+    const recipe = join(core, rel)
+    if (!existsSync(recipe)) {
+      fail(`guard link "${link}" in grader.mjs: no such recipe file core/${rel}`)
+      broken++
+      continue
+    }
+    if (!anchor) continue // a whole-file citation; the file existing is the whole requirement
+    if (!anchorCache.has(recipe)) anchorCache.set(recipe, anchorsOf(readFileSync(recipe, 'utf8')))
+    if (!anchorCache.get(recipe).has(anchor.toLowerCase())) {
+      fail(`guard link "${link}" in grader.mjs: core/${rel} has no anchor "#${anchor}" ` +
+        '(add an `<a id="…"></a>` above the section, or cite the anchor that already exists)')
+      broken++
+    }
+  }
+  if (!broken) console.log(`• guard links: ${links.length} unique citation(s), all resolve`)
 }
 
 // Validate the portable skill against the strict claude.ai frontmatter schema when the

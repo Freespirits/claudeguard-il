@@ -26,10 +26,13 @@ try {
     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 128 * 1024 * 1024 })
   const data = JSON.parse(out || '{}')
   const findings = (data.results || []).map(r => ({
-    file: r.path,
+    // Forward slashes always, to match the engine's paths (see run_gitleaks.mjs).
+    file: String(r.path == null ? '' : r.path).split(/[\\/]/).join('/'),
     line: r.start?.line,
     rule: r.check_id,
-    severity: r.extra?.severity,
+    // The tool's OWN label, named so it is never mistaken for our severity. The grader owns the
+    // P0–P4 mapping; this is only an input to it (Decision 2 — the engine and adapters emit facts).
+    engineSeverity: r.extra?.severity,
     message: r.extra?.message,
   }))
   console.log(JSON.stringify({ engine: 'semgrep', available: true, count: findings.length, findings }, null, 2))

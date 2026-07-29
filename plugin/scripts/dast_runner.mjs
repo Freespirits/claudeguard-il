@@ -5,6 +5,11 @@
 // Usage:
 //   node dast_runner.mjs --url https://app.example.com --scope claudeguard.scope.yml            # dry run
 //   node dast_runner.mjs --url https://app.example.com --scope claudeguard.scope.yml --execute  # real run
+//
+// This runner emits Facts and nothing else. It used to stamp a severity onto its own results, which
+// meant the severity policy lived here as well as in the engine and the report, and the three
+// copies drifted. What a probe can honestly report is what came back on the wire; grader.mjs owns
+// the step from there to a severity. See CONTEXT.md, "Fact" and "Grader".
 import { loadScope, gateTier2, normalizeHost, parseArgs } from './_scope.mjs'
 
 const args = parseArgs(process.argv.slice(2))
@@ -21,6 +26,9 @@ const host = normalizeHost(url)
 const gate = gateTier2(host, loaded.scope, { execute: executeFlag })
 
 // Build the (non-destructive, GET-only) probe plan.
+// The plan is printed verbatim on a dry run so the user can read exactly what would be sent before
+// authorizing it — that is its whole job. Its `id` labels a planned request; it is not a finding id
+// and nothing here decides how bad a result would be.
 const base = url.startsWith('http') ? url : 'https://' + url
 const origin = new URL(base).origin
 const MARKER = 'cgil7391marker'
@@ -57,7 +65,26 @@ if (gate.dryRun || !gate.willExecute) {
 const UA = 'ClaudeGuardIL/0.1 (authorized security test)'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const delay = Math.ceil(1000 / gate.rateCap)
-const findings = []
+
+// Each `kind` below must be a key of OBSERVATION_POLICY in grader.mjs. A misspelt kind does not
+// throw — the grader files it under coverage.liveObservations.undeterminable as "no rule owns
+// observation kind", which is where a reviewer checking that the run was fully accounted for will
+// see it. `detail` says what came back and nothing more; the words "vulnerable", "unsafe" and any
+// P-number belong to the grader.
+const observations = []
+function observe(kind, subject, at, detail) {
+  observations.push({ tier: 'active-dast', kind, subject, at, detail })
+}
+
+// A step that never completed is not an observation of the target — it is an observation of the
+// network. Mixing the two would let a timeout masquerade as a clean probe, so transport failures
+// stay in their own list and are reported alongside the observations.
+const errors = []
+
+// Probes differ only in the parameter they exercise, so the path plus that parameter is the stable
+// subject: two runs against the same endpoint produce the same subject and the grader's ledger
+// counts them once.
+const probePath = new URL(base).pathname
 
 async function get(u) {
   const ctrl = new AbortController()
@@ -73,24 +100,35 @@ for (const step of plan) {
   if (gate.avoidDestructive && step.method !== 'GET') continue // never state-changing in this build
   await sleep(delay)
   const r = await get(step.url)
-  if (r.error) { findings.push({ id: step.id, result: 'error', detail: r.error }); continue }
+  if (r.error) { errors.push({ id: step.id, step: step.name, url: step.url, detail: r.error }); continue }
   const body = await r.text().catch(() => '')
   if (step.name === 'reflected-xss' && body.includes(`<b>${MARKER}</b>`)) {
-    findings.push({ id: step.id, severity: 'P1', title: 'Reflected XSS', detail: 'Injected markup was reflected unescaped.' })
+    observe('reflected-xss', `${probePath}?q`, step.url,
+      `The <b> markup sent in the q parameter came back inside the response body unescaped, marker ${MARKER} included.`)
   }
   if (step.name === 'error-sqli' && SQL_ERRORS.test(body)) {
-    findings.push({ id: step.id, severity: 'P1', title: 'SQL error leakage / possible injection', detail: 'A single quote produced a database error in the response.' })
+    // Quoting the matched string is what lets a reader tell a real query error from a validation
+    // layer politely echoing the character back.
+    const matched = SQL_ERRORS.exec(body)?.[0] || ''
+    observe('sql-error-leak', `${probePath}?id`, step.url,
+      `A single quote appended to the id parameter produced a database error string in the response body: "${matched}".`)
   }
   if (step.name === 'open-redirect') {
     const loc = r.headers?.get?.('location') || ''
-    if (loc.includes('example.org')) findings.push({ id: step.id, severity: 'P2', title: 'Open redirect', detail: `Redirects to attacker-controlled host: ${loc}` })
+    if (loc.includes('example.org')) {
+      observe('open-redirect', `${probePath}?next`, step.url,
+        `The response redirected to the host supplied in the next parameter (Location: ${loc}).`)
+    }
   }
   if (step.name === 'headers') {
-    if (!r.headers?.get?.('content-security-policy')) findings.push({ id: 'CG-DAST-CSP', severity: 'P2', title: 'Missing CSP', detail: 'No Content-Security-Policy header.' })
+    if (!r.headers?.get?.('content-security-policy')) {
+      observe('missing-csp', probePath, step.url, 'The response carried no Content-Security-Policy header.')
+    }
   }
 }
 
 console.log(JSON.stringify({
-  tier: 'active-dast', mode: 'executed', target: host, sent: plan.length, count: findings.length, findings,
-  note: 'Non-destructive GET-based probes only. Confirmed findings should be fixed in the codebase (/cg-harden, /cg-fix).',
+  tier: 'active-dast', mode: 'executed', target: host, sent: plan.length,
+  count: observations.length, observations, errors,
+  note: 'Non-destructive GET-based probes only. Observations carry no severity — grader.mjs assigns it. Fixes belong in the codebase (/cg-harden, /cg-fix).',
 }, null, 2))

@@ -29,6 +29,7 @@ export async function POST(req: Request) {
 Key choice: rate-limit by **user id** when authenticated, by **IP** otherwise. For login, key on
 `ip + username` so one attacker can't lock out many accounts *and* can't brute one account.
 
+<a id="llm-endpoints"></a>
 ## LLM endpoints — layer caps
 ```ts
 // 1) per-user request limit (above)

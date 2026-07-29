@@ -1,65 +1,275 @@
 # Severity model & finding schema
 
-Single source of truth for how ClaudeGuardIL ranks findings and what a finding must contain.
-Both the plugin and the claude.ai skill render findings from this schema.
+Single source of truth for how ClaudeGuardIL grades findings and what a finding must contain.
+The grader (`plugin/scripts/grader.mjs`) is the only component allowed to apply this model; the
+plugin and the claude.ai skill both render what it emits. `CONTEXT.md` defines the vocabulary —
+this file is the policy written in that vocabulary.
 
-## Severity levels (P0–P4)
+## The whole model in three sentences
 
-Rate by **impact × exploitability**, biased toward the reality of a vibecoded app that is
-already (or about to be) public.
+1. **Severity** says how bad it would be *if the finding is real*. It is never lowered because we
+   are unsure.
+2. **Confidence** says how sure we are, and it is computed from **Evidence** alone — nothing else
+   may set it.
+3. The **headline verdict counts only `confirmed` findings**. That is where the uncertainty gets
+   paid for, which is what makes rule 1 safe.
+
+Everything below is an elaboration of those three.
+
+---
+
+## Severity — impact if true (P0–P4)
+
+Rate by **impact × exploitability**, biased toward the reality of a vibecoded app that is already
+(or about to be) public. Severity is a property of the *consequence*, not of how well we proved it.
 
 | Level | Label (EN / HE) | Meaning | Typical examples |
 |-------|-----------------|---------|------------------|
-| **P0** | Critical / קריטי | Full compromise or total data exposure reachable by an anonymous attacker, no special conditions. Fix before anyone else sees the URL. | `service_role` key shipped to the browser; Supabase table with RLS off and public read/write; admin API route with no auth; live private API key in client bundle. |
-| **P1** | High / גבוה | Serious breach that needs one easy step or a known-common condition. | IDOR on `/api/orders/:id`; missing server-side authz; SQL/NoSQL injection; secret in git history still valid; prompt injection that reaches a destructive tool. |
-| **P2** | Medium / בינוני | Real weakness that raises risk or eases another attack. | Missing/weak CSP; no rate limit on auth/LLM endpoints; permissive CORS; cookies without `HttpOnly`/`SameSite`; verbose stack traces in prod. |
-| **P3** | Low / נמוך | Hygiene gap, defense-in-depth, or hard-to-exploit issue. | Source maps in prod; outdated-but-unreached dependency; missing security headers of secondary value. |
-| **P4** | Info / מידע | Not a vulnerability; worth noting or confirming. | "RLS is on and looks correct"; "no secrets found in bundle"; a deprecated pattern to watch. |
+| **P0** | Critical / קריטי | Full compromise or total data exposure reachable by an anonymous attacker, with no special conditions. Fix before anyone else sees the URL. | `service_role` key behind a `NEXT_PUBLIC_` prefix, so it is compiled into the browser bundle; a Supabase table created without `enable row level security`; a `SECURITY DEFINER` function with no `auth.uid()` check, callable by anyone through `supabase.rpc()`; `dangerouslyAllowBrowser: true` on an LLM SDK; an unauthenticated API route that holds the service-role key. |
+| **P1** | High / גבוה | Serious breach that needs one easy step or one common condition. | A mutating `/api/...` route with no visible authentication; a `SECURITY DEFINER` function that never pins `search_path`; user input interpolated into a prompt at a call site that also defines tools the model may invoke; injected markup reflected back unescaped; a sensitive path readable over the open internet. |
+| **P2** | Medium / בינוני | A real weakness that raises risk or makes another attack easier. | No `headers()` in `next.config`, so nothing sets a CSP; no rate limit on an LLM endpoint (denial of wallet — a real overnight bill with no breach involved); CORS that allows any origin together with credentials; a cookie without `HttpOnly`; a mutating route that never validates its request body; `remotePatterns` that allows any image host. |
+| **P3** | Low / נמוך | Hygiene, defence-in-depth, or something genuinely hard to exploit. | Production source maps published; `ignoreBuildErrors` / `ignoreDuringBuilds` switched on; a server variable read from client code that will simply be `undefined` in the browser (a correctness bug that people "fix" by adding a public prefix — which *would* be a breach); missing `Referrer-Policy` or `nosniff`. |
+| **P4** | Info / מידע | Not a vulnerability. Worth knowing or worth confirming. | RLS enabled with zero policies — deny-all, safe but the feature is probably broken; a `.env.example` that pairs a public prefix with a credential-shaped name, teaching the next person to ship a secret. |
 
-**Escalation rule:** any secret that is (a) currently valid and (b) grants privileged access is
-**P0**, regardless of where it lives. When in doubt between two levels, pick the higher one only
-if you can name a concrete attacker action; otherwise pick the lower and say why.
+**Escalation rule.** Any secret that is (a) currently valid and (b) grants privileged access is
+**P0**, wherever it lives. When torn between two levels, pick the higher one only if you can name
+a concrete attacker action; otherwise pick the lower one and say why.
 
-## Confidence
+### Severity is uncapped — and this reverses the old rule
 
-Every finding carries a confidence, set **after** the adversarial verification pass:
+An earlier version of this model capped severity by evidence strength: weak evidence could not
+produce a P0, so an unproven catastrophe was printed as a P2. **That rule is gone.** Severity is
+now impact-if-true and nothing discounts it.
 
-- `confirmed` — reproduced against the actual code/config; evidence is exact (`file:line`).
-- `likely` — strong signal, one assumption not verified (e.g. can't confirm the key is live).
-- `needs-review` — heuristic match that a human must judge; never auto-fixed.
+Two reasons:
 
-Only `confirmed` findings are eligible for `/cg-fix`. P0/P1 must be `confirmed` or clearly
-labelled `likely` with the missing assumption stated.
+- **It double-counted the uncertainty.** Confidence already carries "how sure are we". Capping
+  severity subtracts the same doubt a second time, and the reader has no way to add it back.
+- **It buried the worst case where nobody looks.** A P0 demoted to P2 for lack of proof sorts
+  below three CSP warnings. The non-expert reading the report stops long before reaching it. A
+  report that hides its scariest line to look rigorous has failed at the only job it has.
 
-## Finding schema (every finding has all fields)
+So, plainly: **an unproven P0 is still printed as a P0.** It carries `needs-review` beside it, it
+states the assumption that would make it a false positive, and it does *not* turn the badge red.
+
+Worked example — `CG-DB-COVERAGE`. A repo with no migrations: the tables are visible in generated
+types, but nothing in the repo says whether RLS is on. Impact if RLS is off is total exposure, so
+severity is **P0**. Evidence is `weak`, so confidence is **needs-review**. It appears at the top of
+the report as a P0 the user must settle with one query — and the verdict stays `clean` unless
+something else was actually confirmed.
+
+**The one hard ceiling (LAW 3).** Name-only evidence may never justify a P0. `FOO_API_KEY` in a
+variable name is not proof that a privileged credential exists. The grader throws if a rule tries.
+In practice these are raised at P2, with the assumption stated: "that this key actually grants
+privileged access rather than being a public identifier."
+
+---
+
+## Evidence — how solidly the fact is established
+
+Evidence is about the *fact*, not about the danger. Four values, no others:
+
+| Evidence | HE | What it means | Example |
+|----------|----|---------------|---------|
+| `definitive` | חד-משמעית | The compiler, bundler or schema guarantees it. No inference, nothing in the chain that could break. | A `NEXT_PUBLIC_` prefix means the bundler substitutes the value into client output verbatim. The migrations create a table and never enable RLS. |
+| `strong` | חזקה | A direct, single-hop observation. | A module is imported directly by a client entrypoint and constructs a service-role client. |
+| `weak` | חלשה | Inferred through a chain that could break. | The module is reachable only through a re-export barrel, where tree-shaking may drop it. No auth token appears in a handler — but the check could live in a helper it imports. |
+| `judgement` | שיקול דעת | A reviewer read the code and formed a view that no rule could have enumerated. | "This admin action is gated by a flag the user controls." |
+
+`evidence.nameOnly` is a separate boolean: `true` when the **only** thing establishing the finding
+is an identifier's name. It is what LAW 3 keys on.
+
+**Name-only evidence may never justify a P0.** Names like `PUSHER_APP_KEY` or `IDEMPOTENCY_KEY`
+are routinely publishable. Reporting one as a leaked credential is how a security tool teaches its
+audience to ignore it.
+
+---
+
+## Confidence — a pure function of Evidence
+
+| Evidence | → Confidence | HE |
+|----------|--------------|-----|
+| `definitive` | `confirmed` | מאומת |
+| `strong` | `likely` | סביר |
+| `weak` | `needs-review` | דורש בדיקה |
+| `judgement` | `likely` | סביר |
+
+**Nothing may set confidence directly.** Rules supply Evidence; the grader derives Confidence and
+asserts the mapping again before returning. `judgement` maps to `likely` rather than
+`needs-review` on purpose: a reviewer who read the code has done more work than a regex that
+half-matched. It is capped there and can never reach `confirmed`, because no amount of reading is
+a proof.
+
+**What this buys you:** the same repo always grades the same way. Two runs, two machines, two
+different people — same findings, same confidences, same verdict. Confidence is not a mood.
+
+**The one asymmetry.** The adversarial verification pass may only **refute** a finding — drop it,
+with a one-line reason so it is not re-raised. It may never raise a finding's confidence. Raising
+confidence would put a human judgement back into the one place the model guarantees is mechanical.
+If a `likely` finding deserves `confirmed`, the way to get there is stronger Evidence: a live check
+(`/cg-live`) that observes the behaviour, or a rule that can see the fact definitively.
+
+Only `confirmed` findings are eligible for `/cg-fix`.
+
+---
+
+## The verdict — only `confirmed` findings count
+
+This is the rule that pays for uncapped severity. The headline verdict and the badge are computed
+from `confirmed` findings **and nothing else**:
+
+| Level | HE | Emitted when |
+|-------|----|--------------|
+| `critical` | קריטי | any confirmed P0 |
+| `high` | גבוה | any confirmed P1 (and no confirmed P0) |
+| `medium` | בינוני | any confirmed P2 (and nothing above) |
+| `low` | נמוך | at least one confirmed finding, all P3/P4 |
+| `clean` | נקי | no confirmed findings at all |
+
+The grader emits, alongside the level, `confirmedP0`, `confirmedP1`, and — deliberately in the same
+object — the counts of everything that did *not* count: `likely` and `needsReview`.
+
+**`clean` means "nothing was proven", not "nothing is wrong."** A repo with eleven unproven P0s and
+no migrations grades `clean`. The report must therefore never present `clean` on its own: it is
+shown next to the unconfirmed findings and next to Coverage, or it is a lie by omission. See
+`report-template.md`.
+
+---
+
+## Finding schema
+
+What `grader.mjs` emits for every finding. Renderers may rely on every field being present.
 
 ```yaml
-id:            CG-<DOMAIN>-<NNN>        # e.g. CG-WEB-014, CG-LLM-003
-title_en:      Short imperative title
-title_he:      כותרת קצרה
-severity:      P0 | P1 | P2 | P3 | P4
-confidence:    confirmed | likely | needs-review
-domain:        web | ai-llm | supabase-firebase | android | ios | desktop | backend-iac | ci-cd
-cwe:           CWE-<id>                 # when applicable
-owasp:         "A01:2021" | "LLM01" | "M1" ...   # web / LLM / mobile top-10 tag
-evidence:                              # what proves it — required
-  - file: path/to/file.ts
-    line: 42
-    snippet: "const admin = createClient(url, SERVICE_ROLE_KEY)"
-exploit:       One concrete sentence: attacker does X, gets Y.
-impact:        Business consequence: data/accounts/money/compliance.
-guard:         guard-recipes/<name>.md#<anchor>   # the fix to paste
-autofixable:   true | false
-tier:          static | passive-live | active-dast   # how it was found
+id:           CG-<DOMAIN>-<NNN>       # stable and unique per rule; the prefix carries the domain
+                                      # (ENV, WEB, DB, LLM, LIVE, DAST). A few config rules key the
+                                      # suffix to the config key instead, e.g. CG-WEB-env.
+subject:      route:app/api/orders/route.ts   # the exact thing graded — the join key to Coverage
+title_en:     Short imperative title
+title_he:     כותרת קצרה
+severity:     P0 | P1 | P2 | P3 | P4  # impact if true; never reduced for uncertainty
+confidence:   confirmed | likely | needs-review   # DERIVED from evidence.strength — never written
+provenance:   rule | reviewer         # a deterministic rule, or a reviewer walking the inventory
+tier:         static | passive-live | active-dast # how the underlying fact was obtained
+evidence:
+  strength:   definitive | strong | weak | judgement
+  nameOnly:   false                   # true when only an identifier's name establishes this
+  why:        One sentence on what makes the fact true at this strength.
+  at:                                 # where to look — rendered verbatim so the user can check us
+    - file:    lib/db.ts
+      line:    3
+      snippet: "const admin = createClient(url, SERVICE_ROLE_KEY)"
+exploit:      One concrete sentence: attacker does X, gets Y.
+impact:       Business consequence: data / accounts / money / compliance.
+assumption:   What would have to be true for this to be a FALSE POSITIVE. null when there is none.
+guard:        guard-recipes/<name>.md#<anchor>    # the fix to paste
+cwe:          CWE-<id>                # when applicable, else null
+owasp:        "A01:2021" | "LLM01" | "M1"         # web / LLM / mobile top-ten tag, else null
+autofixable:  true | false
 ```
+
+### What changed, and why
+
+- **`evidence` is now an object, not a list of locations.** The old schema used the word "evidence"
+  for the file/line list. `CONTEXT.md` defines Evidence as *how solidly the fact is established*,
+  which is a different thing entirely — so the locations moved under `evidence.at`, and
+  `evidence.strength` took the name. Any renderer that iterated `finding.evidence` must now iterate
+  `finding.evidence.at`.
+- **`confidence` is no longer a field anyone writes.** It is derived from `evidence.strength`.
+- **`subject` is new.** It names the exact thing graded — one table, one route, one env var — and it
+  is the key that ties a finding to its row in Coverage and to the user's allowlist.
+- **`provenance` is new.** `rule` means a deterministic rule proved it; `reviewer` means a person
+  walking the inventory thinks so. The two deserve different responses from the reader, so the
+  report shows which it is instead of flattening them into one voice.
+- **`assumption` is new.** It names what would have to be true for the finding to be a **false
+  positive** — "that authentication is not performed inside a helper this handler imports", "that
+  RLS was not enabled from the Supabase dashboard". A `likely` with no stated assumption is just
+  hedging: it transfers doubt to the reader without telling them what to check. With the assumption
+  written down, a five-second look settles it.
+- **`domain` is gone as a field.** The domain lives in the `id` prefix.
+
+---
+
+## Coverage — what was actually examined
+
+A findings list alone cannot be trusted, because it looks identical whether we checked everything
+and found little, or checked almost nothing. Coverage is the ledger that tells the two apart.
+
+Every rule iterates one enumerable set — every table, every route, every env var — and records
+**exactly one** disposition for **every** member:
+
+| Disposition | HE | Meaning |
+|-------------|----|---------|
+| `pass` | עבר | A structural property of the code shows the control is present. |
+| `fail` | נכשל | The rule concluded the control is absent or broken here, and raised a finding. |
+| `undeterminable` | לא ניתן לקבוע | Could not be settled from the repo. A reason is always attached. |
+| `allowlisted` | ברשימת ההיתרים | The user accepted it, or it is public by design (an anon/publishable identifier), or the control does not apply (a Prisma/Drizzle schema has no RLS layer to be missing). |
+
+A `pass` is not a promise of silence: a subject can pass and still carry an informational finding.
+RLS enabled with zero policies passes (deny-all is the safe direction) and still raises a P4,
+because the feature is probably broken and the usual "fix" is a permissive policy.
+
+**LAW 2 — the four must add up.** For every subject set,
+`enumerated === pass + fail + undeterminable + allowlisted`. This is asserted at runtime, not just
+written here. A subject that silently falls out of the ledger is how "we found nothing" comes to
+mean "we looked nowhere".
+
+### What `pass` does not mean
+
+**A subject is never marked `pass` because a token appeared in the source.** That is LAW 1, and it
+is enforced in the grader.
+
+Seeing the string `getUser` in a route file does not prove the handler is gated. The call may be
+unawaited. Its result may be ignored. Its throw may be swallowed by a `try/catch` three lines down.
+All of those look identical to a static read — so a route with an auth call in it lands in
+**`undeterminable`**, never in `pass`. The same applies to a `headers()` function that exists but
+whose contents we cannot verify, and to a `SECURITY DEFINER` function whose body mentions
+`auth.uid()` without our knowing whether the check gates anything.
+
+This is deliberate, and it is the point of the whole design. Printing a checkmark there would be
+worse than printing nothing, because the user stops looking. **The `undeterminable` rows are the
+reviewer's work list** — the short, honest list of "here is what a human still has to open".
+
+A `pass` is reserved for structural facts: an env var with no inlining prefix and no client reader
+*cannot* reach the browser; a table whose migration enables RLS with a non-permissive policy has
+its predicate in the migration, not inferred from a token.
+
+### Shape
+
+Coverage is emitted per subject set, alongside `verifyQuery` — the SQL handed to the user verbatim
+when the schema could not be read, so they can answer in ten seconds the question we could not.
+
+```yaml
+coverage:
+  routes:
+    enumerated: 12
+    counts: { pass: 0, fail: 3, undeterminable: 8, allowlisted: 1 }
+    # All four arrays are present, one per disposition; each row is {subject, disposition, note}.
+    undeterminable:
+      - subject: route:app/api/orders/route.ts
+        disposition: undeterminable
+        note: an authentication call is present, but whether it gates the handler is not verified
+verifyQuery: "select c.relname, c.relrowsecurity as rls_enabled ..."   # null when not needed
+```
+
+Subject sets currently enumerated: `envVars`, `nextConfigKeys`, `tables`, `dynamicTableRefs`,
+`sqlFunctions`, `routes`, `llmSites`, `supabaseClients`, `liveObservations`.
+
+---
 
 ## Report ordering
 
-Sort by severity (P0→P4), then confidence (`confirmed` first), then domain. Lead every report
-with a one-line **risk verdict** and a P0/P1 count so a non-expert instantly knows how bad it is.
+Sort by severity (P0→P4), then confidence (`confirmed` → `likely` → `needs-review`), then `id`.
+Because the `id` prefix carries the domain, equal-ranked findings group by domain for free.
+
+The headline verdict and the badge count only `confirmed` findings — see the verdict rule above and
+`report-template.md` for how the unconfirmed ones are rendered without driving the badge.
+
+---
 
 ## Scoring notes (CVSS-lite, no false precision)
 
-Do **not** compute a numeric CVSS vector — it reads as false rigor to this audience. Use the
-P0–P4 label plus the `exploit` + `impact` sentences. If a user asks for CVSS, map: P0≈9.0–10,
-P1≈7.0–8.9, P2≈4.0–6.9, P3≈0.1–3.9, P4=N/A, and state it's an approximation.
+Do **not** compute a numeric CVSS vector — it reads as false rigor to this audience. Use the P0–P4
+label plus the `exploit` and `impact` sentences, which say the same thing in words a non-expert can
+act on. If a user explicitly asks for CVSS, map: P0 ≈ 9.0–10, P1 ≈ 7.0–8.9, P2 ≈ 4.0–6.9,
+P3 ≈ 0.1–3.9, P4 = N/A — and say plainly that it is an approximation, not a computed vector.

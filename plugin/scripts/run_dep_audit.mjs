@@ -36,8 +36,11 @@ if (exists('package.json')) {
     if (out) {
       const data = safeParse(out)
       const vulns = data?.vulnerabilities || {}
+      // `advisorySeverity` is npm's label for the advisory, NOT our finding severity. The grader
+      // maps it to a P-level and, crucially, caps confidence at needs-review because reachability
+      // is unverified — an unreachable dependency CVE is a known false positive for this audience.
       const summary = Object.entries(vulns).map(([name, v]) => ({
-        name, severity: v.severity, via: Array.isArray(v.via) ? v.via.map(x => (typeof x === 'string' ? x : x.title)).filter(Boolean) : [],
+        name, advisorySeverity: v.severity, via: Array.isArray(v.via) ? v.via.map(x => (typeof x === 'string' ? x : x.title)).filter(Boolean) : [],
       }))
       results.push({ ecosystem: 'node', tool: 'npm', metadata: data?.metadata?.vulnerabilities, vulnerabilities: summary })
     }
@@ -68,5 +71,5 @@ console.log(JSON.stringify({
   results,
   note: results.length === 0
     ? 'No dependency auditor available or no manifest found. Fall back to reading the lockfile against known advisories.'
-    : 'Severity = advisory severity, capped by whether the package is actually reachable at runtime.',
+    : 'advisorySeverity is the advisory\'s own label. The grader sets the finding severity and caps confidence at needs-review, because whether the vulnerable code path is reached was not verified.',
 }, null, 2))
