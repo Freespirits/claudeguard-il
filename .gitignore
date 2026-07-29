@@ -13,3 +13,6 @@ claudeguard-skill.zip
 Thumbs.db
 
 # NOTE: sample-vulnerable-app/.env is committed on purpose (fake test fixture).
+
+# Claude Code agent worktrees and session scratch — never commit
+.claude/
