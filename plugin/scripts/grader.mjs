@@ -946,6 +946,193 @@ function gradeSupabaseClients(model, ledger, findings, allow) {
 // grades `definitive` like any other build-guaranteed fact.
 // ---------------------------------------------------------------------------
 
+// Gradle source sets that are NOT compiled into a release build. `npx react-native init` ships
+// `android/app/src/debug/AndroidManifest.xml` with `usesCleartextTraffic="true"` so Metro can talk
+// to the device, and `androidTest` manifests routinely set debuggable — grading either as if it
+// shipped put a `confirmed` finding and a `medium`/`high` verdict on a verbatim framework template.
+const NON_RELEASE_SOURCE_SETS = new Set(['debug', 'androidTest', 'test', 'benchmark'])
+
+// A permission is only a boundary if another app cannot simply hold it. `normal` (Android's default
+// when protectionLevel is omitted) is granted to every app at install with no prompt, and
+// `dangerous` is granted by a user tap — neither keeps anyone out. `checks/android.md` requires a
+// signature-level permission.
+const SIGNATURE_PROTECTION = /\bsignature\b|\bsignatureOrSystem\b|\bknownSigner\b/i
+
+/**
+ * The subject id for one exported component.
+ *
+ * It used to be `android-component:${file}:${name}`, and `name` falls back to a constant whenever
+ * the name attribute cannot be read. Two such components collided, which either swallowed the
+ * second row silently (coverage arithmetic short by one) or — when their dispositions differed —
+ * threw LAW 2 and produced NO REPORT AT ALL. The id is positional now, so two components can only
+ * collide by being the same element.
+ */
+const componentSubject = (man, c) => `android-component:${man.file}:${c.kind}:${c.line}:${c.name}`
+
+/**
+ * Walk every reachable component in one manifest. The mobile equivalent of walking every route.
+ * Returns a one-clause summary for the manifest's own ledger note, or null when there are none.
+ */
+function gradeExportedComponents(man, ledger, findings, allow) {
+  const counts = { fail: 0, pass: 0, undeterminable: 0, allowlisted: 0 }
+  // `Number(null)` and `Number('')` are both 0, which would read an UNKNOWN targetSdk as "30 or
+  // below" and turn an undeterminable row into a confident finding on every manifest that does not
+  // state one — which is nearly all of them, since the value normally lives in Gradle.
+  const targetSdk = /^\d+$/.test(String(man.targetSdkVersion ?? '')) ? Number(man.targetSdkVersion) : NaN
+
+  for (const c of man.exportedComponents || []) {
+    const cs = componentSubject(man, c)
+    const record = (disposition, note) => { counts[disposition]++; ledger.record('exportedComponents', cs, disposition, note) }
+
+    if (allow.has(cs)) { record('allowlisted', 'user allowlist'); continue }
+
+    // The home-screen entry point. Every Android app that exists has one, the platform requires it
+    // to be exported, and the remediation the old rule handed out — set `exported="false"` or
+    // require a permission — makes the app UNLAUNCHABLE. This was the single most damaging false
+    // positive in the tool: four untouched framework templates graded `medium` because of it.
+    if (c.isLauncher) {
+      record('allowlisted', `${c.kind} is the MAIN/LAUNCHER entry point; the platform requires it to be exported`)
+      continue
+    }
+
+    // `android:exported="@bool/…"` is resolved per build variant, so which one ships is not a fact
+    // this tier holds.
+    if (c.exportState === 'unresolved') {
+      record('undeterminable', `android:exported="${c.exportedAttr}" is a resource reference resolved per build variant — check what the release variant sets`)
+      continue
+    }
+
+    if (c.permission) {
+      // A permission-guarded export is a deliberate, controlled interface — but only if another app
+      // cannot simply hold the permission. When this manifest declares it, its protectionLevel is
+      // readable, and `normal` (Android's default when omitted) is granted to any app at install
+      // with no prompt. That is a checkmark over no guard at all.
+      const declared = (man.declaredPermissions || []).find(p => p.name === c.permission)
+      if (declared && !SIGNATURE_PROTECTION.test(declared.protectionLevel)) {
+        emitExportedComponentFinding(man, c, findings,
+          `android:permission="${c.permission}" is declared in this manifest with protectionLevel="${declared.protectionLevel}", which Android grants to any app at install, so the export is not guarded.`)
+        record('fail', `${c.kind} exported behind ${c.permission}, whose protectionLevel="${declared.protectionLevel}" is not a boundary`)
+        continue
+      }
+      // Structural pass: the guard is declared in the manifest and enforced by the platform, not
+      // inferred from a token in code.
+      record('pass', declared
+        ? `${c.kind} exported behind ${c.permission} (protectionLevel="${declared.protectionLevel}")`
+        : `${c.kind} exported behind the declared permission ${c.permission}`)
+      continue
+    }
+
+    // Exported BY DEFAULT: an intent-filter and no explicit `android:exported`. `checks/android.md`
+    // has always required this case and the engine could not see it, because the old component
+    // window stopped before the element's children. Android 12 (targetSdk 31) makes the missing
+    // attribute a build error, so a manifest in this state must be targeting 30 or lower — where
+    // the filter DOES export it. We cannot read targetSdk from Gradle, so unless the manifest
+    // states it, the honest answer is undeterminable rather than a confident finding.
+    if (c.exportState === 'default-exported') {
+      if (Number.isFinite(targetSdk) && targetSdk <= 30) {
+        emitExportedComponentFinding(man, c, findings,
+          `the ${c.kind} declares an <intent-filter> and no android:exported, and this manifest targets SDK ${targetSdk}, where that makes it exported to every app on the device.`)
+        record('fail', `${c.kind} exported by default through an intent-filter (targetSdk ${targetSdk})`)
+      } else {
+        record('undeterminable',
+          `${c.kind} declares an <intent-filter> and no android:exported — on targetSdk 30 and below that exports it to every app on the device; set android:exported explicitly and confirm which value the release build uses`)
+      }
+      continue
+    }
+
+    emitExportedComponentFinding(man, c, findings,
+      'android:exported="true" is set with no android:permission, so any app on the device may invoke it.')
+    record('fail', `${c.kind} exported with no permission`)
+  }
+
+  const total = Object.values(counts).reduce((a, b) => a + b, 0)
+  if (!total) return null
+  const parts = Object.entries(counts).filter(([, n]) => n).map(([d, n]) => `${n} ${d}`)
+  return `${total} reachable component${total === 1 ? '' : 's'}: ${parts.join(', ')}`
+}
+
+function emitExportedComponentFinding(man, c, findings, why) {
+  // A content provider hands out data directly, so an unguarded one is worse than an activity.
+  findings.push(finding({
+    id: 'CG-AND-004', subject: componentSubject(man, c),
+    title_en: `Exported ${c.kind} "${c.name}" has no permission guard`,
+    title_he: `הרכיב המיוצא "${c.name}" מסוג ${c.kind} אינו מוגן בהרשאה`,
+    severity: c.kind === 'provider' ? 'P1' : 'P2', evidence: 'definitive',
+    why,
+    at: firstAt(man.file, c.line),
+    exploit: `A malicious app installed alongside yours invokes this ${c.kind} directly, with no user involvement.`,
+    impact: c.kind === 'provider'
+      ? 'Any installed app reads or writes the data this provider exposes.'
+      : 'Any installed app drives this component, bypassing whatever your UI would have required.',
+    guard: 'guard-recipes/network-security-config.md#exported',
+    cwe: 'CWE-926', owasp: 'M1',
+  }))
+}
+
+/**
+ * Grade the `res/xml/network_security_config.xml` a manifest points at.
+ *
+ * Before this the file was never in `artifacts`, never read and never declared, while its mere
+ * mention in the manifest bought a `pass` reading "no debuggable, cleartext or backup exposure
+ * declared" — over a config permitting cleartext to every host and trusting any CA the phone's
+ * owner installs. `checks/android.md` lists both, and the guard recipe is written around this
+ * exact file.
+ */
+function gradeNetworkSecurityConfigs(model, ledger, findings, allow) {
+  for (const nsc of model.mobile?.networkSecurityConfigs || []) {
+    const subject = `android-network-config:${nsc.file}`
+    if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
+    if (NON_RELEASE_SOURCE_SETS.has(nsc.sourceSet)) {
+      ledger.record('mobileArtifacts', subject, 'allowlisted',
+        `src/${nsc.sourceSet} source set — never compiled into a release build`)
+      continue
+    }
+    if (!nsc.readable) {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        'the manifest points at this network security config and it could not be read — open it and confirm cleartextTrafficPermitted="false" and no <certificates src="user"/>')
+      continue
+    }
+
+    const problems = []
+    if (nsc.baseCleartext) {
+      findings.push(finding({
+        id: 'CG-AND-002', subject,
+        title_en: 'App permits unencrypted HTTP to any host',
+        title_he: 'האפליקציה מתירה תעבורת HTTP לא מוצפנת לכל שרת',
+        severity: 'P2', evidence: 'definitive',
+        why: 'the network security config sets cleartextTrafficPermitted="true" on <base-config>, which applies to every destination.',
+        at: firstAt(nsc.file, nsc.baseCleartext.line, '<base-config cleartextTrafficPermitted="true">'),
+        exploit: 'Anyone on the same Wi-Fi reads and rewrites the app\'s traffic, including tokens.',
+        impact: 'Account takeover and content tampering on any untrusted network.',
+        guard: 'guard-recipes/network-security-config.md#cleartext',
+        cwe: 'CWE-319', owasp: 'M3', autofixable: true,
+      }))
+      problems.push('cleartext permitted to every host')
+    }
+    if (nsc.trustsUserCas) {
+      findings.push(finding({
+        id: 'CG-AND-005', subject,
+        title_en: 'App trusts certificate authorities the phone\'s owner installed',
+        title_he: 'האפליקציה סומכת על רשויות אישורים שהותקנו על ידי בעל המכשיר',
+        severity: 'P2', evidence: 'definitive',
+        why: '<certificates src="user"/> sits outside <debug-overrides>, so the release build trusts any CA added to the device\'s user store.',
+        at: firstAt(nsc.file, nsc.trustsUserCas.line, '<certificates src="user" />'),
+        exploit: 'Anyone who can get a certificate onto the device — an intercepting proxy, a work profile, a phishing page that asks the user to install a profile — reads and rewrites HTTPS traffic, and nothing about the connection looks wrong.',
+        impact: 'HTTPS stops being a control: tokens and request bodies are readable in transit.',
+        guard: 'guard-recipes/network-security-config.md#user-cas',
+        cwe: 'CWE-295', owasp: 'M3',
+      }))
+      problems.push('trusts user-installed CAs')
+    }
+
+    if (problems.length) { ledger.record('mobileArtifacts', subject, 'fail', problems.join(', ')); continue }
+    const scoped = nsc.domainCleartext.flatMap(d => d.domains)
+    ledger.record('mobileArtifacts', subject, 'pass', scoped.length
+      ? `cleartext scoped to ${scoped.join(', ')}; system trust anchors only`
+      : 'cleartext not permitted; no user trust anchors outside debug-overrides')
+  }
+}
+
 function gradeMobile(model, ledger, findings, allow) {
   ledger.declare('mobileArtifacts')
   ledger.declare('exportedComponents')
@@ -953,7 +1140,23 @@ function gradeMobile(model, ledger, findings, allow) {
   for (const man of model.mobile?.android || []) {
     const subject = `android-manifest:${man.file}`
     if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
+
+    // Debug/test source sets first: none of the release-flag rules below applies to a file that no
+    // release build compiles, and running them there is a false positive by construction.
+    if (NON_RELEASE_SOURCE_SETS.has(man.sourceSet)) {
+      ledger.record('mobileArtifacts', subject, 'allowlisted',
+        `src/${man.sourceSet} source set — merged into debug and test builds only, never into a release build`)
+      for (const c of man.exportedComponents || []) {
+        ledger.record('exportedComponents', componentSubject(man, c), 'allowlisted',
+          `declared in the src/${man.sourceSet} source set, which no release build compiles`)
+      }
+      continue
+    }
+
+    // `problems` produce findings and make the manifest row `fail`. `unresolved` produce no finding
+    // and make it `undeterminable` — the honest disposition for a value this tier cannot settle.
     const problems = []
+    const unresolved = []
 
     if (man.debuggable?.value === 'true') {
       findings.push(finding({
@@ -965,15 +1168,27 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(man.file, man.debuggable.line, 'android:debuggable="true"'),
         exploit: 'Anyone with the installed app attaches a debugger, reads memory and stored data, and steps through your logic.',
         impact: 'Every secret the app holds at runtime — tokens, keys, user data — is readable on any device.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/network-security-config.md#debuggable',
         cwe: 'CWE-489', owasp: 'M8', autofixable: true,
       }))
       problems.push('debuggable')
     }
 
+    // A value the manifest defers to a build variant (`@bool/cleartext`, `${placeholder}`) is
+    // UNKNOWN, not false. Reading it as absent printed "no debuggable, cleartext or backup exposure
+    // declared" over a manifest that declares exactly that, conditionally.
+    for (const [name, f] of [['debuggable', man.debuggable], ['allowBackup', man.allowBackup],
+      ['usesCleartextTraffic', man.usesCleartextTraffic]]) {
+      if (f && !f.resolved) {
+        unresolved.push(`android:${name}="${f.value}" is a resource reference resolved per build variant — check what the release variant sets`)
+      }
+    }
+
     // Cleartext is only a problem when nothing scopes it. A network security config is exactly the
-    // mechanism for allowing one legacy host without opening everything, so crediting it here is
-    // what keeps a correctly-configured app quiet.
+    // mechanism for allowing one legacy host without opening everything — but crediting its mere
+    // PRESENCE was LAW 1: a `pass` bought by a token. The referenced file is now resolved and
+    // graded as its own subject below; what is left here is the case where nothing scopes it, and
+    // the case where the reference names a file this repo does not contain.
     if (man.usesCleartextTraffic?.value === 'true' && !man.networkSecurityConfig) {
       findings.push(finding({
         id: 'CG-AND-002', subject,
@@ -984,87 +1199,99 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(man.file, man.usesCleartextTraffic.line, 'android:usesCleartextTraffic="true"'),
         exploit: 'Anyone on the same Wi-Fi reads and rewrites the app\'s traffic, including tokens.',
         impact: 'Account takeover and content tampering on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/network-security-config.md#cleartext',
         cwe: 'CWE-319', owasp: 'M3', autofixable: true,
       }))
       problems.push('cleartext')
+    } else if (man.networkSecurityConfig && !man.networkSecurityConfigFile) {
+      unresolved.push(`networkSecurityConfig="${man.networkSecurityConfig.value}" names a resource this repo does not contain — open it and confirm cleartextTrafficPermitted="false" and no <certificates src="user"/>`)
     }
 
-    if (man.allowBackup?.value === 'true') {
-      findings.push(finding({
-        id: 'CG-AND-003', subject,
-        title_en: 'App data can be extracted with adb backup',
-        title_he: 'ניתן לחלץ את נתוני האפליקציה באמצעות adb backup',
-        severity: 'P3', evidence: 'definitive',
-        why: 'android:allowBackup="true" permits the platform backup agent to copy the app\'s private data.',
-        at: firstAt(man.file, man.allowBackup.line, 'android:allowBackup="true"'),
-        exploit: 'Someone with brief physical access to an unlocked device copies the app\'s private storage over USB.',
-        impact: 'Stored tokens and local data leave the device without root.',
-        guard: 'guard-recipes/network-security-config.md',
-        cwe: 'CWE-530', owasp: 'M9', autofixable: true,
-      }))
-      problems.push('allowBackup')
+    // `android:allowBackup` is the platform DEFAULT (`true`), so a manifest that sets it explicitly
+    // behaves identically to one that omits it — and the old rule fired on the first and stayed
+    // silent on the second, which graded the template author's typing habit rather than the app.
+    // It fired on Android Studio's own "Empty Activity" and on Capacitor. Since Android 12 `adb
+    // backup` no longer includes app data at all. What is actually worth a human minute is what the
+    // backup SET contains, which is what an undeterminable row with an instruction delivers.
+    if (man.allowBackup?.value === 'true' || man.allowBackup == null) {
+      const scoped = [man.dataExtractionRules && `dataExtractionRules="${man.dataExtractionRules.value}"`,
+        man.fullBackupContent && `fullBackupContent="${man.fullBackupContent.value}"`].filter(Boolean)
+      unresolved.push(scoped.length
+        ? `backup is on (the platform default) and scoped by ${scoped.join(' and ')} — open those rules and confirm tokens and credentials are excluded`
+        : 'backup is on (the platform default) and nothing scopes it — set android:allowBackup="false", or add dataExtractionRules that exclude tokens and credentials')
     }
 
+    // Components first, so the manifest's own row can say what happened to them. The old note
+    // ("no debuggable, cleartext or backup exposure declared") was emitted verbatim even when that
+    // manifest's own components failed in the other set, and read as an all-clear on the artifact.
+    const componentOutcome = gradeExportedComponents(man, ledger, findings, allow)
+
+    const note = problems.length ? problems.join(', ')
+      : unresolved.length ? unresolved.join('; ')
+        : 'no debuggable or cleartext flag set, and android:allowBackup="false"'
     ledger.record('mobileArtifacts', subject,
-      problems.length ? 'fail' : 'pass',
-      problems.length ? problems.join(', ') : 'no debuggable, cleartext or backup exposure declared')
-
-    // Each exported component is separately enumerable, so each gets its own row — the mobile
-    // equivalent of walking every route.
-    for (const c of man.exportedComponents || []) {
-      const cs = `android-component:${man.file}:${c.name}`
-      if (allow.has(cs)) { ledger.record('exportedComponents', cs, 'allowlisted', 'user allowlist'); continue }
-      if (c.hasPermission) {
-        // A permission-guarded export is a deliberate, controlled interface. This is a structural
-        // pass: the guard is declared in the manifest, not inferred from a token in code.
-        ledger.record('exportedComponents', cs, 'pass', `${c.kind} exported behind a declared permission`)
-        continue
-      }
-      // A content provider hands out data directly, so an unguarded one is worse than an activity.
-      const severity = c.kind === 'provider' ? 'P1' : 'P2'
-      findings.push(finding({
-        id: 'CG-AND-004', subject: cs,
-        title_en: `Exported ${c.kind} "${c.name}" has no permission guard`,
-        title_he: `הרכיב המיוצא "${c.name}" מסוג ${c.kind} אינו מוגן בהרשאה`,
-        severity, evidence: 'definitive',
-        why: `android:exported="true" is set with no android:permission, so any app on the device may invoke it.`,
-        at: firstAt(man.file, c.line),
-        exploit: `A malicious app installed alongside yours invokes this ${c.kind} directly, with no user involvement.`,
-        impact: c.kind === 'provider'
-          ? 'Any installed app reads or writes the data this provider exposes.'
-          : 'Any installed app drives this component, bypassing whatever your UI would have required.',
-        guard: 'guard-recipes/network-security-config.md',
-        cwe: 'CWE-926', owasp: 'M1',
-      }))
-      ledger.record('exportedComponents', cs, 'fail', `${c.kind} exported with no permission`)
-    }
+      problems.length ? 'fail' : unresolved.length ? 'undeterminable' : 'pass',
+      componentOutcome ? `${note} (${componentOutcome})` : note)
   }
+
+  gradeNetworkSecurityConfigs(model, ledger, findings, allow)
 
   for (const pl of model.mobile?.ios || []) {
     const subject = `ios-plist:${pl.file}`
     if (allow.has(subject)) { ledger.record('mobileArtifacts', subject, 'allowlisted', 'user allowlist'); continue }
 
+    // A plist Xcode wrote in the BINARY format — which is what ships inside an IPA — has no
+    // textual `<key>X</key><true/>` to read, so every ATS fact came back null and the plist earned
+    // a `pass` reading "ATS left at the secure platform default". That checkmark was bought by the
+    // file being unreadable, which is the one reason a checkmark may never rest on.
+    if (pl.format && pl.format !== 'xml') {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        `this plist is in ${pl.format === 'binary' ? 'the binary' : 'an unrecognised'} format, which the static tier cannot read — convert it (\`plutil -convert xml1\`) or open it in Xcode and confirm NSAppTransportSecurity, CFBundleURLTypes and any hardcoded values against checks/ios.md`)
+      continue
+    }
+
+    const problems = []
+
+    // On iOS 10+ NSAllowsArbitraryLoads is IGNORED when any of NSAllowsArbitraryLoadsInWebContent,
+    // NSAllowsArbitraryLoadsForMedia or NSAllowsLocalNetworking is present — the narrower key
+    // governs instead. So "ATS is off everywhere" stops being a definitive read of the file and
+    // becomes a claim about the deployment target, which lives in the pbxproj, not here. Severity
+    // is unchanged (impact-if-true is the same); the uncertainty is paid for in evidence, and the
+    // finding now names the assumption a five-second check settles.
+    const atsOverride = [
+      pl.allowsArbitraryLoadsInWebContent?.value === true && 'NSAllowsArbitraryLoadsInWebContent',
+      pl.allowsArbitraryLoadsForMedia?.value === true && 'NSAllowsArbitraryLoadsForMedia',
+      pl.allowsLocalNetworking?.value === true && 'NSAllowsLocalNetworking',
+    ].filter(Boolean)
+
     if (pl.allowsArbitraryLoads?.value === true) {
+      const overridden = atsOverride.length > 0
       findings.push(finding({
         id: 'CG-IOS-001', subject,
         title_en: 'App Transport Security is disabled for all hosts',
         title_he: 'מנגנון App Transport Security מבוטל עבור כל השרתים',
-        severity: 'P2', evidence: 'definitive',
-        why: 'NSAllowsArbitraryLoads is true, which turns off the platform requirement for HTTPS.',
+        severity: 'P2', evidence: overridden ? 'weak' : 'definitive',
+        why: overridden
+          ? `NSAllowsArbitraryLoads is true, but ${atsOverride.join(' / ')} is also set, and iOS 10 and later ignore NSAllowsArbitraryLoads whenever one of those is present.`
+          : 'NSAllowsArbitraryLoads is true, which turns off the platform requirement for HTTPS.',
         at: firstAt(pl.file, pl.allowsArbitraryLoads.line, 'NSAllowsArbitraryLoads'),
         exploit: 'Anyone on the same network reads and rewrites the app\'s traffic, including tokens.',
         impact: 'Account takeover and content tampering on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/ios-ats.md#arbitrary-loads',
         cwe: 'CWE-319', owasp: 'M3',
-        assumption: pl.hasExceptionDomains
-          ? 'That the NSExceptionDomains block does not already restrict this to hosts you control.'
-          : null,
+        assumption: overridden
+          ? `That this target still deploys to iOS 9, where NSAllowsArbitraryLoads is honoured. On iOS 10 and later ${atsOverride.join(' / ')} governs instead and this key does nothing.`
+          : pl.hasExceptionDomains
+            ? 'That the NSExceptionDomains block does not already restrict this to hosts you control.'
+            : null,
       }))
-      ledger.record('mobileArtifacts', subject, 'fail', 'ATS disabled globally')
-      continue
+      problems.push(overridden
+        ? `NSAllowsArbitraryLoads is set but ${atsOverride.join(' / ')} overrides it on iOS 10+`
+        : 'ATS disabled globally')
     }
 
+    // Not `else`: when both keys are set, the web-content key is the one iOS 10+ honours, so it is
+    // the accurate statement about the app and must not be swallowed by the broader finding.
     if (pl.allowsArbitraryLoadsInWebContent?.value === true) {
       findings.push(finding({
         id: 'CG-IOS-002', subject,
@@ -1075,10 +1302,19 @@ function gradeMobile(model, ledger, findings, allow) {
         at: firstAt(pl.file, pl.allowsArbitraryLoadsInWebContent.line, 'NSAllowsArbitraryLoadsInWebContent'),
         exploit: 'Content loaded in a web view can be rewritten in transit and then runs in your app\'s context.',
         impact: 'Injected content inside the app, on any untrusted network.',
-        guard: 'guard-recipes/network-security-config.md',
+        guard: 'guard-recipes/ios-ats.md#web-content',
         cwe: 'CWE-319', owasp: 'M3',
       }))
-      ledger.record('mobileArtifacts', subject, 'fail', 'ATS disabled for web content')
+      problems.push('ATS disabled for web content')
+    }
+
+    if (problems.length) { ledger.record('mobileArtifacts', subject, 'fail', problems.join(', ')); continue }
+
+    // Per-domain `NSExceptionAllowsInsecureHTTPLoads` is a documented P2 in checks/ios.md when it
+    // is broad, and "broad" is a judgement no rule here makes. Declared rather than passed over.
+    if (pl.insecureHttpExceptions > 0) {
+      ledger.record('mobileArtifacts', subject, 'undeterminable',
+        `${pl.insecureHttpExceptions} NSExceptionDomains entr${pl.insecureHttpExceptions === 1 ? 'y allows' : 'ies allow'} insecure HTTP loads — open the block and confirm each host is one you control and genuinely cannot serve HTTPS`)
       continue
     }
 
@@ -1592,6 +1828,58 @@ function declareUngradedSurfaces(model, ledger) {
     ledger.record('ungradedSurfaces', `k8s:${f}`, 'undeterminable',
       'this is a Kubernetes manifest; the static tier does not grade privileged securityContexts, hostPath mounts, or secrets held in a manifest — review it against guard-recipes/container-iac.md')
   }
+
+  // A mobile framework declared with zero manifests and zero plists enumerated. This is the modal
+  // shape for this audience — a managed Expo app has no `android/` or `ios/` directory at all —
+  // and every mobile subject set reported a confident 0, which the report renders as
+  // `mobileArtifacts | 0 | 0 | 0 | 0 | 0`: indistinguishable from "there is no mobile surface".
+  for (const gap of model.discovery?.mobile?.frameworkGaps || []) {
+    ledger.record('ungradedSurfaces', `mobile-framework:${gap.framework}`, 'undeterminable', gap.reason)
+  }
+
+  // Native and Dart source, and the Android build config. THE LARGEST HOLE the mobile audit found:
+  // `CODE_EXT` has no `.kt`, `.java`, `.swift`, `.m` or `.dart`, so an app whose live Stripe key,
+  // `addJavascriptInterface` bridge, plaintext token store and token logging all sat in
+  // MainActivity.kt and AppDelegate.swift produced `findings: []`, `verdict: clean`,
+  // `ungradedSurfaces: 0` — a report that reads as an examined-and-clean mobile app. One row per
+  // CLASS, because the honest statement is about the class, not about each file.
+  const NATIVE_SOURCE_CLASSES = [
+    ['kotlinJava', 'Kotlin/Java', 'hardcoded keys, WebView bridges (addJavascriptInterface, loadUrl with intent data), plaintext SharedPreferences, and tokens written to Log.*', 'checks/android.md'],
+    ['swiftObjc', 'Swift/Objective-C', 'hardcoded keys, secrets in UserDefaults instead of the Keychain, URL-scheme handlers that act on their parameters, and values printed with print/NSLog', 'checks/ios.md'],
+    ['dart', 'Dart', 'hardcoded keys and http:// endpoints — everything in the Dart bundle ships to the device and is readable', 'checks/android.md and checks/ios.md'],
+    ['androidResValues', 'Android resource value', 'API keys and backend credentials pasted into strings.xml, which are compiled into the APK and extractable with `strings`', 'checks/android.md'],
+    ['gradleConfig', 'Gradle build config', 'signing passwords and keystore paths in gradle.properties, and debug settings that survive into the release variant', 'checks/android.md'],
+  ]
+  for (const [key, label, what, ref] of NATIVE_SOURCE_CLASSES) {
+    const list = model.artifacts?.nativeSource?.[key] || []
+    if (!list.length) continue
+    ledger.record('ungradedSurfaces', `native-source:${key}`, 'undeterminable',
+      `${list.length} ${label} file${list.length === 1 ? '' : 's'} (e.g. ${list.slice(0, 3).join(', ')}) — the static tier does not read them; review against ${ref} for ${what}`)
+  }
+
+  // Manifest surfaces the engine now models and no rule grades. Permission SCOPE is a judgement
+  // about what the app is for, and a deep link's danger is in the handler the manifest only points
+  // at — but both were previously invisible, which is the one output grade-or-declare forbids.
+  for (const man of model.mobile?.android || []) {
+    if (NON_RELEASE_SOURCE_SETS.has(man.sourceSet)) continue
+    const perms = man.usesPermissions || []
+    if (perms.length) {
+      ledger.record('ungradedSurfaces', `android-permissions:${man.file}`, 'undeterminable',
+        `declares ${perms.length} permission${perms.length === 1 ? '' : 's'} (${perms.slice(0, 4).map(p => p.name).join(', ')}${perms.length > 4 ? ', …' : ''}) — the static tier does not grade permission scope; confirm each one is required by a feature the app actually ships`)
+    }
+    const links = (man.exportedComponents || []).flatMap(c => (c.deepLinks || []).map(d => ({ ...d, c })))
+    if (links.length) {
+      ledger.record('ungradedSurfaces', `android-deep-links:${man.file}`, 'undeterminable',
+        `${links.length} deep-link intent-filter${links.length === 1 ? '' : 's'} (${[...new Set(links.map(d => `${d.scheme || '*'}://${d.host || '*'}`))].slice(0, 4).join(', ')}) — a custom scheme is claimable by any other app on the device; read each handler and confirm it validates the URL before acting on it (checks/android.md, "Deep-link / intent redirection")`)
+    }
+  }
+
+  for (const pl of model.mobile?.ios || []) {
+    if (pl.urlSchemes?.length) {
+      ledger.record('ungradedSurfaces', `ios-url-schemes:${pl.file}`, 'undeterminable',
+        `declares the custom URL scheme${pl.urlSchemes.length === 1 ? '' : 's'} ${pl.urlSchemes.join(', ')} — any other app on the device can claim and invoke ${pl.urlSchemes.length === 1 ? 'it' : 'them'}; read the handler and confirm it validates parameters before performing an action (checks/ios.md, "URL schemes & universal links")`)
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,6 +2077,99 @@ const OBSERVATION_POLICY = {
     guard: 'guard-recipes/business-logic-intent.md#intent-file',
     assumption: 'That the guessed ownership model happens to match what the app actually intends.',
   },
+
+  // ---- dynamic testing (Tier 2/3, behind the gate in dynamic_gate.mjs) --------------------
+  //
+  // These five are the reason dynamic testing is worth the liability it carries. A working PoC is
+  // the DEFINITIVE evidence a static heuristic can never have, so it is the honest route to
+  // `confirmed` for exactly the classes the static engine can only call `likely` or
+  // `needs-review` — "an auth call is present but may not gate the handler" becomes "an
+  // unauthenticated request returned another principal's record". Nothing was argued into a
+  // higher confidence; better evidence was fetched, which is the only route the model allows.
+  //
+  // They are only reachable through the gate. A tool the gate refused produces no observation at
+  // all — it produces a `scanCoverage` row in gradeScanners saying which tool was refused and why.
+  'exploited-sqli': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-SQLI-POC',
+    title_en: 'SQL injection proved with a working payload', title_he: 'הזרקת SQL הוכחה עם payload עובד',
+    exploit: 'An attacker sends the same payload and reads, changes or deletes anything the database user can reach.',
+    impact: 'The database is readable and writable by anyone who finds this parameter. This was proven against the running system, not inferred from the code.',
+    guard: 'guard-recipes/zod-validation.md#parameterised-queries', cwe: 'CWE-89', owasp: 'A03:2021',
+  },
+  'exploited-idor': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-IDOR-POC',
+    title_en: 'Another user\'s record was fetched by changing an id', title_he: 'רשומה של משתמש אחר נשלפה על ידי שינוי מזהה',
+    exploit: 'An attacker increments the id in the URL and reads every other account\'s data.',
+    impact: 'Every record of this type belongs to whoever asks for it. A live request returned a record the caller does not own.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+  },
+  'exploited-xss': {
+    sev: 'P1', evidence: 'definitive', id: 'CG-DAST-XSS-POC',
+    title_en: 'Injected script executed in the page', title_he: 'סקריפט שהוזרק רץ בדף',
+    exploit: 'An attacker sends a victim a link whose script runs on your origin with the victim\'s session.',
+    impact: 'Session theft and actions performed as the victim. The script was observed executing, not merely reflected.',
+    guard: 'guard-recipes/zod-validation.md#output-encoding', cwe: 'CWE-79', owasp: 'A03:2021',
+  },
+  'auth-bypass-confirmed': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-AUTHZ-POC',
+    title_en: 'A protected endpoint answered without authentication', title_he: 'נקודת קצה מוגנת ענתה ללא אימות',
+    exploit: 'An attacker calls the endpoint with no session at all and gets the protected response.',
+    impact: 'Whatever the endpoint guards is not guarded. This resolves a route the static tier could only mark undeterminable.',
+    guard: 'guard-recipes/auth-middleware.md', cwe: 'CWE-306', owasp: 'A01:2021',
+  },
+  'exposed-service': {
+    // Severity is decided per port by `refineExposedService`, because one flat severity here would
+    // either cry wolf on every site (port 443 is a web server doing its job) or shrug at a
+    // world-readable database. Both failures are the same failure: a severity that does not track
+    // what the attacker gets.
+    sev: 'P3', evidence: 'definitive', id: 'CG-LIVE-EXPOSE-SVC',
+    title_en: 'A network service is reachable from outside', title_he: 'שירות רשת נגיש מבחוץ',
+    exploit: 'An attacker connects to the port directly, without going through your application.',
+    impact: 'Depends on the service. Anything that is not your web server is an extra way in.',
+    guard: 'guard-recipes/container-iac.md#compose-exposure', cwe: 'CWE-1327',
+    refine: refineExposedService,
+  },
+}
+
+/**
+ * Ports whose job is to answer the public. An open 443 is the site working, and reporting it would
+ * put a confirmed finding on every target ClaudeGuardIL is ever pointed at — the cry-wolf failure
+ * that teaches this audience to close the report.
+ */
+const EXPECTED_PUBLIC_PORTS = new Set([80, 443])
+
+/**
+ * Ports that should essentially never answer the open internet. Impact-if-true here is a database,
+ * a cache, an orchestrator or a remote desktop with no application in front of it.
+ */
+const SENSITIVE_PORTS = new Set([
+  1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 9300, 11211, 27017, 27018,  // data stores
+  2375, 2376, 2379, 6443, 10250,                                              // container / cluster control planes
+  3389, 5900, 623,                                                            // remote desktop / lights-out management
+  5601, 15672,                                                                // admin consoles
+])
+
+function portOf(observation) {
+  if (Number.isInteger(observation?.port)) return observation.port
+  const m = /(?:^|[/:])(\d{1,5})$/.exec(String(observation?.subject ?? ''))
+  return m ? Number(m[1]) : null
+}
+
+function refineExposedService(o) {
+  const port = portOf(o)
+  if (port !== null && EXPECTED_PUBLIC_PORTS.has(port)) {
+    return { allowlist: `port ${port} answering is the web server doing its job, not an exposure` }
+  }
+  if (port !== null && SENSITIVE_PORTS.has(port)) {
+    return {
+      sev: 'P1',
+      title_en: `A data or control-plane service is reachable on port ${port}`,
+      title_he: `שירות נתונים או ניהול נגיש בפורט ${port}`,
+      exploit: `An attacker connects to port ${port} directly and talks to the service without passing through your application or its authorization.`,
+      impact: 'Your application\'s access rules are irrelevant to someone who can reach the datastore itself.',
+    }
+  }
+  return {}
 }
 
 // The ceiling, asserted at module load. `judgement` → `likely` is the only mapping that keeps a
@@ -1807,9 +2188,18 @@ function gradeObservations(observations, ledger, findings) {
   ledger.declare('liveObservations')
   for (const o of observations || []) {
     const subject = `observation:${o.tier}:${o.kind}:${o.subject || o.at || 'target'}`
-    const p = OBSERVATION_POLICY[o.kind]
-    if (!p) {
+    const base = OBSERVATION_POLICY[o.kind]
+    if (!base) {
       ledger.record('liveObservations', subject, 'undeterminable', `no rule owns observation kind "${o.kind}"`)
+      continue
+    }
+    // A `refine` hook lets one kind carry a severity that depends on the observation itself — an
+    // open port 443 and an open port 5432 are the same `kind` and nowhere near the same finding.
+    // It may only narrow within the policy table; it never authors a confidence, because
+    // confidence stays a pure function of evidence.
+    const p = base.refine ? { ...base, ...base.refine(o) } : base
+    if (p.allowlist) {
+      ledger.record('liveObservations', subject, 'allowlisted', p.allowlist)
       continue
     }
     findings.push(finding({
@@ -2015,6 +2405,48 @@ function gradeScanners(scanners, ledger, findings, allow) {
       }
     }
   }
+
+  // ---- dynamic testing ----
+  //
+  // GRADE OR DECLARE, applied to a tool that may never have run. Dynamic testing is the resolver
+  // for the static tier's `undeterminable` worklist — a route nobody could settle from source gets
+  // settled by an unauthenticated request. So when it does NOT run, the honest output is not
+  // silence and it is certainly not a pass: it is a row saying which tool was refused or missing
+  // and why, sitting in the same table as everything else, so a reader can tell "we probed and it
+  // held" from "we never probed".
+  //
+  // Every refusal is its own row. A single "the gate blocked some things" line would hide the one
+  // that matters — a target the operator believed was in scope and is not.
+  const dyn = scanners.dynamic
+  if (dyn) {
+    if (dyn.enabled !== true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        'dynamic testing is off (dynamic_testing.enabled is not true in claudeguard.scope.yml), so nothing was probed against the running system and every route the static tier could not settle is still unsettled')
+    } else if (dyn.available !== true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        `dynamic testing is enabled but the tooling was not reachable (${dyn.unavailableReason || 'no reason given'}) — the gate held, and nothing ran`)
+    } else if (dyn.dryRun === true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        `dry_run is true, so the gate produced a plan of ${(dyn.decisions || []).length} action(s) and sent nothing — set dynamic_testing.execution.dry_run: false to actually probe`)
+    } else {
+      const executed = (dyn.decisions || []).filter(d => d.allowed).length
+      ledger.record('scanCoverage', 'scan:dynamic', 'pass',
+        `${executed} gated action(s) ran against the allowlisted target(s) at tier ${dyn.tier || 'unknown'}`)
+    }
+
+    // One row per refusal. Two identical refusals are one row — the ledger answers a duplicate
+    // subject with a throw, and a repeated refusal is the same coverage fact, not a new one.
+    const seenRefusals = new Set()
+    for (const d of dyn.decisions || []) {
+      if (d.allowed) continue
+      const subject = `scan:dynamic:${d.tool || 'unnamed-tool'}:${d.target || 'unnamed-target'}`
+      if (seenRefusals.has(subject)) continue
+      seenRefusals.add(subject)
+      ledger.record('scanCoverage', subject, 'undeterminable',
+        `the dynamic-testing gate refused ${d.tool || 'a tool'} against ${d.target || 'an unnamed target'}: ` +
+        ((d.reasons || []).join('; ') || 'no reason recorded'))
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2216,7 +2648,7 @@ export function mergeReviewerFindings(graded, reviewerFindings = []) {
  * @param {object} model            output of project_model.mjs
  * @param {object} [opts]
  * @param {object[]} [opts.observations]  tier-tagged observations from live_probe / dast_runner
- * @param {object} [opts.scanners]        { secrets, sast, dependencies } outputs from the adapters
+ * @param {object} [opts.scanners]        { secrets, sast, dependencies, dynamic } adapter outputs
  * @param {string[]} [opts.allowlist]     subject ids the user has accepted
  */
 export function grade(model, opts = {}) {
@@ -2298,7 +2730,7 @@ if (isMain) {
   const flags = new Map()
   const positional = []
   const TAKES_VALUE = new Set(['--model', '--observations', '--allowlist',
-    '--scanners', '--secrets', '--sast', '--dependencies', '--reviewer'])
+    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--reviewer'])
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (TAKES_VALUE.has(a)) flags.set(a, argv[++i])
@@ -2332,8 +2764,9 @@ if (isMain) {
     secrets: readJsonFlag('--secrets') || combined.secrets || null,
     sast: readJsonFlag('--sast') || combined.sast || null,
     dependencies: readJsonFlag('--dependencies') || combined.dependencies || null,
+    dynamic: readJsonFlag('--dynamic') || combined.dynamic || null,
   }
-  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies
+  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies || scanners.dynamic
 
   let result = grade(readModel(), {
     observations: obsFile ? JSON.parse(readFileSync(obsFile, 'utf8')).observations : [],

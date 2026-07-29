@@ -37,7 +37,63 @@ active_dast:
   max_requests_per_second: 2              # be gentle; the runner also enforces a hard cap
   avoid_destructive: true                 # skip payloads that could delete/modify data
 
-# Hosts that are ALWAYS refused, even if mistakenly listed above (defense-in-depth).
+# Tier 2/3 — DYNAMIC TESTING. Drives real offensive tooling (HexStrike's nmap/nuclei/ffuf/sqlmap,
+# Strix). Those tools enforce NOTHING themselves — no auth, no allowlist, no rate limit, no sandbox.
+# The gate in plugin/scripts/dynamic_gate.mjs is the only thing between the model and them, and it
+# is deny-by-default: with this block absent or `enabled: false`, no tool may run against anything.
+#
+# Read core/authorization/dynamic-testing-gate.md before switching this on. Every line below is a
+# check the gate performs per call, and the model cannot override any of them.
+dynamic_testing:
+  enabled: false                       # off unless deliberately turned on
+
+  authorization:
+    attested_by: ""                    # "Jane Owner <jane@app.com>" — a person who can be reached
+    relationship: owner                # owner | written-authorization | bug-bounty-program
+    authorization_ref: null            # REQUIRED unless relationship is owner (contract / program id)
+    attested_at: ""                    # YYYY-MM-DD
+
+  scope:
+    # The ONLY targets the gate will permit. Deny-by-default: a host that is not here is refused,
+    # and a host DISCOVERED during a run is a finding to report, never a target to attack — adding
+    # it is a decision you make here, by hand, before the next run.
+    # Forms: "app.example.com", "app.example.com:8443", "*.staging.example.com", "10.0.5.0/24".
+    # A port in an entry means THAT port. "*" and "0.0.0.0/0" are refused: an allowlist of
+    # everything is not an allowlist.
+    allowlist:
+      - "staging.myapp.com"
+      # - "10.0.5.0/24"
+    blocklist: []                      # explicit never-touch; deny always beats allow
+    exclude_paths:                     # destructive endpoints, off-limits even when in scope
+      - "/api/payments"
+      - "/admin/*/delete"
+
+  # Maximum aggressiveness this file authorizes: recon | active | exploit. Each tier includes the
+  # lower ones, and the model CANNOT elect a higher one — only this line grants it.
+  #   recon    read-only discovery (ports, directories, headers, subdomains). No payloads.
+  #   active   non-destructive probing (nuclei templates, reflected-input probes). Needs `active`.
+  #   exploit  real exploitation / PoC (sqlmap, Strix). Needs written-authorization WITH a
+  #            reference, `destructive: true`, and a human confirmation for each run.
+  tier: recon
+
+  execution:
+    dry_run: true                      # plan-only until explicitly flipped to false
+    destructive: false                 # state-changing payloads — default OFF
+    require_confirmation: true         # a human go before anything above recon
+    max_requests_per_minute: 60        # the gate also enforces a hard cap of 60
+
+  # Per-tool allowlist. A tool is OFF until it is named here, and a tool the gate does not know
+  # cannot run at all — a new capability arrives switched off, not at whatever tier it claims.
+  tools:
+    hexstrike:
+      endpoint: "http://localhost:8888"
+      allow: [nmap_scan, nuclei_scan, gobuster_scan]
+      deny:  [sqlmap_scan, hydra, metasploit]
+    strix:
+      mode: headless
+
+# Hosts that are ALWAYS refused, even if mistakenly listed above (defense-in-depth). Binds every
+# tier, including dynamic_testing.
 # The runner additionally refuses well-known third-party providers by default.
 never_touch:
   - "*.supabase.co"        # provider infra — audit YOUR project's rules, not their servers

@@ -84,14 +84,13 @@ const SELF_KEYED_TABLES = new Set(['profiles', 'users', 'accounts', 'members', '
 // ---------------------------------------------------------------------------
 // The intent file reader
 //
-// The repo's existing YAML reader (`_scope.mjs`, parseSimpleYaml) handles nested maps and `- item`
-// block lists but NOT inline flow sequences — and an intent file is full of them
-// (`roles: [anonymous, user, admin]`, `placed->paid: [system]`). Rather than widen a parser the
-// live/DAST authorization gate depends on, this is a local reader for one documented shape.
-//
-// It FAILS CLOSED. Every parse or schema problem throws, the caller reports the file as broken, and
-// the audit falls back to an explicitly ASSUMED intent. A half-read intent file is the worst of both
-// worlds: it looks confirmed and checks the wrong rules.
+// The repo's existing YAML reader (`_scope.mjs`, parseSimpleYaml) now reads inline flow sequences
+// (`allow: [a, b]`), but it still fails OPEN: a malformed line is silently skipped and a duplicate
+// key silently overwrites — the right trade for a scope file whose gate is deny-by-default, and the
+// wrong one here, where a half-read intent looks confirmed and checks the wrong rules. So this is a
+// local reader for one documented shape, and it FAILS CLOSED: every parse or schema problem throws,
+// the caller reports the file as broken and IGNORES it entirely, and the audit falls back to an
+// explicitly ASSUMED intent.
 // ---------------------------------------------------------------------------
 
 export class IntentError extends Error {}
@@ -704,9 +703,13 @@ const CHECKS = {
         observations: [],
       }
     }
+    // LAW 1. The remaining routes COMPARE `owned_by` — but a comparison token in the file does not
+    // prove the comparison gates the query: it may compare against a body value the caller chose,
+    // or sit on a different query than the id lookup. A checkmark here would be the exact false
+    // pass the law forbids, so this is reviewer work, not a pass.
     return {
-      disposition: 'pass',
-      note: `every route that reads a "${name}" row by id compares \`${col}\``,
+      disposition: 'undeterminable',
+      note: `every route that reads a "${name}" row by id also compares \`${col}\`, but whether that comparison actually gates the lookup (and compares against the SESSION user, not a request value) is not verified — open each route and check what \`${col}\` is compared to`,
       observations: [],
     }
   },
@@ -870,7 +873,9 @@ const CHECKS = {
     if (unproven.length) {
       return { disposition: 'undeterminable', note: `${unproven.map(routeLabelOf).join(', ')} query "${name}" as the user, but no migration proves RLS is on for this table — run the verifyQuery to settle it`, observations: [] }
     }
-    return { disposition: 'pass', note: `every route that touches "${name}" filters \`${col}\``, observations: [] }
+    // LAW 1: a `.eq('org_id', …)` token does not prove the filter compares against the CALLER's
+    // tenant rather than one taken from the request. Reviewer work, not a pass.
+    return { disposition: 'undeterminable', note: `every route that touches "${name}" filters \`${col}\`, but whether the value compared is the caller's own tenant (and not one supplied in the request) is not verified`, observations: [] }
   },
 
   // ---- 7. Value / quantity tampering --------------------------------------

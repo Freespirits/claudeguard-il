@@ -16,8 +16,7 @@ function stripComment(line) {
   return line.replace(/\s+#.*$/, '')
 }
 
-function coerce(v) {
-  let s = v.trim()
+function coerceScalar(s) {
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
     return s.slice(1, -1)
   }
@@ -26,6 +25,25 @@ function coerce(v) {
   if (s === 'null' || s === '~' || s === '') return null
   if (/^-?\d+$/.test(s)) return Number(s)
   return s
+}
+
+function coerce(v) {
+  const s = v.trim()
+  // Flow sequences — `allow: [nmap_scan, nuclei_scan]` and `blocklist: []`.
+  //
+  // Without this the value came back as the STRING "[nmap_scan, nuclei_scan]", which
+  // `Array.isArray` rejects, so a per-tool allowlist written in the form the docs themselves use
+  // silently became "no list at all". Deny-by-default made that fail closed rather than open, but
+  // a config that reads as empty when it is not is one refactor away from being read as a
+  // substring instead — and a substring check on "[nmap_scan]" would match `nmap`, `nmap_sc`, and
+  // anything else a caller passed. Parsing the form the user actually wrote is the only version
+  // with no trap in it.
+  if (s.startsWith('[') && s.endsWith(']')) {
+    const inner = s.slice(1, -1).trim()
+    if (!inner) return []
+    return inner.split(',').map(part => coerceScalar(part.trim()))
+  }
+  return coerceScalar(s)
 }
 
 // Indentation-based parser for maps + simple lists.
@@ -75,24 +93,161 @@ export function loadScope(path) {
   catch (e) { return { ok: false, error: `Could not parse scope file: ${e.message}` } }
 }
 
+/**
+ * The value `normalizeHost` returns when the input is not a host it can vouch for. It contains a
+ * NUL, so it can never equal, prefix or suffix any pattern: an input we could not parse is denied
+ * by every matcher instead of being compared as a raw string.
+ */
+export const UNMATCHABLE = '\u0000unparseable'
+
+/**
+ * Reduce any input to the host `fetch` would ACTUALLY open, in one canonical spelling.
+ *
+ * This used to be string surgery — strip the scheme, cut at the first `/` — and every bypass the
+ * audit found came from the same place: the string that was checked was not the string that was
+ * sent. All of these passed the shipped Tier-1/Tier-2 gate while the request went somewhere else:
+ *
+ *   https://staging.myapp.com:443@evil.com   userinfo. `split(':')[0]` yielded the allowlisted
+ *                                            name; fetch opened evil.com.
+ *   https://localhost:3000@169.254.169.254   the same trick against the DEFAULT target that ships
+ *                                            in SCOPE.example.yml — cloud-metadata SSRF out of the
+ *                                            box.
+ *   https://evil.com?x=.staging.example.com  `?` ends the authority for the URL parser but not for
+ *   https://evil.com#.staging.example.com    a scan for `/`, so the wildcard suffix matched.
+ *   https://api.stripe.com.                  a trailing root dot is the same name to DNS and a
+ *                                            different string to `===`, so DEFAULT_BLOCKED missed it.
+ *   https://[::ffff:169.254.169.254]         `split(':')[0]` is `[` for every `::`-leading IPv6
+ *                                            literal, so a `[::1]` target matched all of them.
+ *   https://2130706433                       a decimal-encoded 127.0.0.1 is a different string.
+ *
+ * The fix is to stop pattern-matching text and to parse with the same URL parser `fetch` uses.
+ * WHATWG parsing settles all seven at once: it discards userinfo, ends the authority at `/ \ ? #`,
+ * lowercases, converts IDN to punycode, and canonicalises decimal / octal / hex / IPv4-mapped-IPv6
+ * addresses to one spelling. The root dot is stripped here, because DNS treats `example.com.` and
+ * `example.com` as the same name and so must a blocklist.
+ *
+ * @returns {string} canonical `host` or `host:port`, or UNMATCHABLE.
+ */
 export function normalizeHost(input) {
-  let s = String(input).trim().toLowerCase()
-  s = s.replace(/^[a-z]+:\/\//, '')          // strip scheme
-  s = s.split('/')[0]                          // strip path
-  return s                                     // may include :port
+  let s = String(input == null ? '' : input).trim()
+  if (!s) return UNMATCHABLE
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    // has a scheme and an authority — parse as-is
+  } else if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(s)) {
+    // `javascript:`, `data:`, `file:` — a scheme with no authority is not a host, and guessing
+    // one from the opaque part is how a gate ends up vouching for something it never saw.
+    return UNMATCHABLE
+  } else {
+    s = 'https://' + s   // bare `host`, `host:port` or `[::1]:port`
+  }
+  let u
+  try { u = new URL(s) } catch { return UNMATCHABLE }
+  const name = u.hostname.replace(/\.+$/, '')
+  if (!name) return UNMATCHABLE
+  return u.port ? `${name}:${u.port}` : name
 }
 
-function hostMatches(host, pattern) {
-  const p = normalizeHost(pattern)
-  const h = normalizeHost(host)
-  const hNoPort = h.split(':')[0]
-  const pNoPort = p.split(':')[0]
-  if (p.startsWith('*.')) {
-    const suffix = pNoPort.slice(2)
-    return hNoPort === suffix || hNoPort.endsWith('.' + suffix)
+/** Split a canonical host into `[name, port]`. IPv6 literals keep their brackets. */
+function splitHostPort(h) {
+  const i = h.lastIndexOf(':')
+  if (i === -1 || h.endsWith(']')) return [h, '']
+  return [h.slice(0, i), h.slice(i + 1)]
+}
+
+const CIDR_RE = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})$/
+
+function ipv4ToInt(ip) {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return null
+  let n = 0
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null
+    const b = Number(part)
+    if (b > 255) return null
+    n = (n * 256) + b
   }
-  // exact: match with or without port
-  return h === p || hNoPort === pNoPort
+  return n
+}
+
+/**
+ * IPv4 CIDR containment. The dynamic-testing spec's own example allowlist contains `10.0.5.0/24`,
+ * and before this the `/` was read as the start of a path — so the entry silently collapsed to the
+ * single host `10.0.5.0` and denied the other 255. A config that means something other than what it
+ * says is a gate nobody can reason about, in either direction.
+ */
+function cidrContains(pattern, hostName) {
+  const m = CIDR_RE.exec(pattern)
+  if (!m) return false
+  const bits = Number(m[2])
+  if (bits > 32) return false
+  const net = ipv4ToInt(m[1])
+  const ip = ipv4ToInt(hostName)
+  if (net == null || ip == null) return false
+  if (bits === 0) return false   // `0.0.0.0/0` is "everything"; an allowlist of everything is not one
+  const mask = (0xffffffff << (32 - bits)) >>> 0
+  return ((net & mask) >>> 0) === ((ip & mask) >>> 0)
+}
+
+/**
+ * Does `host` match one allowlist / blocklist pattern? Exported because the dynamic-testing gate
+ * must match hosts exactly the way the Tier-1/Tier-2 gate does — two host matchers is one too many.
+ *
+ * Forms: `example.com`, `example.com:8443`, `*.example.com`, `10.0.5.0/24`, `[::1]`.
+ */
+export function hostMatches(host, pattern) {
+  const h = normalizeHost(host)
+  if (h === UNMATCHABLE) return false
+  const [hName, hPort] = splitHostPort(h)
+
+  const raw = String(pattern == null ? '' : pattern).trim()
+  if (!raw) return false
+
+  if (CIDR_RE.test(raw)) return cidrContains(raw, hName)
+  if (raw.includes('/')) return false   // the only legal `/` in a pattern is a CIDR prefix
+
+  if (raw.startsWith('*.')) {
+    const suffix = normalizeHost(raw.slice(2))
+    if (suffix === UNMATCHABLE) return false
+    const [sName, sPort] = splitHostPort(suffix)
+    if (sPort && sPort !== hPort) return false
+    return hName === sName || hName.endsWith('.' + sName)
+  }
+
+  const p = normalizeHost(raw)
+  if (p === UNMATCHABLE) return false
+  const [pName, pPort] = splitHostPort(p)
+  if (pName !== hName) return false
+  // A pattern that names a port means THAT port. `localhost:3000` — the target that ships in
+  // SCOPE.example.yml — used to license `localhost:22` and `localhost:5432` too, because the port
+  // was dropped from both sides before comparing. A pattern with no port still covers any port,
+  // which is what makes `app.example.com` cover `app.example.com:8443`.
+  return !pPort || pPort === hPort
+}
+
+/**
+ * The URL a runner may actually request, with the parts that let a gated string differ from a sent
+ * one removed: credentials (the userinfo bypass) and any non-HTTP scheme. Returns null when the
+ * input is not a fetchable http(s) URL, and null means "do not send anything".
+ *
+ * The gate reads a host; the runner sends a URL. Before this they were derived from the same raw
+ * string by two different pieces of code, which is exactly the gap the userinfo bypass drove
+ * through. Both now come from one parse.
+ */
+export function canonicalUrl(input) {
+  let s = String(input == null ? '' : input).trim()
+  if (!s) return null
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(s)) return null
+    s = 'https://' + s
+  }
+  let u
+  try { u = new URL(s) } catch { return null }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  if (!u.hostname) return null
+  u.username = ''
+  u.password = ''
+  u.hash = ''
+  return u.toString()
 }
 
 export function isBlocked(host, scope) {

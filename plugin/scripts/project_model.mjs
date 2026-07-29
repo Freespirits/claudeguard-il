@@ -17,8 +17,16 @@ import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comment
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
+// Directory NAMES skipped anywhere in the tree.
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage',
-  'vendor', '.venv', '__pycache__', '.turbo', '.cache', 'android/build', 'ios/Pods'])
+  'vendor', '.venv', '__pycache__', '.turbo', '.cache'])
+// Directory PATHS skipped, matched as a suffix of the repo-relative path. These two lived in
+// SKIP_DIRS, where they were dead: the walk tests `e.name`, a single path segment, which a
+// two-segment string can never equal. `build` happened to catch `android/build` by name; nothing
+// caught `Pods`, so vendored CocoaPods sources — which the user cannot edit — became graded
+// subjects, and every pod's Info.plist added a `pass` row that inflated coverage.
+// `methodology/enumerate.md` has documented both as skipped the whole time.
+const SKIP_DIR_PATHS = ['android/build', 'ios/Pods']
 const CODE_EXT = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.svelte', '.vue'])
 const MAX_FILE = 1.5 * 1024 * 1024
 
@@ -99,7 +107,9 @@ function* walk(dir) {
   for (const e of entries) {
     const full = join(dir, e.name)
     if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) { if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: rel(full), reason: 'ignored build/vendor dir' }); continue }
+      const relDir = rel(full)
+      if (SKIP_DIRS.has(e.name) || SKIP_DIR_PATHS.some(s => relDir === s || relDir.endsWith('/' + s))) {
+        if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: relDir, reason: 'ignored build/vendor dir' }); continue }
       if (e.name.startsWith('.') && e.name !== '.github') { if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: rel(full), reason: 'dotfile dir' }); continue }
       yield* walk(full)
     } else if (e.isFile()) yield full
@@ -137,6 +147,23 @@ const framework = {
   svelte: has('svelte') ? deps.svelte : null,
   vite: has('vite') ? deps.vite : null,
   expo: has('expo') ? deps.expo : null,
+  // The four mobile frameworks this audience actually ships. None of them was detected before, so
+  // nothing could key the "mobile framework declared but no manifest enumerated" declaration —
+  // which is the shape of every managed Expo app — and the mobile-auditor agent's own invocation
+  // condition ("the repo has React Native / Flutter / Capacitor project files") had no fact behind
+  // it. Flutter is not an npm package, so it is read from pubspec.yaml.
+  reactNative: has('react-native') ? deps['react-native'] : null,
+  capacitor: has('@capacitor/core') || has('@capacitor/cli')
+    ? (deps['@capacitor/core'] || deps['@capacitor/cli']) : null,
+  cordova: ['cordova', 'cordova-android', 'cordova-ios'].some(has)
+    ? (deps.cordova || deps['cordova-android'] || deps['cordova-ios']) : null,
+  flutter: (() => {
+    let y
+    try { y = readFileSync(join(ROOT, 'pubspec.yaml'), 'utf8') } catch { return null }
+    if (!/^\s*flutter\s*:/m.test(y)) return null
+    const sdk = /^\s*flutter\s*:\s*["']?([^"'\n]+)["']?\s*$/m.exec(y)
+    return sdk && sdk[1].trim() ? sdk[1].trim() : true
+  })(),
   electron: has('electron') ? deps.electron : null,
   supabase: has('@supabase/supabase-js') || has('@supabase/ssr') ? (deps['@supabase/supabase-js'] || deps['@supabase/ssr']) : null,
   firebase: has('firebase') || has('firebase-admin') ? (deps.firebase || deps['firebase-admin']) : null,
@@ -228,11 +255,24 @@ const importedBy = new Map()
 const bareImports = new Map() // rel -> Set(pkg)
 for (const [r, f] of files) {
   const set = new Set(), bare = new Set()
+  // The module SPECIFIER is a string literal, so stripping erases it and an import cannot be read
+  // off stripped code at all — the same shape as a route path. The discriminator is the mask at the
+  // `import`/`require` KEYWORD, which is the code half of the statement. A keyword sitting inside a
+  // template literal is QUOTED SOURCE: a test fixture, a docs snippet, a generator's output.
+  //
+  // Reading those as real imports gave this repo 18 dependencies it does not have — `rxjs` and
+  // `@supabase/supabase-js` among them, out of test fixtures — and on a user's repo it is any file
+  // that embeds an example, which for this audience is common. The import graph feeds framework
+  // detection, client/server reachability and the LLM-site scan, so a phantom edge does not stay
+  // local: it propagates into findings about code that does not exist.
+  const { mask } = stripJs(f.text)
   let m
   IMPORT_RE.lastIndex = 0
   while ((m = IMPORT_RE.exec(f.text))) {
     const spec = m[1] || m[2] || m[3]
     if (!spec) continue
+    // `(?:^|\n)\s*` can precede the keyword, so step over the leading whitespace to land on it.
+    if (mask[m.index + (m[0].length - m[0].trimStart().length)] !== CODE) continue
     const target = resolveImport(r, spec)
     if (target && target !== r) set.add(target)
     else if (!spec.startsWith('.')) {
@@ -1324,19 +1364,37 @@ const LLM_PKGS = new Set(['openai', '@anthropic-ai/sdk', '@google/generative-ai'
   'cohere-ai', 'replicate', '@mistralai/mistralai', 'groq-sdk', '@huggingface/inference'])
 // A direct call into a provider API. Kept as an independent signal so a hand-rolled fetch client,
 // which imports nothing, is still enumerated.
-const LLM_CALL_RE = /(chat\.completions\.create|messages\.create|generateText|streamText|generateObject|streamObject|getGenerativeModel|embeddings\.create|api\.(?:openai|anthropic)\.com|generativelanguage\.googleapis\.com)/
+//
+// TWO CLASSES, because they live in different places and only one of them is executable. Reading
+// both off raw text — rejecting only COMMENT — is what made this detector cry wolf at its own
+// project: it reported seven phantom call sites, `plugin/scripts/_scope.mjs` among them.
+//
+// A CALL EXPRESSION is code, so it is read from STRIPPED code. `openai.chat.completions.create(…)`
+// inside a string is not a call, it is QUOTED SOURCE — a test fixture, a doc snippet, or this very
+// file's own detection regex, since stripJs masks regex literals as STRING.
+const LLM_CALL_RE = /(chat\.completions\.create|messages\.create|generateText|streamText|generateObject|streamObject|getGenerativeModel|embeddings\.create)/
+// A provider ENDPOINT is a URL, and a URL lives inside the string literal that stripping blanks, so
+// this class must be matched on RAW text. It requires a scheme or a path: `https://api.openai.com`
+// and `api.openai.com/v1/…` are a host being CALLED. A BARE hostname is a host being NAMED, and the
+// difference is the whole finding — `_scope.mjs` lists `api.openai.com` in DEFAULT_BLOCKED, the
+// providers the live-probe gate refuses to touch. Being on a refuse-to-touch list is the opposite
+// of being called, and reporting that as an ungoverned LLM call site is the precise failure this
+// project exists to avoid.
+const LLM_HOST = '(?:api\\.(?:openai|anthropic)\\.com|generativelanguage\\.googleapis\\.com)'
+const LLM_HOST_RE = new RegExp(`https?://${LLM_HOST}|${LLM_HOST}/\\w`)
 
 const llmSites = []
 for (const [r, f] of files) {
   const importsProvider = [...(bareImports.get(r) || [])]
     .some(p => LLM_PKGS.has(p) || p.startsWith('@ai-sdk/'))
   const { code, mask } = stripJs(f.text)
-  // A provider hostname lives in a URL STRING (which stripping blanks), so the call/host signal is
-  // matched on RAW text but rejected inside comments — a commented `chat.completions.create` must
-  // not invent a phantom LLM site (an audit false positive). The flags are code patterns, checked
-  // on stripped code; template-literal `${…}` expressions survive stripping as code.
-  let llmCall = false
-  { const re = new RegExp(LLM_CALL_RE.source, 'g'); let m; while ((m = re.exec(f.text))) { if (mask[m.index] !== COMMENT) { llmCall = true; break } } }
+  // Template-literal `${…}` expressions survive stripping as code, so an interpolated call still
+  // counts. The endpoint pass rejects a COMMENT hit, so a commented-out URL invents nothing.
+  let llmCall = LLM_CALL_RE.test(code)
+  if (!llmCall) {
+    const re = new RegExp(LLM_HOST_RE.source, 'g'); let m
+    while ((m = re.exec(f.text))) { if (mask[m.index] !== COMMENT) { llmCall = true; break } }
+  }
   if (!importsProvider && !llmCall) continue
   llmSites.push({
     file: r,
@@ -1377,6 +1435,22 @@ const artifacts = {
   migrations: sqlFiles,
   envFiles,
   lockfiles: allPaths.filter(p => /(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|requirements\.txt)$/.test(p)),
+  // Source and build config the code parser cannot read: CODE_EXT has no `.kt`, `.java`, `.swift`,
+  // `.m`, `.dart`, so these files landed in `discovery.counts.unsupported` with no artifact class
+  // and no declaration. An app whose live Stripe key, WebView bridge, plaintext token store and
+  // token-logging all live in MainActivity.kt and AppDelegate.swift rendered as `findings: []`,
+  // `verdict: clean`, `ungradedSurfaces: 0` — a report that reads as examined-and-clean. Listed as
+  // CLASSES so grade-or-declare can file one honest row each instead of staying silent.
+  nativeSource: {
+    kotlinJava: allPaths.filter(p => /\.(kt|kts|java)$/.test(p) && !/\.gradle\.kts$/.test(p)),
+    swiftObjc: allPaths.filter(p => /\.(swift|m|mm)$/.test(p)),
+    dart: allPaths.filter(p => /\.dart$/.test(p)),
+    // String resources are where an Android app's hardcoded API keys actually live.
+    androidResValues: allPaths.filter(p => /(^|\/)res\/values(-[^/]+)?\/[^/]+\.xml$/.test(p)),
+    // Signing passwords and release config. `gradle.properties` is the classic committed-secret
+    // location on Android, and no secret-name rule is shaped to find it.
+    gradleConfig: allPaths.filter(p => /(^|\/)(build|settings)\.gradle(\.kts)?$|(^|\/)gradle\.properties$/.test(p)),
+  },
 }
 
 // ---------- mobile manifests ----------
@@ -1395,42 +1469,295 @@ const artifacts = {
 // finding can point at it exactly.
 function lineOf(text, index) { return text.slice(0, index).split(/\r?\n/).length }
 
+// Blank XML comments, preserving every byte offset (and therefore every line number) so lineOf()
+// stays exact. A commented-out flag that still matched would misreport the manifest — the same
+// class of bug that once made a commented-out `enable row level security` read as enabled.
+const blankXmlComments = t => t.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
+
+/**
+ * Tokenise one element's attribute list.
+ *
+ * Every attribute read here used to be its own regex with a hardcoded `"`. Single quotes are
+ * equally legal XML, and a single-quoted manifest therefore read as EVERY FLAG NULL and ZERO
+ * components — `verdict: clean` on an app declaring `android:debuggable='true'`. Tokenising once
+ * also stops one attribute's regex from matching inside another attribute's VALUE, and gives each
+ * attribute its own offset so a finding can point at the attribute rather than the element.
+ */
+function parseXmlAttrs(src, base = 0) {
+  const out = new Map()
+  const re = /([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+  let m
+  while ((m = re.exec(src))) {
+    if (out.has(m[1])) continue
+    out.set(m[1], { value: m[2] !== undefined ? m[2] : m[3], index: base + m.index })
+  }
+  return out
+}
+
+// An element's opening tag, with its attribute VALUES consumed properly.
+//
+// The old window was `[^>]*`, which ended at the first `>` in the text. Two defects followed, and
+// they pull in opposite directions:
+//   - Only `<` and `&` must be escaped in an XML attribute value, so `android:label="Settings >
+//     Advanced"` is legal and truncated the window — `android:exported` fell outside it and the
+//     element was DROPPED (a miss).
+//   - The window stopped at the element's own `>`, so its CHILDREN were structurally invisible. No
+//     rule could tell a MAIN/LAUNCHER entry point from an internal component, which is why the
+//     launcher activity of every Android app that exists was reported as an exposed component.
+const XML_ELEMENT_OPEN = /<([A-Za-z][\w.-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g
+
+const COMPONENT_KINDS = new Set(['activity', 'activity-alias', 'service', 'receiver', 'provider'])
+const LAUNCHER_CATEGORIES = new Set([
+  'android.intent.category.LAUNCHER',
+  'android.intent.category.LEANBACK_LAUNCHER',
+  'android.intent.category.CAR_LAUNCHER',
+])
+
+/** Read one element's body: '' when self-closing, else the text up to its matching close tag. */
+function elementBody(code, tag, attrsText, endOfOpenTag) {
+  if (/\/\s*$/.test(attrsText)) return ''
+  const close = code.toLowerCase().indexOf(`</${tag.toLowerCase()}`, endOfOpenTag)
+  return close === -1 ? code.slice(endOfOpenTag) : code.slice(endOfOpenTag, close)
+}
+
+/** Every `<intent-filter>` inside a component body, with its actions, categories and data. */
+function parseIntentFilters(body, base) {
+  const filters = []
+  const re = /<intent-filter\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/intent-filter\s*>/gi
+  let m
+  while ((m = re.exec(body))) {
+    const own = parseXmlAttrs(m[1])
+    const inner = m[2]
+    const names = tag => [...inner.matchAll(new RegExp(`<${tag}\\b((?:[^>"']|"[^"]*"|'[^']*')*)>`, 'gi'))]
+      .map(x => parseXmlAttrs(x[1]).get('android:name')?.value).filter(Boolean)
+    const data = [...inner.matchAll(/<data\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi)].map(x => {
+      const a = parseXmlAttrs(x[1])
+      return {
+        scheme: a.get('android:scheme')?.value ?? null,
+        host: a.get('android:host')?.value ?? null,
+        path: a.get('android:path')?.value ?? a.get('android:pathPrefix')?.value ?? a.get('android:pathPattern')?.value ?? null,
+      }
+    })
+    filters.push({
+      line: lineOf(body, m.index) + base - 1,
+      autoVerify: own.get('android:autoVerify')?.value === 'true',
+      actions: names('action'),
+      categories: names('category'),
+      data: data.filter(d => d.scheme || d.host),
+    })
+  }
+  return filters
+}
+
+/**
+ * Resolve `@xml/name` to the resource file it names, so the file can actually be READ.
+ *
+ * The grader used to credit the mere PRESENCE of `android:networkSecurityConfig` with scoping
+ * cleartext and print a `pass` over it — LAW 1 exactly: a checkmark bought by a token. The file it
+ * pointed at was never in `artifacts`, never opened, never declared, and could permit cleartext to
+ * every host AND trust any CA the phone's owner installs.
+ */
+function resolveXmlResource(manifestPath, ref) {
+  const m = /^@xml\/([\w.]+)$/.exec(String(ref || ''))
+  if (!m) return null
+  const re = new RegExp(`(^|/)res/xml(-[^/]+)?/${m[1].replace(/\./g, '\\.')}\\.xml$`)
+  const candidates = allPaths.filter(p => re.test(p))
+  if (!candidates.length) return null
+  // Prefer a file in the manifest's own source set; a library module may define the same name.
+  const base = manifestPath.replace(/AndroidManifest\.xml$/, '')
+  return candidates.find(p => p.startsWith(base)) || candidates[0]
+}
+
+/** Facts about a `res/xml/network_security_config.xml`. What any of them is worth is the grader's. */
+function readNetworkSecurityConfig(p) {
+  const text = readParsedConfig(p)
+  if (text == null) return { file: p, readable: false }
+  const code = blankXmlComments(text)
+  // `<debug-overrides>` applies ONLY to a build with android:debuggable set, so a user trust anchor
+  // inside it is deliberate and is not a release exposure. Blank the block (offsets preserved)
+  // before reading the release configuration, or the correct pattern would be reported.
+  const hasDebugOverrides = /<debug-overrides\b/i.test(code)
+  const release = code.replace(/<debug-overrides\b[\s\S]*?<\/debug-overrides\s*>/gi, m => m.replace(/[^\n]/g, ' '))
+
+  const configAt = (tag, wantCleartext) => {
+    const re = new RegExp(`<${tag}\\b((?:[^>"']|"[^"]*"|'[^']*')*)>`, 'gi')
+    const hits = []
+    let m
+    while ((m = re.exec(release))) {
+      const a = parseXmlAttrs(m[1])
+      const v = a.get('cleartextTrafficPermitted')?.value
+      if (wantCleartext && v !== 'true') continue
+      const body = elementBody(release, tag, m[1], m.index + m[0].length)
+      hits.push({
+        line: lineOf(release, m.index),
+        cleartextTrafficPermitted: v ?? null,
+        domains: [...body.matchAll(/<domain\b((?:[^>"']|"[^"]*"|'[^']*')*)>([^<]*)</gi)].map(d => d[2].trim()).filter(Boolean),
+      })
+    }
+    return hits
+  }
+
+  // A `user` trust anchor means the app trusts any CA the phone's owner installs — which is every
+  // intercepting proxy on earth, and defeats HTTPS without any of the traffic looking wrong.
+  const userAnchor = /<certificates\b(?:[^>"']|"[^"]*"|'[^']*')*src\s*=\s*(?:"user"|'user')/i.exec(release)
+
+  return {
+    file: p,
+    readable: true,
+    hasDebugOverrides,
+    baseCleartext: configAt('base-config', true)[0] || null,
+    domainCleartext: configAt('domain-config', true),
+    trustsUserCas: userAnchor ? { line: lineOf(release, userAnchor.index) } : null,
+  }
+}
+
 const androidManifests = []
+const networkSecurityConfigs = []
+const seenNsc = new Set()
 for (const p of artifacts.androidManifest) {
   const text = readParsedConfig(p); if (text == null) continue
-  // Blank XML comments first. A commented-out permission that still matched would misreport the
-  // manifest, which is the same class of bug that once made a commented-out `enable row level
-  // security` read as enabled.
-  const code = text.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
-  const attr = re => { const m = re.exec(code); return m ? { value: m[1], line: lineOf(code, m.index) } : null }
+  const code = blankXmlComments(text)
 
-  // Every component that is reachable by another app on the device. `exported` without a
-  // permission is the mobile equivalent of an unauthenticated route.
+  // Which Gradle source set this manifest belongs to. `src/debug`, `src/androidTest`, `src/test`
+  // and `src/benchmark` are NOT compiled into a release build — and the stock `npx react-native
+  // init` output ships `src/debug/AndroidManifest.xml` with `usesCleartextTraffic="true"` so Metro
+  // works. Grading those as if they shipped put a confirmed P1/P2 and a `high`/`medium` verdict on
+  // a verbatim framework template. The path is the fact; which sets ship is the grader's call.
+  const sourceSet = (/(^|\/)src\/([^/]+)\//.exec(p) || [, , null])[2]
+
+  // The release flags live on `<application>`. Scanning the whole file for them could pick a value
+  // out of an unrelated element.
+  let appAttrs = new Map()
+  {
+    XML_ELEMENT_OPEN.lastIndex = 0
+    let m
+    while ((m = XML_ELEMENT_OPEN.exec(code))) {
+      if (m[1].toLowerCase() !== 'application') continue
+      appAttrs = parseXmlAttrs(m[2], m.index)
+      break
+    }
+  }
+  // A manifest value may be a resource reference (`@bool/cleartext`, `${placeholder}`) resolved per
+  // build variant. That is a normal pattern and it is NOT `false` — reading it as absent printed a
+  // `pass` note saying no cleartext was declared, over a manifest that declares it conditionally.
+  const flag = name => {
+    const a = appAttrs.get('android:' + name)
+    if (!a) return null
+    const literal = /^(true|false)$/i.test(a.value)
+    return {
+      value: literal ? a.value.toLowerCase() : a.value,
+      line: lineOf(code, a.index),
+      resolved: literal,
+    }
+  }
+  const strAttr = name => {
+    const a = appAttrs.get('android:' + name)
+    return a ? { value: a.value, line: lineOf(code, a.index) } : null
+  }
+
+  // Permissions this manifest DECLARES (not the ones it requests). A component "guarded" by a
+  // permission whose protectionLevel is `normal` is not guarded at all: Android grants normal
+  // permissions to any app at install with no prompt.
+  const declaredPermissions = []
+  const usesPermissions = []
+  let targetSdkVersion = null
+  XML_ELEMENT_OPEN.lastIndex = 0
+  {
+    let m
+    while ((m = XML_ELEMENT_OPEN.exec(code))) {
+      const tag = m[1].toLowerCase()
+      const a = parseXmlAttrs(m[2], m.index)
+      if (tag === 'permission') {
+        declaredPermissions.push({
+          name: a.get('android:name')?.value ?? null,
+          // Android's own default when the attribute is omitted.
+          protectionLevel: a.get('android:protectionLevel')?.value ?? 'normal',
+          line: lineOf(code, m.index),
+        })
+      } else if (tag === 'uses-permission' || tag === 'uses-permission-sdk-23') {
+        const n = a.get('android:name')?.value
+        if (n) usesPermissions.push({ name: n, line: lineOf(code, m.index) })
+      } else if (tag === 'uses-sdk') {
+        targetSdkVersion = a.get('android:targetSdkVersion')?.value ?? targetSdkVersion
+      }
+    }
+  }
+
+  // Every component another app on the device can reach. `exported` without a permission is the
+  // mobile equivalent of an unauthenticated route — but a MAIN/LAUNCHER activity is exported
+  // because the platform requires it to be, and telling a user to set `exported="false"` there
+  // makes their app unlaunchable.
   const exported = []
-  const COMPONENT_RE = /<(activity|activity-alias|service|receiver|provider)\b([^>]*)>/gi
-  let cm
-  while ((cm = COMPONENT_RE.exec(code))) {
-    const [, kind, attrs] = cm
-    const isExported = /android:exported\s*=\s*"true"/i.test(attrs)
-    if (!isExported) continue
-    const nameM = /android:name\s*=\s*"([^"]+)"/i.exec(attrs)
-    exported.push({
-      kind,
-      name: nameM ? nameM[1] : '(unnamed)',
-      line: lineOf(code, cm.index),
-      // A permission-guarded export is a deliberate, controlled interface.
-      hasPermission: /android:(permission|readPermission|writePermission)\s*=/i.test(attrs),
-    })
+  XML_ELEMENT_OPEN.lastIndex = 0
+  {
+    let m
+    while ((m = XML_ELEMENT_OPEN.exec(code))) {
+      const kind = m[1].toLowerCase()
+      if (!COMPONENT_KINDS.has(kind)) continue
+      const attrs = parseXmlAttrs(m[2], m.index)
+      const openEnd = m.index + m[0].length
+      const filters = parseIntentFilters(
+        elementBody(code, kind, m[2], openEnd), lineOf(code, openEnd))
+
+      const exportedAttr = attrs.get('android:exported')?.value ?? null
+      const exportState =
+        exportedAttr == null ? (filters.length ? 'default-exported' : 'not-exported')
+          : /^true$/i.test(exportedAttr) ? 'exported'
+            : /^false$/i.test(exportedAttr) ? 'not-exported'
+              : 'unresolved'
+      if (exportState === 'not-exported') continue
+
+      // An EMPTY permission value satisfied the old `android:permission\s*=` presence test, so
+      // `android:permission=""` bought a structural `pass` while enforcing nothing.
+      const permission = ['android:permission', 'android:readPermission', 'android:writePermission']
+        .map(k => attrs.get(k)?.value).find(v => v != null && v.trim() !== '') ?? null
+
+      exported.push({
+        kind,
+        name: attrs.get('android:name')?.value ?? '(unnamed)',
+        line: lineOf(code, m.index),
+        exportState,
+        exportedAttr,
+        permission,
+        hasPermission: permission != null,
+        // MAIN + LAUNCHER is the home-screen entry point. The platform requires it to be exported.
+        isLauncher: filters.some(f =>
+          f.actions.includes('android.intent.action.MAIN') &&
+          f.categories.some(c => LAUNCHER_CATEGORIES.has(c))),
+        intentFilters: filters.length,
+        // `checks/android.md` documents a P1 for deep-link / intent redirection. There was no model
+        // field for it at all, so the check could not exist and nothing declared its absence.
+        deepLinks: filters.flatMap(f => f.data.map(d => ({
+          scheme: d.scheme, host: d.host, path: d.path, autoVerify: f.autoVerify, line: f.line,
+        }))),
+      })
+    }
+  }
+
+  const nscRef = strAttr('networkSecurityConfig')
+  const nscFile = nscRef ? resolveXmlResource(p, nscRef.value) : null
+  if (nscFile && !seenNsc.has(nscFile)) {
+    seenNsc.add(nscFile)
+    networkSecurityConfigs.push({ ...readNetworkSecurityConfig(nscFile), sourceSet })
   }
 
   androidManifests.push({
     file: p,
-    debuggable: attr(/android:debuggable\s*=\s*"(true|false)"/i),
-    allowBackup: attr(/android:allowBackup\s*=\s*"(true|false)"/i),
-    usesCleartextTraffic: attr(/android:usesCleartextTraffic\s*=\s*"(true|false)"/i),
-    // Its PRESENCE is what matters: a network security config is how cleartext gets scoped to
-    // named domains instead of allowed globally.
-    networkSecurityConfig: attr(/android:networkSecurityConfig\s*=\s*"([^"]+)"/i),
+    sourceSet,
+    targetSdkVersion,
+    debuggable: flag('debuggable'),
+    allowBackup: flag('allowBackup'),
+    usesCleartextTraffic: flag('usesCleartextTraffic'),
+    networkSecurityConfig: nscRef,
+    // Null when the attribute is absent, and null WITH a reference present when `@xml/name` names
+    // no file in this repo — two different states the grader must not conflate.
+    networkSecurityConfigFile: nscFile,
+    // Either of these scopes the backup set. `allowBackup="true"` is the platform DEFAULT, so
+    // reporting it flat is reporting boilerplate; what matters is what the backup set contains.
+    dataExtractionRules: strAttr('dataExtractionRules'),
+    fullBackupContent: strAttr('fullBackupContent'),
+    declaredPermissions,
+    usesPermissions,
     exportedComponents: exported,
   })
 }
@@ -1438,21 +1765,73 @@ for (const p of artifacts.androidManifest) {
 const iosPlists = []
 for (const p of artifacts.infoPlist) {
   const text = readParsedConfig(p); if (text == null) continue
-  const code = text.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
+  // A BINARY plist (`bplist00`) is what Xcode writes for several target types and what ships
+  // inside an IPA. The textual `<key>X</key><true/>` reader finds nothing in one, which read as
+  // "ATS is at the secure platform default" and printed a `pass` — a checkmark bought by the file
+  // being unreadable, which is the worst possible reason to print one.
+  const format = /^bplist\d/.test(text) ? 'binary'
+    : /<\s*plist\b|<\?xml/i.test(text) ? 'xml' : 'unknown'
+  if (format !== 'xml') {
+    iosPlists.push({
+      file: p, format,
+      allowsArbitraryLoads: null, allowsArbitraryLoadsInWebContent: null,
+      allowsArbitraryLoadsForMedia: null, allowsLocalNetworking: null,
+      hasAtsBlock: false, hasExceptionDomains: false, insecureHttpExceptions: 0, urlSchemes: [],
+    })
+    continue
+  }
+  const code = blankXmlComments(text)
   // In a plist, `<key>X</key><true/>` is the shape. Match the key and the value that follows it.
   const boolKey = name => {
     const m = new RegExp(`<key>\\s*${name}\\s*</key>\\s*<(true|false)\\s*/>`, 'i').exec(code)
     return m ? { value: m[1] === 'true', line: lineOf(code, m.index) } : null
   }
+  // A custom URL scheme is claimable by any other app on the device, so a handler that acts on its
+  // parameters is an unauthenticated entry point (`checks/ios.md`, P1). No model field existed.
+  const urlSchemes = []
+  for (const sm of code.matchAll(/<key>\s*CFBundleURLSchemes\s*<\/key>\s*<array>([\s\S]*?)<\/array>/gi)) {
+    for (const s of sm[1].matchAll(/<string>\s*([^<]*?)\s*<\/string>/g)) if (s[1]) urlSchemes.push(s[1])
+  }
   iosPlists.push({
     file: p,
+    format,
     // ATS off globally means the app will talk plaintext HTTP to anywhere.
     allowsArbitraryLoads: boolKey('NSAllowsArbitraryLoads'),
     allowsArbitraryLoadsInWebContent: boolKey('NSAllowsArbitraryLoadsInWebContent'),
+    // On iOS 10+ the presence of ANY of these makes NSAllowsArbitraryLoads inert, so they are the
+    // difference between "ATS is off everywhere" and "ATS is off in one narrow place".
+    allowsArbitraryLoadsForMedia: boolKey('NSAllowsArbitraryLoadsForMedia'),
+    allowsLocalNetworking: boolKey('NSAllowsLocalNetworking'),
     hasAtsBlock: /<key>\s*NSAppTransportSecurity\s*<\/key>/i.test(code),
     // Domain-scoped exceptions are the correct way to allow one legacy host.
     hasExceptionDomains: /<key>\s*NSExceptionDomains\s*<\/key>/i.test(code),
+    insecureHttpExceptions:
+      [...code.matchAll(/<key>\s*NSExceptionAllowsInsecureHTTPLoads\s*<\/key>\s*<true\s*\/>/gi)].length,
+    urlSchemes,
   })
+}
+
+// A mobile framework declared in the project with ZERO manifests and ZERO plists enumerated. This
+// is the MODAL shape for this audience: a managed Expo app has no `android/` or `ios/` directory
+// at all until `expo prebuild`, so every mobile subject set reported a confident 0 — which the
+// report renders as `mobileArtifacts | 0 | 0 | 0 | 0 | 0`, indistinguishable from "there is no
+// mobile surface here". Same precedent, same fix as `discovery.routes.frameworkGaps`.
+const mobileFrameworkGaps = []
+if (!androidManifests.length && !iosPlists.length) {
+  const declared = [
+    ['expo', framework.expo, 'package.json', 'app.json / app.config.js (`expo.android`, `expo.ios.infoPlist`, `expo.scheme`, `expo.*.permissions`)'],
+    ['react-native', framework.reactNative, 'package.json', 'the native projects this app generates'],
+    ['flutter', framework.flutter, 'pubspec.yaml', 'the `android/` and `ios/` projects this app generates'],
+    ['capacitor', framework.capacitor, 'package.json', 'capacitor.config.* and the native projects it generates'],
+    ['cordova', framework.cordova, 'package.json', 'config.xml and the native projects it generates'],
+  ].filter(([, v]) => v)
+  for (const [name, , declaredIn, where] of declared) {
+    mobileFrameworkGaps.push({
+      framework: name,
+      declaredIn,
+      reason: `${name} is declared in ${declaredIn} but no AndroidManifest.xml or Info.plist was enumerated — the mobile configuration lives in ${where}, which the static tier does not grade; review it against checks/android.md and checks/ios.md`,
+    })
+  }
 }
 
 // ---------- CI/CD workflows ----------
@@ -1896,6 +2275,12 @@ discovery.routes = {
   fromFrameworkCalls: routes.filter(r => r.routeKey).length,
   frameworkGaps: routeFrameworkGaps,
 }
+discovery.mobile = {
+  androidManifests: androidManifests.length,
+  iosPlists: iosPlists.length,
+  networkSecurityConfigs: networkSecurityConfigs.length,
+  frameworkGaps: mobileFrameworkGaps,
+}
 discovery.imports = {
   edgesResolvedToFiles: importEdges,
   thirdPartyPackages: thirdPartyPkgs.size,
@@ -1976,7 +2361,7 @@ const model = {
   envGuards,
   nextConfig: nextConfigFacts,
   llmSites,
-  mobile: { android: androidManifests, ios: iosPlists },
+  mobile: { android: androidManifests, ios: iosPlists, networkSecurityConfigs },
   // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
   // graded subject set, so silence about them is no longer indistinguishable from safety.
   ci: ciWorkflows,
