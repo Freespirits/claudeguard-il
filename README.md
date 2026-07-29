@@ -77,20 +77,67 @@ security headers/CORS/cookies · rate limiting · **LLM risks** (key exposure, p
 agent-tool abuse, cost DoS) · Android/iOS manifest & storage · Electron isolation & IPC ·
 Docker/K8s/Terraform · GitHub Actions & dependency/supply-chain. Full catalog in `core/checks/`.
 
+## How it works
+
+Most AI security review reads files one at a time and forms an impression. That misses things for
+a boring reason: a model looking at `orders/route.ts` cannot know whether the `orders` table has
+RLS, because the answer is in a different file — or in no file at all. ClaudeGuardIL puts a
+deterministic layer underneath the model so it reasons over computed facts instead.
+
+**Engine → Facts → Grader → Findings → Reviewers → Report.**
+
+- The **engine** (`plugin/scripts/project_model.mjs`) builds the import graph, classifies the
+  client/server boundary, traces env-var flow, and inventories every route, table, LLM call site
+  and Supabase client. It emits **Facts** and has no opinion about how dangerous anything is.
+- The **grader** (`plugin/scripts/grader.mjs`) is the single authority on severity. Every rule
+  walks an enumerable set and decides each member, which is how completeness is achieved.
+- **Reviewers** (the subagents) then work the list of things the rules could not decide — business
+  logic, workflow flaws, authorization that is present but wrong. Their findings are marked as
+  judgement and can never be reported as proven.
+
+What that buys you, stated so you can check it rather than take our word for it:
+
+| Claim | How to verify |
+|---|---|
+| **Complete enumeration** — every route, table and env var is accounted for | The report's coverage section: `pass + fail + undeterminable + allowlisted` must equal the number enumerated. It is asserted at runtime. |
+| **Reproducible** — the same repo always yields the same severities | Severity is deterministic code, and confidence is a pure function of evidence. Run it twice. |
+| **Explicit about what it could not check** — a quiet report is not a safe one | Anything unverifiable is listed as `undeterminable` with the reason, not silently dropped. |
+
+Three rules keep it honest, and each exists because breaking it produced a real, embarrassing bug:
+
+1. **Nothing passes because a keyword was present.** A route containing `getUser()` is reported as
+   *unverified*, never as safe — from a regex, a correct check is indistinguishable from one whose
+   result is ignored. Those rows become the reviewer's work list.
+2. **Everything enumerated is accounted for.** A subject that quietly falls out of the ledger is
+   how "we found nothing" comes to mean "we looked nowhere".
+3. **A variable name is not a credential.** `FOO_API_KEY` in a name never justifies a P0 on its own.
+
+Severity says how bad a finding is *if it is real*, and is never discounted because we are unsure —
+that is what confidence is for. The headline verdict counts only **confirmed** findings, so an
+unproven P0 is still shown to you but does not turn the badge red.
+
+The regression suite includes a deliberately **correct** app — t3-env, user-scoped Supabase
+clients, RLS with `auth.uid()` policies, middleware auth — and asserts it produces **zero**
+findings. A security tool that cries wolf at correct code teaches people to ignore it, so that
+test is treated as seriously as the ones that catch real bugs.
+
 ## How it's built
 
 `core/` is the single source of truth (plain markdown). `scripts/build.mjs` copies it into both
-wrappers, so one edit updates the plugin and the claude.ai skill together. The scan engine is
-**hybrid**: it uses `gitleaks` / `semgrep` / `npm audit` when installed and falls back to Claude
-reading the code when they aren't — it never force-installs anything.
+wrappers, so one edit updates the plugin and the claude.ai skill together. Scanning is **hybrid**:
+it uses `gitleaks` / `semgrep` / `npm audit` when installed and falls back to Claude reading the
+code when they aren't — it never force-installs anything. The engine and grader have **zero**
+runtime dependencies, which CI enforces; you can run them with nothing but Node.
 
 ## Repo layout
 ```
-core/          shared knowledge (checks, guard-recipes, severity, i18n, authorization)
-plugin/        the Claude Code plugin (skills, agents, hooks, scanner scripts)
+core/          shared knowledge (checks, guard-recipes, methodology, severity, i18n, authorization)
+plugin/        the Claude Code plugin (skills, agents, hooks, engine + grader scripts)
 skill-dist/    the claude.ai skill (assembled by build.mjs)
 scripts/       build.mjs
+test/          the regression suite, including the "correct app must stay quiet" fixture
 sample-vulnerable-app/  a deliberately-insecure app to test against
+CONTEXT.md     the domain model — the vocabulary this codebase is written in
 ```
 
 ## Why is there a "vulnerable app" in this repo?
