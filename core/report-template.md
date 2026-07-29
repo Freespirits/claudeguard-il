@@ -288,8 +288,15 @@ line exactly as for security.
 
 | # | ID | Severity | Confidence / ודאות | Title (EN) | כותרת (HE) | File |
 |---|----|----------|--------------------|------------|-----------|------|
-| 1 | CG-A11Y-STATEMENT | 🟠 P1 | confirmed / מאומת | No published accessibility statement | לא פורסמה הצהרת נגישות | — |
-| 2 | CG-A11Y-001 | 🟠 P1 | confirmed / מאומת | Content image with no `alt` | תמונת תוכן ללא `alt` | components/Hero.tsx:14 |
+| 1 | CG-A11Y-001 | 🟠 P1 | confirmed / מאומת | `<img>` has no `alt` | לתמונה אין `alt` | components/Hero.tsx:14 |
+| 2 | CG-A11Y-003 | 🟠 P1 | needs-review / דורש בדיקה | Form control has no accessible label | לפקד הטופס אין תווית נגישה | components/Login.tsx:8 |
+| 3 | CG-A11Y-006 | 🟡 P2 | confirmed / מאומת | Positive tabIndex breaks focus order | tabIndex חיובי שובר את סדר המוקד | components/Nav.tsx:3 |
+
+**The accessibility statement is NOT in this table — it is a coverage row, not a finding.** Its
+absence is reported as an `undeterminable` row in the `a11yStatement` set (a static scan cannot tell a
+real deployed site with no statement from a fresh scaffold, so firing a red finding there would be
+cry-wolf), and the "you must publish one" message is carried by the mandatory-artifacts reminder
+below. When a statement page/link IS detected, that row is a `pass`.
 
 The `severity` line in each block, in legal register:
 

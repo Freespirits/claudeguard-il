@@ -259,15 +259,26 @@ export function scanA11yElements(src) {
     // layout div would flood the coverage ledger with meaningless passes.
     if (kind === 'clickable' && !names.has('onclick')) { i = tag.endIdx; continue }
 
+    // Attribute names whose value is a `{jsx expression}` rather than a literal. The grader uses this
+    // for the checks where a dynamic value cannot be confirmed (a `lang={locale}` that might not
+    // resolve to a valid code), while treating mere presence as enough elsewhere.
+    const dynamicAttrs = [...values].filter(([, v]) => v.trim().startsWith('{')).map(([k]) => k)
     const el = {
       line: lineOf(i),
       tag: tag.name,
       kind,
       attrs: [...names].sort(),
+      dynamicAttrs,
       hasSpread: spread,
       role: parseRole(values),
       tabIndex: parseTabIndex(values),
       selfClosing: tag.selfClosing,
+    }
+    // `<input type>` decides whether a text label is even required: `hidden`/`submit`/`button`/
+    // `reset`/`image` get their name elsewhere, so the grader must not demand a label of them.
+    if (kind === 'formControl') {
+      const t = values.get('type')
+      el.type = t == null ? null : (t.trim().startsWith('{') ? '(dynamic)' : t.trim().toLowerCase())
     }
 
     if (READS_CHILDREN.has(kind) && !tag.selfClosing) {

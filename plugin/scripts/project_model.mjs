@@ -2439,9 +2439,18 @@ if (stmtRouteFromRoutes) {
   const rt = routes.find(x => x.urlPath && STMT_PATH_RE.test(x.urlPath))
   a11yStatementEvidence.push({ file: rt.file || '(route)', kind: 'route', at: rt.urlPath })
 }
+// Is this a WEB surface at all? The accessibility law (ת"י 5568) is about websites, so the
+// web-only obligations (a published statement, the rendered-DOM audit) apply only when there is a
+// browser DOM to speak of. A web framework, an index.html, or any recognised DOM tag says yes; a
+// React Native / Expo / Capacitor shell whose UI is <View>/<Text> (never `<img>`) says no, and a
+// pure backend says no — neither should be asked for a web accessibility statement.
+const a11yWebSurface = !!(framework.next || framework.vue || framework.svelte || framework.vite)
+  || htmlEntrypoints.length > 0
+  || a11yElements.length > 0
 const a11y = {
   scannedFiles: [...files.keys()].filter(r => UI_EXT.has(files.get(r).ext)).length
     + Math.min(htmlEntrypoints.length, 50),
+  webSurface: a11yWebSurface,
   truncated: a11yTruncated,
   elements: a11yElements,
   statement: {

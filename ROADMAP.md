@@ -19,6 +19,7 @@ Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 | Business logic | **New, and capped.** Seven of ten taxonomy classes implemented; three declared unsupportable. Every finding is `judgement` → `likely`, never `confirmed`. |
 | Active probing (Tier 2) | **Four GET probes.** A smoke test, not a scanner. See below. |
 | Parser depth | **Regex plus lightweight parsing, not a type-aware AST.** Dynamic requires, barrel re-exports and unusual routing can escape it. Stated in `limits` on every model. |
+| **Compliance pillar (NEW)** | **Accessibility shipped, privacy documented.** A second pillar beside security: legal exposure, not breach. `pillar:'compliance'` findings never touch the security badge. Accessibility (ת"י 5568 / WCAG 2.0 AA): CG-A11Y-001..007 graded, statement + rendered-DOM declared, cry-wolf-tested. Privacy (data-security regs): CG-PRIV-* domain spec written, grader next. See below. |
 
 ### The benchmark, stated plainly
 
@@ -37,6 +38,44 @@ measured.**
 The earlier framing led with the percentages and read as a detection claim; it is retracted as
 **ERR-006** in [`ERRATA.md`](ERRATA.md). Growing the corpus with cases we did not write (§5 below) is
 the only thing that changes the underlying fact.
+
+---
+
+## The compliance pillar — a lawsuit is not a breach
+
+A vibecoded app gets its owner in trouble two ways, and only one of them is a hacker. The other is a
+**regulator or a plaintiff**, and for the Israeli audience it is often the more immediate risk. So
+findings now carry a `pillar: 'security' | 'compliance'` tag, and the two are kept rigorously apart:
+`summarize()` computes the security badge over security findings **only**, compliance gets its own
+`summary.compliance` block, and the benchmark's decision-rate ratchet and false-positive gate are
+scoped to the security pillar — a new compliance domain can never lower the security bar or redden the
+security badge. Compliance severity is **legal-exposure-if-unfixed** (stated in the statute's terms),
+and there is deliberately **no compliance P0**. Full model: [`core/severity-model.md#pillars`](core/severity-model.md).
+
+**Domain 1 — Accessibility (ת"י 5568 חלק 1 / WCAG 2.0 AA). Shipped.** A pure JSX/HTML tokenizer
+(`plugin/scripts/lib/a11y_scan.mjs`) feeds `gradeAccessibility`: **CG-A11Y-001** (img no alt),
+**-002** (html no lang), **-003** (form control no label), **-004** (icon-only control no name),
+**-005** (video no captions), **-006** (positive tabIndex), **-007** (non-keyboard-operable clickable).
+Every false-positive trap is encoded as engine data (empty `alt=""` is valid, `{...spread}` abstains,
+dynamic values abstain, decorative `role`/`aria-hidden` opt out). The legally-mandatory **accessibility
+statement is a *declared* row, not a fired finding** — a static scan cannot tell a real deployed site
+from a fresh scaffold, and a red P1 on `create-next-app` output is the cry-wolf failure the whole model
+forbids; the report's mandatory-artifacts reminder carries the "you must publish one" instead. The
+rendered-DOM half of WCAG (contrast, focus, ARIA-in-practice) is declared. Cry-wolf and detection twins
+in `test/accessibility.test.mjs` + `test/a11y_scan.test.mjs`.
+
+**Domain 2 — Privacy / data security (תקנות הגנת הפרטיות (אבטחת מידע) 2017). Documented; grader next.**
+[`core/checks/privacy-data-security.md`](core/checks/privacy-data-security.md) maps the regulation as a
+second compliance domain: a declared security-level classifier (basic/medium/high), a thin graded slice
+(**CG-PRIV-TLS** cleartext transit, **CG-PRIV-COOKIE** session-cookie flags), and ~19 declared
+obligation rows (audit logging, pen-testing, outsourcing contracts, breach process…) each tied to its
+תקנה. Because the regulation is overwhelmingly process and paperwork invisible to a repo, this domain is
+grade-or-declare taken to its limit — the graded checks are few and conservative, and their absence is
+never asserted as a violation.
+
+**Future compliance domains** could join under the same mechanism: cookie-consent, terms/privacy-policy
+presence, age-gating. Each would be its own statute-denominated severity axis, none ever touching the
+security badge.
 
 ---
 

@@ -2030,6 +2030,263 @@ function gradeBusinessLogic(model, ledger, findings, allow, opts) {
  * Everything here is `undeterminable` on purpose. That is the honest disposition for "we saw this
  * and did not grade it", and it puts the row in the same coverage table as everything else.
  */
+// ---------------------------------------------------------------------------
+// Accessibility (compliance pillar) — ת"י 5568 חלק 1 / WCAG 2.0 AA.
+//
+// COMPLIANCE, not security. Every finding here is `pillar:'compliance'`: a missing alt is a legal
+// exposure (in Israel a civil suit needs no proof of harm), not a breach, so summarize() keeps all of
+// it out of the security verdict — a wide-open database and a missing alt never share a badge.
+// Severity is legal-exposure-if-unfixed, and there is deliberately no compliance P0.
+//
+// The engine (lib/a11y_scan.mjs) already encoded every false-positive trap as DATA: an empty `alt=""`
+// still carries the `alt` token (valid for a decorative image), a `{...spread}` sets `hasSpread` (we
+// must abstain — it could supply anything, LAW 1), a dynamic child sets `hasChildExpr`, a dynamic
+// `lang` shows up in `dynamicAttrs`. This function only turns that data into findings and dispositions.
+// Grade-or-declare holds: the static subset is graded here; the rendered-DOM subset (contrast, focus
+// order/visible, ARIA-in-practice, live-region announcements) is declared in one honest row.
+// NOTE: guard citations below are written as FULL single-quoted literals
+// ('guard-recipes/accessibility.md#anchor'), not `${A11Y_GUARD}#anchor` template strings, because
+// build.mjs's guard-link checker only validates single-quoted `guard:` literals — a template string
+// would ship UNCHECKED and could rot into a dead "how to fix" link. Verbose on purpose.
+const A11Y_SET_BY_KIND = {
+  image: 'a11yImages', formControl: 'a11yFormControls', iconable: 'a11yInteractive',
+  media: 'a11yMedia', clickable: 'a11yClickable', htmlRoot: 'a11yDocument',
+}
+// <input> types that get their accessible name from something other than a text label, so demanding
+// a label of them would be a false positive.
+const A11Y_UNLABELABLE_INPUT = new Set(['hidden', 'submit', 'button', 'reset', 'image'])
+
+function gradeAccessibility(model, ledger, findings, allow) {
+  // Declare every set up front so an app with no <img> still reports `a11yImages: enumerated 0` —
+  // grade-or-declare means the reader sees the check ran and found nothing, not silence.
+  for (const s of ['a11yImages', 'a11yFormControls', 'a11yInteractive', 'a11yMedia',
+    'a11yClickable', 'a11yDocument', 'a11yStatement', 'a11yRenderedDom']) ledger.declare(s)
+  const a = model.a11y
+  if (!a) return
+
+  for (const el of a.elements || []) {
+    const set = A11Y_SET_BY_KIND[el.kind]
+    if (!set) continue
+    const subject = el.subject
+    if (allow.has(subject)) { ledger.record(set, subject, 'allowlisted', 'user allowlist'); continue }
+
+    const at = firstAt(el.file, el.line)
+    const attrs = new Set(el.attrs || [])
+    const dyn = new Set(el.dynamicAttrs || [])
+    const has = n => attrs.has(n)
+    const before = findings.length
+    const reasons = []          // why this subject failed; joined into the fail note
+    let clean = null            // {disposition, note} to use when nothing failed
+
+    // Cross-cutting: a positive tabIndex is a barrier on ANY element (WCAG 2.4.3). -1 and 0 are fine.
+    if (typeof el.tabIndex === 'number' && el.tabIndex > 0) {
+      findings.push(finding({
+        id: 'CG-A11Y-006', subject, pillar: 'compliance',
+        title_en: `Positive tabIndex (${el.tabIndex}) forces an unnatural keyboard focus order`,
+        title_he: `tabIndex חיובי (${el.tabIndex}) כופה סדר מעבר-מקלדת לא טבעי`,
+        severity: 'P2', evidence: 'definitive',
+        why: `tabIndex="${el.tabIndex}" pulls this element ahead of the natural DOM order for keyboard users.`,
+        at,
+        exploit: 'A keyboard or screen-reader user tabs into a jumbled order — content is reached out of sequence or skipped.',
+        impact: 'A documented, screenshot-able barrier under ת"י 5568 (WCAG 2.4.3). Legal exposure if unfixed.',
+        guard: 'guard-recipes/accessibility.md#tabindex',
+      }))
+      reasons.push(`positive tabIndex ${el.tabIndex}`)
+    }
+
+    switch (el.kind) {
+      case 'image': {
+        if (el.role === 'presentation' || el.role === 'none' || has('aria-hidden')) {
+          ledger.record(set, subject, 'allowlisted', 'decorative — opted out of the accessibility tree'); continue
+        }
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply alt; cannot tell from source' } }
+        else if (has('alt')) { clean = { disposition: 'pass', note: 'alt attribute present' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-001', subject, pillar: 'compliance',
+            title_en: `<${el.tag}> has no \`alt\` attribute`,
+            title_he: `לתגית <${el.tag}> אין תכונת \`alt\``,
+            severity: 'P1', evidence: 'definitive',
+            why: `The <${el.tag}> tag has no \`alt\` attribute and no {...spread} that could supply one. (An empty alt="" would be valid for a decorative image; this has neither.)`,
+            at,
+            exploit: 'A screen-reader user hears nothing where the image is — the content is simply missing for them.',
+            impact: 'The single most-litigated accessibility barrier (WCAG 1.1.1). Legal exposure under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#img-alt', autofixable: true,
+          }))
+          reasons.push('no alt attribute')
+        }
+        break
+      }
+      case 'formControl': {
+        const type = el.type
+        if (type && A11Y_UNLABELABLE_INPUT.has(type)) { clean = { disposition: 'pass', note: `type="${type}" gets its name elsewhere, not from a text label` } }
+        else if (type === '(dynamic)') { clean = { disposition: 'undeterminable', note: 'input type is set from an expression; cannot tell whether a label is required' } }
+        else if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a label attribute; cannot tell from source' } }
+        else if (has('aria-label') || has('aria-labelledby') || has('title')) { clean = { disposition: 'pass', note: 'has an accessible name (aria-label/aria-labelledby/title)' } }
+        else if (has('id')) { clean = { disposition: 'undeterminable', note: 'has an id; a <label htmlFor> may target it, which this pass does not resolve' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-003', subject, pillar: 'compliance',
+            title_en: `Form control <${el.tag}> has no accessible label`,
+            title_he: `לפקד הטופס <${el.tag}> אין תווית נגישה`,
+            severity: 'P1', evidence: 'weak',
+            why: 'The control has no aria-label/aria-labelledby/title and no id a <label htmlFor> could target — so no label can be associated with it. (A placeholder is not a label.)',
+            at,
+            exploit: 'A screen-reader user reaches an unlabelled field and cannot tell what to type.',
+            impact: 'A core barrier under ת"י 5568 (WCAG 1.3.1 / 4.1.2). Legal exposure if unfixed.',
+            guard: 'guard-recipes/accessibility.md#form-labels',
+            assumption: 'That the field is not labelled by a wrapping <label> or an aria-labelledby target this pass does not resolve.',
+          }))
+          reasons.push('no associable label')
+        }
+        break
+      }
+      case 'iconable': {
+        const hasName = has('aria-label') || has('aria-labelledby') || has('title')
+          || el.hasStaticText || el.hasNestedImgAlt || el.hasNestedAria
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a name; cannot tell from source' } }
+        else if (el.childrenKnown === false) { clean = { disposition: 'undeterminable', note: 'could not read the children — accessible name is undeterminable' } }
+        else if (hasName) { clean = { disposition: 'pass', note: 'has an accessible name (text, aria, title, or a nested image alt)' } }
+        else if (el.hasChildExpr) {
+          findings.push(finding({
+            id: 'CG-A11Y-004', subject, pillar: 'compliance',
+            title_en: `<${el.tag}> may have no accessible name (its only child is an expression)`,
+            title_he: `ל-<${el.tag}> ייתכן שאין שם נגיש (הילד היחיד הוא ביטוי)`,
+            severity: 'P1', evidence: 'weak',
+            why: `The <${el.tag}> has no text, no aria-label/title, and its only child is a {expression} — if that renders visible text this is fine, otherwise the control is unnamed.`,
+            at,
+            exploit: 'If the expression renders an icon rather than text, a screen-reader user hears only "button" with no purpose.',
+            impact: 'An interactive control with no accessible name (WCAG 4.1.2). Legal exposure if the name is truly missing.',
+            guard: 'guard-recipes/accessibility.md#accessible-name',
+            assumption: 'That the {child expression} does not render visible text or an accessible name.',
+          }))
+          reasons.push('accessible name only from an expression')
+        } else {
+          findings.push(finding({
+            id: 'CG-A11Y-004', subject, pillar: 'compliance',
+            title_en: `Icon-only <${el.tag}> has no accessible name`,
+            title_he: `ל-<${el.tag}> מבוסס-אייקון אין שם נגיש`,
+            severity: 'P1', evidence: 'strong',
+            why: `The <${el.tag}> has no text child, no aria-label/aria-labelledby/title, and no nested image with alt — nothing gives it an accessible name.`,
+            at,
+            exploit: 'A screen-reader user hears only the role ("button"/"link") with no indication of what it does.',
+            impact: 'An unnamed interactive control (WCAG 4.1.2). A common, provable barrier under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#accessible-name',
+          }))
+          reasons.push('no accessible name')
+        }
+        break
+      }
+      case 'media': {
+        if (el.tag === 'audio') { clean = { disposition: 'undeterminable', note: 'audio needs a transcript (WCAG 1.2.1), which lives off-page — declared, not gradable from markup' } }
+        else if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a track; cannot tell from source' } }
+        else if (el.childrenKnown === false) { clean = { disposition: 'undeterminable', note: 'could not read the children — captions track is undeterminable' } }
+        else if (el.hasCaptionsTrack === true) { clean = { disposition: 'pass', note: 'has a <track kind="captions"> (or subtitles)' } }
+        else if (el.hasCaptionsTrack === '(dynamic)') { clean = { disposition: 'undeterminable', note: 'a <track> with a dynamic kind — cannot confirm it is captions' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-005', subject, pillar: 'compliance',
+            title_en: '<video> has no captions track',
+            title_he: 'ל-<video> אין רצועת כתוביות',
+            severity: 'P2', evidence: 'strong',
+            why: 'The <video> element contains no <track kind="captions"> child.',
+            at,
+            exploit: 'A deaf or hard-of-hearing user gets no access to the spoken content.',
+            impact: 'Missing captions (WCAG 1.2.2). Mandatory for public bodies and larger businesses under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#captions',
+            assumption: 'That captions are not added at runtime by a video-player component this pass does not follow.',
+          }))
+          reasons.push('no captions track')
+        }
+        break
+      }
+      case 'clickable': {
+        // A div/span with onClick must be operable by keyboard: role + tabIndex + a key handler.
+        const hasRole = has('role')
+        const hasTab = has('tabindex')
+        const hasKey = has('onkeydown') || has('onkeypress') || has('onkeyup')
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may add role/tabIndex/key handlers; cannot tell from source' } }
+        else if (hasRole && hasTab && hasKey) { clean = { disposition: 'pass', note: 'has role, tabIndex, and a keyboard handler' } }
+        else {
+          const missing = [!hasRole && 'role', !hasTab && 'tabIndex', !hasKey && 'a key handler'].filter(Boolean).join(', ')
+          findings.push(finding({
+            id: 'CG-A11Y-007', subject, pillar: 'compliance',
+            title_en: `Clickable <${el.tag}> is not keyboard-operable (missing ${missing})`,
+            title_he: `<${el.tag}> לחיץ אינו נגיש למקלדת (חסר ${missing})`,
+            severity: 'P2', evidence: 'weak',
+            why: `This <${el.tag}> has an onClick but is missing ${missing}, so it cannot be reached or activated with a keyboard.`,
+            at,
+            exploit: 'A keyboard-only user cannot focus or activate this control at all.',
+            impact: 'A non-interactive element used as a control (WCAG 2.1.1 keyboard). Legal exposure if unfixed.',
+            guard: 'guard-recipes/accessibility.md#clickable-div',
+            assumption: 'That the handler is not on a genuinely presentational element whose action is also available through a real control nearby.',
+          }))
+          reasons.push(`clickable but missing ${missing}`)
+        }
+        break
+      }
+      case 'htmlRoot': {
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply lang; cannot tell from source' } }
+        else if (has('lang') && dyn.has('lang')) { clean = { disposition: 'undeterminable', note: 'lang is set from an expression — verify it resolves to a valid BCP-47 code' } }
+        else if (has('lang')) { clean = { disposition: 'pass', note: 'lang attribute present on the document root' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-002', subject, pillar: 'compliance',
+            title_en: 'Document root <html> has no `lang` attribute',
+            title_he: 'לשורש המסמך <html> אין תכונת `lang`',
+            severity: 'P2', evidence: 'definitive',
+            why: 'The <html> element has no `lang` attribute, so assistive tech cannot know the page language. A Hebrew site expects lang="he" dir="rtl".',
+            at,
+            exploit: 'A screen reader reads the whole page with the wrong pronunciation rules.',
+            impact: 'Wrong language for the entire document (WCAG 3.1.1). Legal exposure under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#html-lang', autofixable: true,
+          }))
+          reasons.push('no lang on the document root')
+        }
+        break
+      }
+    }
+
+    if (findings.length > before) ledger.record(set, subject, 'fail', reasons.join('; ') || 'accessibility barrier')
+    else if (clean) ledger.record(set, subject, clean.disposition, clean.note)
+    else ledger.record(set, subject, 'undeterminable', 'not gradable from the markup')
+  }
+
+  // The web-only obligations (the published statement, the rendered-DOM audit) apply ONLY to a web
+  // surface. A React Native / Capacitor shell or a pure backend has no website to make accessible, so
+  // asking it for a הצהרת נגישות would be a false positive — the sets stay enumerated: 0.
+  if (!a.webSurface) return
+
+  // The accessibility statement is legally mandatory, but its ABSENCE is NOT a fireable finding: a
+  // static scan cannot tell a real deployed site with no statement from a fresh scaffold that simply
+  // has not written one yet, and firing a red P1 on `create-next-app` output is exactly the cry-wolf
+  // failure this tool forbids (a false positive is worse than a miss). So presence is a `pass`, and
+  // absence is an honest `undeterminable` row — "we could not confirm you publish one" — while the
+  // report's mandatory-artifacts reminder carries the legal "you must have one". Declaration, not alarm.
+  const stmtSubject = 'a11y:statement'
+  if (allow.has(stmtSubject)) {
+    ledger.record('a11yStatement', stmtSubject, 'allowlisted', 'user allowlist')
+  } else if (a.statement?.present) {
+    ledger.record('a11yStatement', stmtSubject, 'pass', 'an accessibility statement page or link was detected')
+  } else if (a.widget?.detected) {
+    ledger.record('a11yStatement', stmtSubject, 'undeterminable',
+      `no statement page detected in the source, but an accessibility widget (${(a.widget.vendors || []).join(', ') || 'unknown'}) is present that may provide one — a published הצהרת נגישות is legally required; verify you have one`)
+  } else {
+    ledger.record('a11yStatement', stmtSubject, 'undeterminable',
+      'no accessibility statement page (/accessibility, /נגישות) or link was found in the source. A published הצהרת נגישות is legally mandatory — confirm you publish one (it may live on a hosted page this static pass cannot see)')
+  }
+
+  // Grade-or-declare: the rendered-DOM half of ת"י 5568 is out of static reach. Declare it in one
+  // honest row so "passed the static checks" is never mistaken for "accessible".
+  const widgetNote = a.widget?.detected
+    ? ` An accessibility widget (${(a.widget.vendors || []).join(', ')}) was detected — it signals intent but is not a substitute for real conformance.`
+    : ''
+  ledger.record('a11yRenderedDom', 'a11y:rendered-dom-audit', 'undeterminable',
+    'colour contrast (1.4.3), focus order/visible (2.4.3/2.4.7), ARIA-in-practice, and dynamic-content ' +
+    'announcements need a rendered DOM and manual testing — plus a named accessibility coordinator ' +
+    '(רכז נגישות) if over the size threshold.' + widgetNote)
+}
+
 function declareUngradedSurfaces(model, ledger) {
   ledger.declare('ungradedSurfaces')
   const a = model.artifacts || {}
@@ -3144,12 +3401,19 @@ function summarize(findings, discovery = null) {
 // `allowlisted` is reported but not counted as decided: the user decided it, we did not.
 // ---------------------------------------------------------------------------
 
+// A coverage set belongs to the compliance pillar (accessibility, privacy) rather than security.
+// The decision-rate ratchet is a SECURITY-quality metric — "the security grader must not start
+// abstaining more" — and the compliance pillar is grade-or-declare by design, with whole sets
+// (the rendered-DOM audit, the declared privacy obligations) that are `undeterminable` on purpose.
+// Folding those into the ratchet would let a new compliance domain silently lower the security bar,
+// so the scoped totals below keep the two pillars' rates apart.
+const COMPLIANCE_SET_RE = /^(a11y|priv)/
+
 function decisionRateOf(coverage) {
   const bySet = {}
-  let enumerated = 0
-  let decided = 0
-  let abstained = 0
-  let allowlisted = 0
+  const tot = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
+  const sec = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
+  const comp = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
   for (const [setName, set] of Object.entries(coverage || {})) {
     const c = set.counts
     const d = c.pass + c.fail
@@ -3160,15 +3424,20 @@ function decisionRateOf(coverage) {
       allowlisted: c.allowlisted,
       rate: set.enumerated ? d / set.enumerated : null,
     }
-    enumerated += set.enumerated
-    decided += d
-    abstained += c.undeterminable
-    allowlisted += c.allowlisted
+    const bucket = COMPLIANCE_SET_RE.test(setName) ? comp : sec
+    for (const t of [tot, bucket]) {
+      t.enumerated += set.enumerated; t.decided += d; t.abstained += c.undeterminable; t.allowlisted += c.allowlisted
+    }
   }
+  const withRate = t => ({ ...t, rate: t.enumerated ? t.decided / t.enumerated : null })
   return {
     rule: '(pass + fail) / enumerated — the share of enumerated subjects the grader actually ' +
-      'decided, as opposed to abstaining via `undeterminable`',
-    overall: { enumerated, decided, abstained, allowlisted, rate: enumerated ? decided / enumerated : null },
+      'decided, as opposed to abstaining via `undeterminable`. `security` and `compliance` are the ' +
+      'same measure scoped to each pillar; the ratchet gates on `security`, since compliance is ' +
+      'grade-or-declare and its declared rows are honest abstentions, not laziness.',
+    overall: withRate(tot),
+    security: withRate(sec),
+    compliance: withRate(comp),
     bySet,
   }
 }
@@ -3447,6 +3716,9 @@ export function grade(model, opts = {}) {
   gradeCiWorkflows(model, ledger, findings, allow)
   gradeIac(model, ledger, findings, allow)
   gradeFirebaseRules(model, ledger, findings, allow)
+  // Compliance pillar. Runs like any other rule, but its findings are pillar:'compliance' and never
+  // touch the security verdict (see summarize). ת"י 5568 / WCAG 2.0 AA.
+  gradeAccessibility(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
   const businessLogic = gradeBusinessLogic(model, ledger, findings, allow, opts)

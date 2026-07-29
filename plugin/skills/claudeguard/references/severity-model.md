@@ -250,7 +250,7 @@ compliance finding the axis is **legal exposure if unfixed**, stated in those te
 
 | Level | Compliance meaning | Accessibility example |
 |-------|--------------------|-----------------------|
-| **P1** | A core, provable barrier a plaintiff can screenshot in seconds — the spine of the known lawsuit template. Civil suit **up to ₪50,000 with no proof of harm**, plus a ₪7,500/day accessibility order. | `<img>` with no `alt` on a content image; a form control with no accessible label; **no published הצהרת נגישות** (itself legally mandatory). |
+| **P1** | A core, provable barrier a plaintiff can screenshot in seconds — the spine of the known lawsuit template. Civil suit **up to ₪50,000 with no proof of harm**, plus a ₪7,500/day accessibility order. | `<img>` with no `alt` on a content image; a form control with no accessible label; an icon-only control with no accessible name. |
 | **P2** | A real barrier that needs a particular user or assistive tech to bite, or a partial failure. | Positive `tabIndex` breaking focus order; `onClick` on a non-interactive `<div>` with no keyboard path; missing captions on a non-critical video. |
 | **P3** | Hygiene / robustness — correct-but-fragile, or best-practice. | `lang` present but set from a variable we could not resolve; an accessibility widget present but not a substitute for real conformance. |
 | **P4** | Informational — worth knowing, not itself a violation. | An accessibility toolbar detected (signals intent; its *absence* is not a finding — the law wants real conformance, not a widget). |
@@ -258,6 +258,14 @@ compliance finding the axis is **legal exposure if unfixed**, stated in those te
 There is deliberately **no compliance P0**: accessibility non-conformance is serious and expensive,
 but it is not the drop-everything-before-anyone-sees-the-URL emergency that a live data breach is, and
 inflating it to P0 would be the cry-wolf failure in a new costume.
+
+**The mandatory הצהרת נגישות is declared, not fired.** A published accessibility statement is legally
+required, but its absence is a *coverage row*, not a finding: a static scan cannot tell a real deployed
+site with no statement from a fresh scaffold that has not written one yet, and a red P1 on
+`create-next-app` output is precisely the cry-wolf failure the whole model exists to prevent. So a
+detected statement is a `pass`, its absence is `undeterminable` ("we could not confirm you publish
+one"), and the report's mandatory-artifacts reminder carries the legal "you must". Same logic retires
+the rendered-DOM half of ת"י 5568 (contrast, focus, ARIA-in-practice) to a declared row.
 
 **Confidence is computed exactly as for security** — a pure function of Evidence. A missing `alt` is
 `definitive` → `confirmed` (a *violation*); a label that might be associated through markup this pass
