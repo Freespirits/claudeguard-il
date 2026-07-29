@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors>
+      <certificates src="system" />
+    </trust-anchors>
+  </base-config>
+
+  <!-- One legacy host that genuinely cannot serve HTTPS. Everything else stays closed. -->
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">legacy-dispatch.example.com</domain>
+  </domain-config>
+
+  <!-- Applies only to a debuggable build; never compiled into a release. -->
+  <debug-overrides>
+    <trust-anchors>
+      <certificates src="user" />
+    </trust-anchors>
+  </debug-overrides>
+</network-security-config>

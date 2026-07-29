@@ -1,0 +1,19 @@
+{
+  "notes": "INTENT: the mobile arm had no ground truth at all, which is how twenty defects lived in it while 210 tests passed. This pair is that ground truth, and it is built so that the RECALL side and the FALSE-POSITIVE side share the same shapes — the two variants differ only in the values that actually decide whether an attacker gets in. Vulnerable: android:debuggable in the release source set (P1); an exported ContentProvider that hands out the orders table with no permission (P1); a network security config that permits cleartext to EVERY host and trusts any CA the phone's owner installs (P2 + P2) — the file the manifest merely POINTED at, which the grader used to credit with scoping cleartext while never opening it; a service 'guarded' by a permission this manifest declares at protectionLevel=\"normal\", which Android grants to any app at install (P2); and NSAllowsArbitraryLoads on iOS (P2). FIXED: the same app with debuggable removed, the provider closed, the config scoping cleartext to one named legacy host with the user trust anchor moved inside <debug-overrides>, the permission raised to protectionLevel=\"signature\", and ATS replaced by a single per-domain exception. THE FALSE-POSITIVE HALF IS THE POINT: both variants keep the MAIN/LAUNCHER activity exported (the platform requires it, and the old rule's advice to set exported=\"false\" made every Android app unlaunchable) and both keep React Native's real src/debug/AndroidManifest.xml with usesCleartextTraffic=\"true\" (no release build compiles it). Neither may produce a single finding on the fixed side.",
+  "scan": { "secrets": false },
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-AND-001", "severity": "P1", "confidence": "confirmed", "subject": "android-manifest:android/app/src/main/AndroidManifest.xml", "at": "android/app/src/main/AndroidManifest.xml:11" },
+      { "id": "CG-AND-004", "severity": "P1", "confidence": "confirmed", "subject": "android-component:android/app/src/main/AndroidManifest.xml:provider:29:.OrdersProvider" },
+      { "id": "CG-AND-004", "severity": "P2", "confidence": "confirmed", "subject": "android-component:android/app/src/main/AndroidManifest.xml:service:37:.SyncService" },
+      { "id": "CG-AND-002", "severity": "P2", "confidence": "confirmed", "subject": "android-network-config:android/app/src/main/res/xml/network_security_config.xml", "at": "android/app/src/main/res/xml/network_security_config.xml:3" },
+      { "id": "CG-AND-005", "severity": "P2", "confidence": "confirmed", "subject": "android-network-config:android/app/src/main/res/xml/network_security_config.xml", "at": "android/app/src/main/res/xml/network_security_config.xml:6" },
+      { "id": "CG-IOS-001", "severity": "P2", "confidence": "confirmed", "subject": "ios-plist:ios/App/Info.plist", "at": "ios/App/Info.plist:9" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}
