@@ -294,7 +294,13 @@ const norm = p => String(p == null ? '' : p).split(/[\\/]/).join('/')
  * understand a tool's shape, and where a path is rooted is a different concern.
  */
 export function relativizeObservations(observations, root) {
-  const base = norm(resolve(String(root || '.'))).replace(/\/+$/, '')
+  // Absoluteness is decided by SHAPE, not by the host platform. `resolve()` on a Windows path while
+  // running on Linux treats `C:/repo` as RELATIVE and prefixes the process cwd, so the base never
+  // matches and every path stays absolute — which is how this passed on Windows and failed in CI.
+  // The caller already hands us a resolved root; the only reason to resolve here is a relative one.
+  const raw = String(root || '.')
+  const isAbsolute = /^(?:[a-z]:[\\/]|[\\/])/i.test(raw)
+  const base = norm(isAbsolute ? raw : resolve(raw)).replace(/\/+$/, '')
   const lowerBase = base.toLowerCase()
   const strip = p => {
     const n = norm(p)

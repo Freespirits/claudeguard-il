@@ -191,6 +191,22 @@ test('relativizing is case-insensitive on the drive letter, and leaves outside p
     'a path genuinely outside the repo is left intact rather than mangled into a wrong relative one')
 })
 
+test('rooting works for POSIX paths too, whichever platform is running the test', () => {
+  // The first version called `resolve()` on the root, so on Linux a Windows root like `C:/repo` was
+  // treated as RELATIVE and prefixed with the process cwd — the base never matched and every path
+  // stayed absolute. It passed on the author's machine and failed in CI. Absoluteness is a property
+  // of the path's SHAPE, not of the host, so both styles are asserted on every platform.
+  const [posix] = relativizeObservations(
+    [{ subject: 's:/home/runner/work/app/infra/main.tf', at: { file: '/home/runner/work/app/infra/main.tf' } }],
+    '/home/runner/work/app')
+  assert.equal(posix.at.file, 'infra/main.tf')
+  assert.equal(posix.subject, 's:infra/main.tf')
+
+  const [win] = relativizeObservations(
+    [{ subject: 's:C:/repo/infra/main.tf', at: { file: 'C:/repo/infra/main.tf' } }], 'C:/repo')
+  assert.equal(win.at.file, 'infra/main.tf')
+})
+
 test('an observation with no file is passed through untouched', () => {
   const obs = [{ subject: 'snyk:dep-vuln:lodash@4.17.11', at: { file: null, line: null } }]
   assert.deepEqual(relativizeObservations(obs, 'C:/repo'), obs)
