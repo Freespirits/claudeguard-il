@@ -228,11 +228,24 @@ const importedBy = new Map()
 const bareImports = new Map() // rel -> Set(pkg)
 for (const [r, f] of files) {
   const set = new Set(), bare = new Set()
+  // The module SPECIFIER is a string literal, so stripping erases it and an import cannot be read
+  // off stripped code at all — the same shape as a route path. The discriminator is the mask at the
+  // `import`/`require` KEYWORD, which is the code half of the statement. A keyword sitting inside a
+  // template literal is QUOTED SOURCE: a test fixture, a docs snippet, a generator's output.
+  //
+  // Reading those as real imports gave this repo 18 dependencies it does not have — `rxjs` and
+  // `@supabase/supabase-js` among them, out of test fixtures — and on a user's repo it is any file
+  // that embeds an example, which for this audience is common. The import graph feeds framework
+  // detection, client/server reachability and the LLM-site scan, so a phantom edge does not stay
+  // local: it propagates into findings about code that does not exist.
+  const { mask } = stripJs(f.text)
   let m
   IMPORT_RE.lastIndex = 0
   while ((m = IMPORT_RE.exec(f.text))) {
     const spec = m[1] || m[2] || m[3]
     if (!spec) continue
+    // `(?:^|\n)\s*` can precede the keyword, so step over the leading whitespace to land on it.
+    if (mask[m.index + (m[0].length - m[0].trimStart().length)] !== CODE) continue
     const target = resolveImport(r, spec)
     if (target && target !== r) set.add(target)
     else if (!spec.startsWith('.')) {
@@ -1095,19 +1108,37 @@ const LLM_PKGS = new Set(['openai', '@anthropic-ai/sdk', '@google/generative-ai'
   'cohere-ai', 'replicate', '@mistralai/mistralai', 'groq-sdk', '@huggingface/inference'])
 // A direct call into a provider API. Kept as an independent signal so a hand-rolled fetch client,
 // which imports nothing, is still enumerated.
-const LLM_CALL_RE = /(chat\.completions\.create|messages\.create|generateText|streamText|generateObject|streamObject|getGenerativeModel|embeddings\.create|api\.(?:openai|anthropic)\.com|generativelanguage\.googleapis\.com)/
+//
+// TWO CLASSES, because they live in different places and only one of them is executable. Reading
+// both off raw text — rejecting only COMMENT — is what made this detector cry wolf at its own
+// project: it reported seven phantom call sites, `plugin/scripts/_scope.mjs` among them.
+//
+// A CALL EXPRESSION is code, so it is read from STRIPPED code. `openai.chat.completions.create(…)`
+// inside a string is not a call, it is QUOTED SOURCE — a test fixture, a doc snippet, or this very
+// file's own detection regex, since stripJs masks regex literals as STRING.
+const LLM_CALL_RE = /(chat\.completions\.create|messages\.create|generateText|streamText|generateObject|streamObject|getGenerativeModel|embeddings\.create)/
+// A provider ENDPOINT is a URL, and a URL lives inside the string literal that stripping blanks, so
+// this class must be matched on RAW text. It requires a scheme or a path: `https://api.openai.com`
+// and `api.openai.com/v1/…` are a host being CALLED. A BARE hostname is a host being NAMED, and the
+// difference is the whole finding — `_scope.mjs` lists `api.openai.com` in DEFAULT_BLOCKED, the
+// providers the live-probe gate refuses to touch. Being on a refuse-to-touch list is the opposite
+// of being called, and reporting that as an ungoverned LLM call site is the precise failure this
+// project exists to avoid.
+const LLM_HOST = '(?:api\\.(?:openai|anthropic)\\.com|generativelanguage\\.googleapis\\.com)'
+const LLM_HOST_RE = new RegExp(`https?://${LLM_HOST}|${LLM_HOST}/\\w`)
 
 const llmSites = []
 for (const [r, f] of files) {
   const importsProvider = [...(bareImports.get(r) || [])]
     .some(p => LLM_PKGS.has(p) || p.startsWith('@ai-sdk/'))
   const { code, mask } = stripJs(f.text)
-  // A provider hostname lives in a URL STRING (which stripping blanks), so the call/host signal is
-  // matched on RAW text but rejected inside comments — a commented `chat.completions.create` must
-  // not invent a phantom LLM site (an audit false positive). The flags are code patterns, checked
-  // on stripped code; template-literal `${…}` expressions survive stripping as code.
-  let llmCall = false
-  { const re = new RegExp(LLM_CALL_RE.source, 'g'); let m; while ((m = re.exec(f.text))) { if (mask[m.index] !== COMMENT) { llmCall = true; break } } }
+  // Template-literal `${…}` expressions survive stripping as code, so an interpolated call still
+  // counts. The endpoint pass rejects a COMMENT hit, so a commented-out URL invents nothing.
+  let llmCall = LLM_CALL_RE.test(code)
+  if (!llmCall) {
+    const re = new RegExp(LLM_HOST_RE.source, 'g'); let m
+    while ((m = re.exec(f.text))) { if (mask[m.index] !== COMMENT) { llmCall = true; break } }
+  }
   if (!importsProvider && !llmCall) continue
   llmSites.push({
     file: r,
