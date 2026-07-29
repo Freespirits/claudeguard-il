@@ -456,7 +456,6 @@ for (const p of sqlFiles) {
   // that hid a P0. stripSql blanks comments/strings while preserving every offset and line
   // number, so `file:line` evidence stays exact.
   const { code: text, dollarBodies } = stripSql(raw)
-  const lines = text.split(/\r?\n/)
 
   // `create function ... security definer` bodies are dollar-quoted, so they are blanked above.
   // Capture them here: a SECURITY DEFINER function without `set search_path` and without an
@@ -482,32 +481,55 @@ for (const p of sqlFiles) {
     }
   }
 
-  lines.forEach((ln, i) => {
+  // Parse by complete STATEMENT, not by physical line or a fixed look-ahead window. Reading the
+  // whole statement is what makes multi-line CREATE TABLE / CREATE POLICY parse (the Supabase docs
+  // format policies across several lines), and — the audit's single worst defect — it stops an
+  // adjacent policy's `using (true)` from bleeding into a *correct* owner-scoped policy and firing a
+  // CONFIRMED false P0 on production SQL. `text` is comment/string-stripped and dollar-quoted bodies
+  // are blanked, so a `;` inside a comment, a string, or a function body can never split falsely.
+  const lineOf = off => text.slice(0, off).split(/\r?\n/).length
+  const parseStatement = (stmt, absStart) => {
     let m
-    if ((m = /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(\w+)\.)?["']?(\w+)["']?/i.exec(ln))) {
+    if ((m = /create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(\w+)\.)?["']?(\w+)["']?/i.exec(stmt))) {
       const schema = (m[1] || 'public').toLowerCase(), name = m[2].toLowerCase()
+      if (schema === 'public' && !tables.has(name)) {
+        tables.set(name, { name, definedIn: `${p}:${lineOf(absStart + m.index)}`, rlsEnabled: false, rlsAt: null, policies: [] })
+      }
+    }
+    if ((m = /alter\s+table\s+(?:(\w+)\.)?["']?(\w+)["']?\s+enable\s+row\s+level\s+security/i.exec(stmt))) {
+      const schema = (m[1] || 'public').toLowerCase(), name = m[2].toLowerCase()
+      if (schema === 'public') {
+        const t = tables.get(name) || { name, definedIn: null, rlsEnabled: false, rlsAt: null, policies: [] }
+        t.rlsEnabled = true; t.rlsAt = `${p}:${lineOf(absStart + m.index)}`; tables.set(name, t)
+      }
+    }
+    if ((m = /create\s+policy\s+["']?([^"'\n]+?)["']?\s+on\s+(?:(\w+)\.)?["']?(\w+)["']?/i.exec(stmt))) {
+      const schema = (m[2] || 'public').toLowerCase(), name = m[3].toLowerCase()
+      // storage.objects / auth.* are Supabase-managed system tables, not the user's — a policy on
+      // one must not register a phantom `objects` table (an audit false positive).
       if (schema !== 'public') return
-      if (!tables.has(name)) tables.set(name, { name, definedIn: `${p}:${i + 1}`, rlsEnabled: false, rlsAt: null, policies: [] })
-    }
-    if ((m = /alter\s+table\s+(?:(\w+)\.)?["']?(\w+)["']?\s+enable\s+row\s+level\s+security/i.exec(ln))) {
-      const name = m[2].toLowerCase()
       const t = tables.get(name) || { name, definedIn: null, rlsEnabled: false, rlsAt: null, policies: [] }
-      t.rlsEnabled = true; t.rlsAt = `${p}:${i + 1}`; tables.set(name, t)
-    }
-    if ((m = /create\s+policy\s+["']?([^"'\n]+?)["']?\s+on\s+(?:(\w+)\.)?["']?(\w+)["']?/i.exec(ln))) {
-      const name = m[3].toLowerCase()
-      const t = tables.get(name) || { name, definedIn: null, rlsEnabled: false, rlsAt: null, policies: [] }
-      // look ahead a few lines for the command + predicate
-      const ctx = lines.slice(i, i + 6).join(' ')
-      const cmd = (/\bfor\s+(all|select|insert|update|delete)\b/i.exec(ctx) || [, 'all'])[1].toLowerCase()
-      t.policies.push({
-        name: m[1].trim(), cmd, at: `${p}:${i + 1}`,
-        permissive: /using\s*\(\s*true\s*\)|with\s+check\s*\(\s*true\s*\)/i.test(ctx),
-        scopedToUid: /auth\.uid\(\)/i.test(ctx),
-      })
+      const cmd = (/\bfor\s+(all|select|insert|update|delete)\b/i.exec(stmt) || [, 'all'])[1].toLowerCase()
+      // Permissive = the row predicate does NOT constrain to the caller: literal `true`, or the
+      // blanket "any authenticated user" forms (`auth.uid() is not null`, `auth.role()='authenticated'`),
+      // which grant every row to every logged-in user — a cross-tenant leak the old bare-substring
+      // scopedToUid test passed as "safe".
+      const permissive =
+        /using\s*\(\s*true\s*\)|with\s+check\s*\(\s*true\s*\)/i.test(stmt)
+        || /auth\.uid\(\)\s+is\s+not\s+null/i.test(stmt)
+        || /auth\.role\(\)\s*=\s*'authenticated'/i.test(stmt)
+      // Scoped only when auth.uid() is actually COMPARED to a column — a bare mention is not a scope.
+      const scopedToUid = !permissive
+        && /auth\.uid\(\)\s*=\s*[\w".]+|[\w".]+\s*=\s*auth\.uid\(\)/i.test(stmt)
+      t.policies.push({ name: m[1].trim(), cmd, at: `${p}:${lineOf(absStart + m.index)}`, permissive, scopedToUid })
       tables.set(name, t)
     }
-  })
+  }
+  let stmtStart = 0
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === ';') { const s = text.slice(stmtStart, i); if (s.trim()) parseStatement(s, stmtStart); stmtStart = i + 1 }
+  }
+  { const s = text.slice(stmtStart); if (s.trim()) parseStatement(s, stmtStart) }
 }
 // Snapshot which tables migrations actually proved, BEFORE other sources add more. RLS state is
 // only verifiable for these; provenance from a later source must not overwrite it.
