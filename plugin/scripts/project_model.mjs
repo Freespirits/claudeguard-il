@@ -16,6 +16,9 @@ import { join, relative, extname, dirname, resolve, sep } from 'node:path'
 import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comments.mjs'
 import { scanA11yElements, scanStatementSignals, scanWidgetSignals, STMT_PATH_RE } from './lib/a11y_scan.mjs'
 import { scanTransport, scanCookies } from './lib/privacy_scan.mjs'
+import {
+  scanPlaceholderSecrets, scanFakeCrypto, scanClientTokenStorage, scanAuthTodos,
+} from './lib/hygiene_scan.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -2499,6 +2502,52 @@ const privacy = {
   hasDataLayer: privacyDataLayer,
 }
 
+// ---------- vibecoder hygiene (security pillar) ----------
+//
+// Facts for the four cheap, high-signal checks the cross-model poll converged on (LLMs/SYNTHESIS.md
+// rows 4, 7 and 8): a placeholder credential shipped in real source, base64 used AS "encryption", a
+// bearer token parked in web storage, and a TODO left sitting inside auth code. These are SECURITY
+// facts, not compliance — they describe a breach path, not a legal exposure.
+//
+// lib/hygiene_scan.mjs owns every false-positive trap (exempt paths, word-level sensitivity so
+// `tokenizer` never reads as `token`, the mirrored PUBLIC_BY_DESIGN set, comment context), so the
+// engine here only collects and attaches a file. No severity is decided in this file.
+const hygienePlaceholders = []
+const hygieneFakeCrypto = []
+const hygieneTokenStorage = []
+const hygieneAuthTodos = []
+const MAX_HYGIENE_FACTS = 300
+let hygieneTruncated = false
+const pushHygiene = (bucket, fact, file) => {
+  if (bucket.length >= MAX_HYGIENE_FACTS) { hygieneTruncated = true; return }
+  bucket.push({ ...fact, file })
+}
+for (const [r, f] of files) {
+  for (const x of scanPlaceholderSecrets(f.text, r)) pushHygiene(hygienePlaceholders, x, r)
+  for (const x of scanFakeCrypto(f.text)) pushHygiene(hygieneFakeCrypto, x, r)
+  for (const x of scanClientTokenStorage(f.text)) pushHygiene(hygieneTokenStorage, x, r)
+  for (const x of scanAuthTodos(f.text)) pushHygiene(hygieneAuthTodos, x, r)
+}
+// A `.env` file is not CODE_EXT, and `API_KEY=changeme` — the entire purpose of the scanner's env
+// pass — lives in exactly one. Only the files the engine already treats as REAL are read: `envFiles`
+// has already dropped `.example`/`.template`/`.sample`/`.dist`, the illustrative conventions whose
+// whole job is to carry placeholders (the cry-wolf the wild benchmark caught on a real repo).
+// scanPlaceholderSecrets exempts those same paths itself, so this is belt and braces, not a
+// duplicated rule. readParsedConfig records into a Set, so re-reading cannot double-count discovery.
+for (const p of envFiles) {
+  const text = readParsedConfig(p)
+  if (text == null) continue
+  for (const x of scanPlaceholderSecrets(text, p)) pushHygiene(hygienePlaceholders, x, p)
+}
+const hygiene = {
+  scannedFiles: files.size + envFiles.length,
+  truncated: hygieneTruncated,
+  placeholderSecrets: hygienePlaceholders,
+  fakeCrypto: hygieneFakeCrypto,
+  clientTokenStorage: hygieneTokenStorage,
+  authTodos: hygieneAuthTodos,
+}
+
 const model = {
   root: ROOT.split(sep).join('/'),
   generatedBy: 'claudeguard/project_model',
@@ -2552,6 +2601,8 @@ const model = {
   a11y,
   // Compliance pillar (privacy / data security). Facts only; the grader owns the תקנות severities.
   privacy,
+  // Security pillar. The cheap high-signal hygiene facts; the grader owns their severities.
+  hygiene,
   mobile: { android: androidManifests, ios: iosPlists, networkSecurityConfigs },
   // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
   // graded subject set, so silence about them is no longer indistinguishable from safety.

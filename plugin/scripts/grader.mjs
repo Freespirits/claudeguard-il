@@ -2082,6 +2082,132 @@ function gradeBusinessLogic(model, ledger, findings, allow, opts) {
   return audit
 }
 
+// ---------------------------------------------------------------------------
+// Vibecoder hygiene (SECURITY pillar) — the four cheap, high-signal grep checks.
+//
+// Security, not compliance: each of these is a breach path, so they carry `pillar:'security'` (the
+// default) and count like any other security finding. What makes them worth having is cost — no
+// dataflow, no AST, four regex passes over source already in memory. What makes them SAFE to ship
+// is their ceiling: none of them reaches `definitive`.
+//
+// That ceiling is a deliberate policy call, not timidity. In every one of these checks the engine
+// sees the sink but not the thing that decides whether it matters: a placeholder-shaped literal
+// (is this the value that actually ships, or dead scaffolding?), a base64 call beside a sensitive
+// identifier (encryption stand-in, or one honest encoding step inside a real crypto flow?), a
+// storage write under a token-ish key (a bearer credential, or an opaque id?), a marker near an
+// auth word (an unfinished check, or a note about one that is finished?). A regex cannot close any
+// of those, so the ceiling is `strong` → `likely`, and CG-HYG-004 — the weakest signal of the four
+// — sits at `weak` → `needs-review`. None can reach `confirmed`, so none can redden the badge on
+// its own. That is the correct authority for a grep, and it is what lets these ship without
+// re-opening the cry-wolf risk the whole model exists to prevent.
+//
+// LAW 1 holds in the other direction too. lib/hygiene_scan.mjs reports POSITIVES only; it never
+// asserts a file is clean. So these sets enumerate what was FOUND, exactly like `nextConfigKeys`,
+// and an empty set is `enumerated: 0` — "the check ran and matched nothing", never a pass we did
+// not earn. A file with no match is not silently credited as safe.
+//
+// NOTE: guard citations are FULL single-quoted literals for the same reason as the a11y block —
+// build.mjs's guard-link checker only validates single-quoted `guard:` literals, so a template
+// string would ship unchecked and could rot into a dead "how to fix" link.
+// ---------------------------------------------------------------------------
+
+function gradeHygiene(model, ledger, findings, allow) {
+  // Declared up front so a repo with none of these still shows four `enumerated: 0` rows — the
+  // reader sees the checks ran, rather than seeing nothing and having to guess.
+  for (const s of ['hygienePlaceholderSecrets', 'hygieneFakeCrypto', 'hygieneTokenStorage',
+    'hygieneAuthTodos']) ledger.declare(s)
+  const h = model.hygiene
+  if (!h) return
+
+  // One shape for all four: the scanner already decided the fact is real, so each fact is one
+  // subject, one finding, one `fail` row. `emit` keeps the allowlist and ledger handling in one
+  // place so a new check cannot forget either half.
+  const emit = (set, kind, fact, build) => {
+    const subject = `hygiene:${kind}:${fact.file}:${fact.at.line}`
+    if (allow.has(subject)) { ledger.record(set, subject, 'allowlisted', 'user allowlist'); return }
+    findings.push(build(subject, firstAt(fact.file, fact.at.line, fact.snippet)))
+    ledger.record(set, subject, 'fail', `${kind} at ${fact.file}:${fact.at.line}`)
+  }
+
+  for (const f of h.placeholderSecrets || []) {
+    emit('hygienePlaceholderSecrets', 'placeholder-secret', f, (subject, at) => finding({
+      id: 'CG-HYG-001', subject,
+      title_en: `Placeholder credential \`${f.token}\` shipped in source`,
+      title_he: `סוד־דמה \`${f.token}\` נשלח בקוד`,
+      severity: 'P2', evidence: 'strong',
+      why: `The value \`${f.token}\` is a self-evident placeholder, and it sits in a file that is not an .example/.template/.sample/docs/test path where placeholders belong.`,
+      at,
+      exploit: 'Either the integration silently fails closed in production, or — for a guessable default like `admin123` — anyone who reads this public repo can log in with it.',
+      impact: 'A credential that was never configured, or a default one that everybody knows. The second case is account takeover with no exploit required.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#placeholder-secrets',
+      cwe: 'CWE-1188', owasp: 'A05:2021',
+      assumption: 'That this file ships as-is and the placeholder is not overwritten at build or deploy time by a real value.',
+    }))
+  }
+
+  for (const f of h.fakeCrypto || []) {
+    emit('hygieneFakeCrypto', 'fake-crypto', f, (subject, at) => finding({
+      id: 'CG-HYG-002', subject,
+      title_en: 'Base64 is used as if it were encryption on a secret',
+      title_he: 'Base64 משמש כאילו היה הצפנה על סוד',
+      severity: 'P1', evidence: 'strong',
+      why: 'A btoa/atob or Buffer.toString(\'base64\') call sits on a value the surrounding code names as a password, token, secret or key. Base64 is an ENCODING, reversible by anyone, with no key involved.',
+      at,
+      exploit: 'Anyone who reads the stored or transmitted string decodes it in one step — `atob(value)` in any browser console — and has the plaintext secret.',
+      impact: 'The secret is stored in plaintext for every practical purpose, while the code reads as though it were protected. That false sense of protection is what makes this worse than storing it plainly.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#fake-crypto',
+      cwe: 'CWE-326', owasp: 'A02:2021',
+      assumption: 'That the base64 step is standing in for encryption rather than being one encoding hop inside a real crypto or transport flow.',
+    }))
+  }
+
+  for (const f of h.clientTokenStorage || []) {
+    emit('hygieneTokenStorage', 'token-storage', f, (subject, at) => finding({
+      id: 'CG-HYG-003', subject,
+      title_en: `Auth credential written to ${f.api} under \`${f.key}\``,
+      title_he: `אישור הזדהות נכתב ל-${f.api} תחת \`${f.key}\``,
+      severity: 'P2', evidence: 'strong',
+      why: `\`${f.api}\` is readable by ANY JavaScript running on the origin, including injected script. The key \`${f.key}\` names a credential, not a preference.`,
+      at,
+      exploit: 'One XSS anywhere on the origin — a dependency, an ad, a comment field — reads the token straight out of storage and replays it. An httpOnly cookie is unreadable to that same script.',
+      impact: 'Turns any XSS into full account takeover, and the stolen token stays valid until it expires. This is the single most common auth mistake in vibecoded apps.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#token-storage',
+      cwe: 'CWE-922', owasp: 'A01:2021',
+      assumption: 'That the stored value is a real bearer credential rather than an opaque identifier that is useless without a server-side session.',
+    }))
+  }
+
+  // One LINE is one place to look, so it is one finding — even when it carries several markers
+  // (`// TODO/FIXME: fix auth`). The scanner emits per (line, marker) because a marker is what it
+  // matched; collapsing belongs here, where the subject is defined. Without this, four markers on a
+  // line produced four findings but only ONE ledger row: `record()` returns silently when a subject
+  // repeats with the SAME disposition, so the mismatch would not have thrown — it would just have
+  // made the coverage table disagree with the finding list.
+  const todosByLine = new Map()
+  for (const f of h.authTodos || []) {
+    const key = `${f.file}:${f.at.line}`
+    const prev = todosByLine.get(key)
+    if (prev) { if (!prev.markers.includes(f.marker)) prev.markers.push(f.marker); continue }
+    todosByLine.set(key, { ...f, markers: [f.marker] })
+  }
+  for (const f of todosByLine.values()) {
+    const markers = f.markers.join('/')
+    emit('hygieneAuthTodos', 'auth-todo', f, (subject, at) => finding({
+      id: 'CG-HYG-004', subject,
+      title_en: `${markers} left inside authentication code`,
+      title_he: `${markers} נותר בתוך קוד אימות`,
+      severity: 'P3', evidence: 'weak',
+      why: `A ${markers} marker sits within five lines of an authentication or authorization token, and leads its comment rather than merely being mentioned in one. The author flagged this code as unfinished; whether the unfinished part IS the security check cannot be read from the comment.`,
+      at,
+      exploit: 'If the deferred work is the auth check itself, the endpoint ships open — the most common way a "temporary" bypass reaches production.',
+      impact: 'Unknown until a human reads it. This is a pointer to a place worth reading, not a proven defect.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#auth-todos',
+      cwe: 'CWE-489',
+      assumption: 'That the marker refers to the adjacent auth logic rather than to unrelated work that merely sits nearby.',
+    }))
+  }
+}
+
 /**
  * GRADE OR DECLARE — the safety net.
  *
@@ -3888,6 +4014,7 @@ export function grade(model, opts = {}) {
   gradeCiWorkflows(model, ledger, findings, allow)
   gradeIac(model, ledger, findings, allow)
   gradeFirebaseRules(model, ledger, findings, allow)
+  gradeHygiene(model, ledger, findings, allow)
   // Compliance pillar. Runs like any other rule, but its findings are pillar:'compliance' and never
   // touch the security verdict (see summarize). ת"י 5568 / WCAG 2.0 AA, and the privacy regs.
   gradeAccessibility(model, ledger, findings, allow)
