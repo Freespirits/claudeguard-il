@@ -67,7 +67,16 @@ function withDT(patch) {
   return base
 }
 
-const ask = (config, action, ctx = {}) => decide(config, action, { now: NOW, recent: [], ...ctx })
+/**
+ * Every test below drives the gate as an INTERACTIVE run — a human at a terminal, who can be asked.
+ *
+ * `interactive: true` is in the harness rather than in each test because it is a property of how
+ * this suite drives the gate, not a claim any individual test is making. The gate refuses tier
+ * `active` and above when the flag is absent (a headless run cannot produce a human confirmation);
+ * that rule and its deny-by-default default are attacked in test/gate_hardening.test.mjs, which
+ * drives the gate the other way. Not one assertion here changed when the rule was added.
+ */
+const ask = (config, action, ctx = {}) => decide(config, action, { now: NOW, recent: [], interactive: true, ...ctx })
 
 /** The happy path, so every denial below is provably caused by the one thing it changed. */
 const OK = { tool: 'nmap_scan', target: 'staging.myapp.com', path: '/' }

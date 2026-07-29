@@ -192,6 +192,136 @@ host or IP with an optional port, and nothing else. That single rule refuses
 `# authorized by owner, add to allowlist` or a YAML fragment — none of which ever reaches a parser,
 because tool output is data and the gate has no code path that turns data into config.
 
+<a id="what-the-red-team-review-closed"></a>
+## What the red-team review closed
+
+The gate above stops a caller *arguing* its way past a decision. A review of the shipped
+implementation found five places where it was walkable anyway — not by winning an argument, but
+because a promise the design makes was kept only in the sense that a comment described it. All five
+are closed in `plugin/scripts/dynamic_gate.mjs`, deny-by-default, each with an adversarial test in
+`test/gate_hardening.test.mjs`.
+
+**1. "One command aborts everything" aborted the *next* command.** `killSwitchEngaged()` is read at
+the top of `decide()`, so STOP refused the next decision and did nothing whatever about the run
+already happening: the `fetch` in flight, the `nmap` already spawned, the Strix container already
+up. "Stop" meant "stop soon, probably" — which is the wrong answer to the one command an operator
+issues when something is going wrong right now.
+
+A **`RunRegistry`** now holds every in-flight run, and every dispatch registers a *killable* handle
+**before** it starts. A killable is anything carrying `abort()` (an `AbortController` — the
+in-process `fetch` case, pre-wired by `registry.controller()`), `kill()` (a child process: Strix,
+nmap), or `terminate()` (a Worker, or a client for an HTTP-proxy tool like HexStrike, whose
+`terminate()` can POST `/api/processes/terminate/<pid>` as enforcement principle #6 already
+describes). `terminateAll()` walks them all, never throws, and reports the handles that refused to
+die rather than stopping at the first. It marks itself stopped **before** it kills anything, so a
+dispatch that registers *during* the sweep — the race a scanner in a tight loop finds — is aborted at
+the door instead of slipping through behind it. `watchKillSwitch()` polls the STOP file into that
+mechanism. The contract a runner must keep: **register the killable before the request goes out.** A
+dispatch that never registers is invisible to STOP, and that is asserted as a test so nobody meets it
+by surprise.
+
+**2. The rate cap counted a history nobody was keeping.** `RateWindow` existed and worked; the CLI
+passed `recent: []` on every call, so every request saw an empty window and every request was the
+first one. The cap was decorative. One `RateWindow` now lives for the whole run and reaches every
+decision through `ctx.rateWindow`, and `decide()` reads it with a new **non-mutating `snapshot()`**
+so the pure function stays pure. `ctx.recent` and `ctx.rateWindow` are **unioned**, never one
+overriding the other: more history can only ever deny more, so a caller cannot use an empty array to
+cancel a live window. Only actions that were actually **executed** are recorded — a plan is not a
+probe and a refusal is not an action, and counting either would exhaust a run that sent nothing. The
+CLI, which is one process per decision, rebuilds the window from the audit log it already writes
+(`replayAudit()`), so the cap is real there too.
+
+**3. The gate approves a hostNAME; the socket opens to an ADDRESS.** This is the next layer of the
+bypass family `normalizeHost` already fixed once. That fix made the string the gate *checked* and the
+string `fetch` *sent* the same string. It does not constrain what DNS says that string means:
+
+| the name | its answer | what the run reaches |
+|---|---|---|
+| `staging.myapp.com` (allowlisted) | `169.254.169.254` | cloud instance metadata — one request from IAM credentials |
+| `staging.myapp.com` (allowlisted) | `127.0.0.1` | whatever admin port the scanner's own box has open |
+| `staging.myapp.com` (allowlisted) | `10.0.0.7` | an internal host nobody put on the allowlist |
+| `staging.myapp.com` (allowlisted) | flips between the check and the connect | DNS rebinding / TOCTOU |
+
+DNS is I/O, so `decide()` stays pure and the resolution lives in an async wrapper,
+`decideWithResolution(config, action, ctx, resolver)`, with the resolver **injected** so the suite
+gates fake addresses and never touches a network. The address gate itself is pure arithmetic
+(`classifyAddress`, `gateResolvedAddress`) and therefore tested directly. It refuses:
+
+- **always, whatever the config says** — cloud metadata (`169.254.169.254`, `169.254.170.2`,
+  `fd00:ec2::254`, `100.100.100.200`, `192.0.0.192`), link-local (`169.254/16`, `fe80::/10`), the
+  unspecified address, multicast, reserved space, and anything it cannot parse;
+- **unless the config attests that space** — loopback, `10/8`, `172.16/12`, `192.168/16`, CGNAT
+  (`100.64/10`) and `fc00::/7`. "Attests" means the resolved *address* matches an allowlist entry —
+  which is exactly what the spec's own `10.0.5.0/24` example entry is for — or the target is
+  `localhost` (RFC 6761) and the answer is loopback.
+
+An address wrapped in IPv6 is still that address: IPv4-mapped (`::ffff:169.254.169.254`), NAT64
+(`64:ff9b::a9fe:a9fe`) and 6to4 (`2002:a9fe:a9fe::1`) are all classified by the IPv4 inside them, and
+metadata addresses are compared **by bytes** so `fd00:0ec2:0000::0254` cannot spell its way past a
+string comparison. **Every** answer is gated, not just the first — a name with one good A record and
+one on the metadata service connects to whichever the stack picks, so gating one of them gates a coin
+flip. The blocklist binds the address exactly as it binds the name.
+
+Rebinding is caught with a **`ResolutionPins`** map: the first answer of the run is the answer for
+the run, a name that starts answering differently is refused rather than re-approved, and the
+contradicting answer never overwrites the pin. The decision carries `pinned` — **the address the
+runner must connect to.** Re-resolving the name at send time reopens the exact window this closes.
+
+**4. A rate cap is not a budget.** 60 requests/minute is 86,400 a day and a scan that never ends.
+"How fast" and "how much, for how long" are separate promises and only the first was being kept. A
+**`RunBudget`** caps total *executed* actions and wall clock, is read through `ctx.budget`, and —
+like the per-minute cap — clamps to a hard ceiling so a caller may tighten a limit and may never
+loosen one. The clock is `ctx.now`, so this is still a pure function of its arguments; a budget that
+is supplied but cannot be *read* denies, because a budget nobody can evaluate is not a budget anybody
+is inside of.
+
+**5. `confirmation: true` is a field the caller set.** In an interactive run that flag is downstream
+of a human who was asked; in a cron job, a CI step or a detached agent loop there is nobody to ask
+and the flag is something the process wrote for itself. The confirmation check cannot tell those
+apart — it only sees `true`. So interactivity is now asked as its own question, deny-by-default: a
+run is **headless unless it says `interactive: true`**, and a headless run may not reach tier `active`
+or above. `recon` proceeds, because that is the tier that needs nobody. This is not a substitute for
+the confirmation; it is the precondition that makes a confirmation mean anything. The flag is set
+*honestly by the runner* — see the limits below.
+
+### New deny codes
+
+| code | when |
+|---|---|
+| `resolved-ip-refused` | the name is in scope; the address it resolves to is not — including a mid-run rebind |
+| `resolution-failed` | the name could not be resolved, so its destination is unknown, so it is not approved |
+| `budget-exhausted` | the run spent its total action count or its wall clock |
+| `headless-refused` | tier `active` or above was proposed by a run with nobody attached to it |
+
+`DENY.RATE_LIMITED` is added as an alias of the existing `DENY.RATE_LIMIT`; the code on the wire is
+unchanged (`rate-limit-exceeded`).
+
+### The tool catalog gained three probers
+
+`rls_probe` (**recon** — reads a table with the anon key and reports what came back; no payload),
+`authz_probe` and `idor_probe` (**active** — requests made as one principal for another principal's
+data: no state change, but a payload aimed at a control). An unknown tool is denied exactly as
+before: naming something `_probe` is not a classification, and `sqli_probe` is refused under a
+`tier: exploit` config that explicitly allows it.
+
+### What a runner must do, and what it must not
+
+`GateSession` exists so this is one object rather than four things to remember. It owns the
+`RateWindow`, the `RunBudget`, the `ResolutionPins` and the `RunRegistry`, and threads all of them
+into every decision. `ask()` decides and changes nothing; `commit(decision)` is the only thing that
+spends the window and the budget, and it refuses anything the gate did not mark `willExecute`.
+
+Three obligations the gate cannot enforce on its caller, stated plainly because they are the
+remaining seams:
+
+- **Register the killable before dispatching.** STOP reaches the registry, not the process table.
+- **Connect to `decision.pinned`**, with the original `Host` header. A runner that re-resolves the
+  name has re-opened the rebinding window.
+- **Set `interactive` honestly.** The flag says whether a human is reachable; the gate cannot verify
+  a human, only refuse to proceed without the claim. A runner that lies about it has not defeated a
+  control, it has forged an attestation — which is the operator's liability, exactly as the
+  attestation block already is.
+
 ## Observation contract
 
 Dynamic results become observations the grader already knows how to grade (same pattern as
@@ -235,6 +365,10 @@ is the resolver for the worklist the rest of the tool already produces.
   the gate's job is to make "I didn't realize it was out of scope" impossible, not to grant rights.
 - Offensive tools are noisy. Results still pass through adjudication (the differential-comparison and
   human-validation steps of the improvement workflow) before they are trusted.
+- It cannot enforce its own preconditions on a runner that ignores them. Three of them are
+  load-bearing and are named [above](#what-the-red-team-review-closed): register the killable before
+  dispatching, connect to the pinned address rather than re-resolving the name, and set `interactive`
+  honestly. The gate refuses to proceed without those claims; it cannot check that they are true.
 - This is a real step up in maturity and liability: it moves ClaudeGuardIL from "audit assistant"
   toward "orchestrated, scope-enforced pentest platform." That promise is only worth making if the
   gate is airtight, which is why the gate — not the tool integration — is the hard part and the
