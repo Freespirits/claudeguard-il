@@ -1,6 +1,6 @@
 ---
 name: cg-dast
-description: Run active (Tier 2) DAST against a target the user owns and is authorized in writing to test — real attack traffic, rate-limited and dry-run by default. The runner records observations; grader.mjs turns them into findings. Use when the user types /cg-dast. Requires a claudeguard.scope.yml with written-authorization and ownership attestations. High-risk; hard-gated.
+description: Run four active (Tier 2) GET probes against a target the user owns and is authorized in writing to test — a reflected-markup check, a quote in an id parameter, an open-redirect check and a CSP check. This is a smoke test, NOT a scanner - no crawling, no authenticated flows, no parameter discovery, no IDOR, no fuzzing; point the user at Burp, ZAP or Nuclei for real DAST. Rate-limited and dry-run by default. The runner records observations; grader.mjs turns them into findings. Use when the user types /cg-dast. Requires a claudeguard.scope.yml with written-authorization and ownership attestations. High-risk; hard-gated.
 argument-hint: "[url] [--i-am-authorized]"
 allowed-tools: [Read, Bash]
 user-invocable: true
