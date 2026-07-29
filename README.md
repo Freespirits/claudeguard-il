@@ -16,14 +16,22 @@ Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic. Built for the
 > [Claude Israeli community](https://www.facebook.com/groups/cladue).
 
+**What the numbers mean, before anyone quotes them.** The benchmark gate stands at **0 regressions
+across 18 pinned detections in 7 vulnerable scenarios, and 0 unexpected confirmed findings across 8
+clean variants** — a corpus this project wrote. That is regression protection and a cry-wolf gate,
+both real. **Real-world detection rate: not yet measured.** An earlier framing led with "recall 100%
+/ precision 100%", which reads as a detection claim and is a tautology in a golden-file benchmark;
+retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md), with what would change it in
+[`ROADMAP.md`](ROADMAP.md).
+
 ---
 
 ## עברית (בקצרה)
 
 כלי אבטחה שבודק אפליקציות שנבנו ב-vibecoding ומייצר קוד הגנה מוכן להדבקה. מריצים אותו על הפרויקט
 ומקבלים דוח דו-לשוני (עברית ואנגלית) עם ממצאים מדורגים (P0–P4), ראיות (`file:line`), תרחיש תקיפה,
-והתיקון המומלץ. שלוש רמות בדיקה: סטטית (ברירת מחדל, בטוחה), live פסיבית, ו-DAST אקטיבית — שתי
-האחרונות דורשות בעלות על היעד ואישור מפורש.
+והתיקון המומלץ. שלוש רמות בדיקה: סטטית (ברירת מחדל, בטוחה), live פסיבית, ובדיקות אקטיביות (בדיקת
+עשן, לא סורק) — שתי האחרונות דורשות בעלות על היעד ואישור מפורש.
 
 ---
 
@@ -39,10 +47,12 @@ Scans your whole repo, runs scanners, and can generate & apply fixes.
 Then, in your project:
 ```
 /cg-scan            # static audit (Tier 0) — safe, read-only, the default
+/cg-intent          # build/correct claudeguard.intent.yml in a few plain questions — turns the
+                    #   business-logic audit from a guess into a review
 /cg-harden          # generate paste-ready guards for the findings
 /cg-fix             # apply guards (dry-run diff first, you confirm)
 /cg-live  <url>     # Tier 1 passive live checks (target you own)
-/cg-dast  <url>     # Tier 2 active DAST (target you own + authorized)
+/cg-dast  <url>     # Tier 2 active probes — a smoke test (target you own + authorized)
 ```
 
 Local test without installing:
@@ -70,11 +80,11 @@ security"*. Same knowledge and bilingual report; no repo scanning, subagents, or
 | **1 · Passive live** | Read-only checks on a running URL (TLS, headers, cookies, exposed files, public reads). | Requires `claudeguard.scope.yml` with ownership attestation. GET/HEAD only. |
 | **2 · Active probes** | Four GET probes against a running URL: a reflected-markup check, a single quote in an `id` parameter, an open-redirect check, and a CSP header check. **This is a smoke test, not a scanner** — no crawling, no authenticated flows, no parameter discovery, no IDOR, no fuzzing. Use Burp, ZAP or Nuclei for real DAST. | Requires written-authorization + ownership attestation, target allowlist, rate limit; dry-run by default. |
 
-> **On Tier 2's name.** An earlier version of this table said Tier 2 sent "injection, IDOR, fuzzing".
-> It never did — it sends the four probes above, and there is no IDOR probe at all. The claim is
-> corrected rather than deleted, because a security tool that overstates its own reach is doing the
-> thing this project exists to argue against. See [`ROADMAP.md`](ROADMAP.md) for what real dynamic
-> testing would require and why it is gated behind work that is deliberately unfinished.
+> **On Tier 2's name.** An earlier version of this table said Tier 2 sent "real attack traffic
+> (injection, IDOR, fuzzing)". It never did — it sends the four probes above, and there is no IDOR
+> probe at all. Named and retracted rather than quietly deleted: **ERR-004** in
+> [`ERRATA.md`](ERRATA.md). See [`ROADMAP.md`](ROADMAP.md) for what real dynamic testing would
+> require and why it is gated behind work that is deliberately unfinished.
 
 Copy `core/authorization/SCOPE.example.yml` to `claudeguard.scope.yml` and fill it in to enable
 Tiers 1–2. **Only test systems you own or are authorized in writing to test.**
@@ -177,7 +187,20 @@ CONTEXT.md     the domain model — the vocabulary this codebase is written in
 run against known-bad code. Its problems are at the **code** level (exposed `service_role` key,
 no RLS, IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it
 does trip Dependabot — every alert on this repository points at a fixture, and none of them is
-reachable from anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md).
+reachable from anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md), and
+**ERR-002** in [`ERRATA.md`](ERRATA.md) for the contradictory claims this README used to make about
+those dependencies.
+
+## Errata
+
+Claims this project made and later found wrong are retracted in the open, numbered, and kept:
+[`ERRATA.md`](ERRATA.md). It currently holds six — a gate of ours that checked one host and opened
+another (ERR-001), the fixture-dependency claims (ERR-002), a credential leak in our own live probe
+found by external review (ERR-003), the Tier-2 overclaim (ERR-004), the half of that retraction that
+was announced before it was made (ERR-005), and the benchmark headline (ERR-006).
+
+The ledger exists because the failure this tool is built to catch — a confident statement nobody
+checked — is one we keep making too. Nothing is quietly deleted; each entry quotes the old claim.
 
 ## Disclaimer
 Provided as-is, no warranty. A clean scan is **not** proof of safety. You are responsible for
