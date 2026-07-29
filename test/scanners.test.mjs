@@ -4,7 +4,15 @@ import { grade } from '../plugin/scripts/grader.mjs'
 
 // The engine returns an empty-but-valid model for a repo with nothing in it. gradeScanners is
 // independent of the model, so these tests feed a minimal model and vary only the scanner input.
-const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] } }
+//
+// The `discovery` block says the engine READ everything it set out to read. It is not decoration:
+// LAW 4 refuses a `clean` verdict on a model that never says what was seen, so a fixture without
+// it would make every assertion below about discovery coverage instead of about the scanner arm.
+const FULLY_READ = {
+  counts: { filesDiscovered: 1, filesParsed: 1, configParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+  reconciles: true,
+}
+const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] }, discovery: FULLY_READ }
 
 function withScanners(scanners, allowlist) {
   return grade(EMPTY_MODEL, { scanners, allowlist })

@@ -17,7 +17,7 @@ Label → key map (pull the EN/HE text for each from the i18n files):
 | Where | Keys |
 |-------|------|
 | Header | `report_title`, `not_official` |
-| Verdict / badge | `verdict`, `critical` `high` `medium` `low` `clean`, `verdict_counts`, `do_not_deploy`, `clean_line`, `clean_meaning`, `not_counted`, `not_counted_line` |
+| Verdict / badge | `verdict`, `critical` `high` `medium` `low` `unknown` `clean`, `verdict_counts`, `do_not_deploy`, `unknown_line`, `unknown_meaning`, `clean_line`, `clean_meaning`, `not_counted`, `not_counted_line` |
 | Summary + section headings | `summary`, `confirmed_section`, `not_confirmed_section`, `coverage`, `no_confirmed` |
 | Per-finding labels | `title`, `severity`, `confidence` (+ `confirmed`/`likely`/`needs-review`), `evidence_strength` (+ `definitive`/`strong`/`weak`/`judgement`), `found_by` (+ `rule`/`reviewer`), `tier` (+ `static`/`passive-live`/`active-dast`), `what_why`, `evidence`, `exploit`, `impact`, `guard`, `assumption` (+ `assumption_note`), `autofix` (+ `autofix_yes`/`autofix_no`) |
 | Not-confirmed section | `not_confirmed_note` |
@@ -29,10 +29,16 @@ Placeholders like `{p0}`, `{likely}`, `{n}`, `{total}`, `{set}` in a key are fil
 RTL note: Hebrew blocks are right-to-left; keep each finding's code block in its own fenced
 section so mixed-direction text does not scramble.
 
-**The one rule this template exists to enforce:** the headline verdict and the badge count only
-`confirmed` findings. Severity is uncapped (see `severity-model.md`), so an unproven P0 is printed
-as a P0 — but it is printed *below* the confirmed section and it never turns the badge red. The
-order of sections here is not cosmetic; it is the model.
+**The two rules this template exists to enforce:**
+
+1. **Only `confirmed` findings can produce a graded badge.** Severity is uncapped (see
+   `severity-model.md`), so an unproven P0 is printed as a P0 — but it is printed *below* the
+   confirmed section and it never turns the badge red. The order of sections here is not cosmetic;
+   it is the model.
+2. **Not red is not green.** When nothing is confirmed but something unproven and catastrophic is
+   still open — or the engine could not read enough of the repo — the badge is `unknown` /
+   `לא נבדק`, never `clean`. See LAW 4 in `severity-model.md`. Rendering an `unknown` result with a
+   green badge or the word "clean" is the one thing this template forbids outright.
 
 ---
 
@@ -69,17 +75,55 @@ Badge, taken straight from the grader's `verdict.level`:
 | `high` | 🟠 | HIGH | גבוה | any confirmed P1, no confirmed P0 |
 | `medium` | 🟡 | MEDIUM | בינוני | any confirmed P2, nothing above |
 | `low` | 🔵 | LOW | נמוך | at least one confirmed finding, all P3/P4 |
-| `clean` | 🟢 | CLEAN | נקי | **no confirmed findings at all** |
+| `unknown` | ⚪ | UNKNOWN | לא נבדק | nothing confirmed, but an unproven P0/P1 is still open **or** discovery coverage is below its floor |
+| `clean` | 🟢 | CLEAN | נקי | nothing confirmed, nothing unproven-and-catastrophic open, coverage above the floor |
 
-`clean` means "nothing was proven", not "nothing is wrong". Never render it alone — always with the
-unconfirmed count and a pointer to Coverage:
+<a id="unknown-badge"></a>
+### `unknown` / `לא נבדק` — not proven safe
+
+**Never render `unknown` in green, and never call it clean.** It is not a mild version of `clean`;
+it is the absence of a claim. The grader emits it when nothing was confirmed and *either* a P0/P1 it
+could not prove is still open, *or* it could not read enough of the repository to say. Both are
+states in which a green badge would be a lie, and the reader — a non-expert who cannot audit us —
+has no other way to find that out.
+
+Print the reason. `verdict.discoveryCoverage.reasons` says why coverage failed, and
+`verdict.unprovenP0` / `unprovenP1` say how many unproven catastrophes are open:
+
+```
+Verdict: ⚪ UNKNOWN — Not proven safe. Nothing was confirmed, and 1 unproven P0 and 2 unproven P1
+findings are still open. This is NOT a clean result.
+פסק דין: ⚪ לא נבדק — לא הוכח שהמערכת בטוחה. לא אומת אף ממצא, ואולם נותרו פתוחים ממצא P0 אחד
+ושני ממצאי P1 שלא הצלחנו להוכיח. זו אינה תוצאה נקייה.
+
+Why: coverage or confidence is too low to say. Settle the findings below — each names the one
+assumption to check — and re-run.
+למה: הכיסוי או רמת הוודאות נמוכים מכדי להכריע. הכריעו את הממצאים שלמטה — לכל אחד מצוינת ההנחה
+היחידה שיש לבדוק — והריצו שוב.
+
+Not counted in the verdict: 1 likely · 11 needs-review, three of them P0 — read them below.
+לא נספרו בפסק הדין: ממצא סביר אחד · 11 דורשים בדיקה, שלושה מהם P0 — קראו אותם בהמשך.
+```
+
+When it is coverage rather than confidence that fell short, say *that*, in both languages, and print
+the discovery block immediately after:
+
+```
+Verdict: ⚪ UNKNOWN — Not proven safe: we could only read 41 of the 78 files we needed.
+פסק דין: ⚪ לא נבדק — לא הוכח שהמערכת בטוחה: הצלחנו לקרוא רק 41 מתוך 78 הקבצים הנדרשים.
+```
+
+### `clean` / `נקי`
+
+`clean` means "nothing was proven", not "nothing is wrong" — LAW 4 narrows that gap, it does not
+close it. Never render it alone; always with the unconfirmed count and a pointer to Coverage:
 
 ```
 Verdict: 🟢 CLEAN — No confirmed findings. This is not a proof of safety.
 פסק דין: 🟢 נקי — לא אומת אף ממצא. אין בכך הוכחה לבטיחות.
 
-Not counted in the verdict: 1 likely · 11 needs-review, three of them P0 — read them below.
-לא נספרו בפסק הדין: ממצא סביר אחד · 11 דורשים בדיקה, שלושה מהם P0 — קראו אותם בהמשך.
+Not counted in the verdict: 1 likely · 4 needs-review, none of them P0 or P1 — read them below.
+לא נספרו בפסק הדין: ממצא סביר אחד · 4 דורשים בדיקה, אף אחד מהם אינו P0 או P1 — קראו אותם בהמשך.
 Coverage: 8 of 12 routes could not be settled from the source.
 כיסוי: לא ניתן היה להכריע מהקוד 8 מתוך 12 נתיבים.
 ```
@@ -222,6 +266,18 @@ methods, each with its reason — this is the honest short list of what the engi
 model. If `discovery.reconciles` is false, say so loudly: the ledger did not add up, and the counts
 cannot be trusted until it does.
 
+**This section is also where the badge comes from when it says `unknown`.** The grader publishes its
+own assessment at `verdict.discoveryCoverage` — `{ adequate, ratio, floor, filesRead, filesIntended,
+reasons }`. Print the ratio against the floor whenever the verdict is `unknown`, and print every
+reason verbatim. The floor is over the files the engine *set out to read*, not over everything it
+found: images and lockfiles are deliberate exclusions and do not count against coverage. See
+`severity-model.md` for the exact rule.
+
+```
+Discovery coverage: 41 of 78 files we needed (52.6%) — below the 95% floor.
+כיסוי גילוי: 41 מתוך 78 הקבצים הנדרשים (52.6%) — מתחת לסף של 95%.
+```
+
 Call-declared routes (`discovery.routes.fromFrameworkCalls`) are found by reading
 `app.get(...)`-style calls, not by listing files, so there is no filesystem count to check them
 against. That is what `discovery.routes.frameworkGaps` exists for: a server framework in
@@ -265,6 +321,16 @@ classes the engine discovered and no rule grades — an Electron main file, a Ku
 framework whose routes could not be enumerated. Its rows are `undeterminable` by construction;
 render them like every other undeterminable row — seen, not settled, with the reason — never trim
 them as noise.
+
+Print the **decision rate** under the table, from the grader's `decisionRate` block. It is
+`(pass + fail) / enumerated` — how much of what we enumerated we actually *decided*, as opposed to
+abstained on. A coverage table that adds up perfectly and is almost entirely `undeterminable` is a
+complete accounting of nothing, and this one number is what makes that legible at a glance:
+
+```
+Decided: 41 of 181 enumerated subjects (22.7%). The rest could not be settled from the source.
+הוכרעו: 41 מתוך 181 נושאים שנמנו (22.7%). את השאר לא ניתן היה להכריע מהקוד.
+```
 
 Then list every `undeterminable` row with its reason. These are not filler — **this is the
 reviewer's work list**, the short honest list of what a human still has to open:
@@ -319,6 +385,8 @@ Next steps / הצעדים הבאים:
 
 A clean verdict means nothing was proven — not that nothing is wrong. Read the Coverage section.
 פסק דין נקי אומר שדבר לא הוכח — לא שאין בעיות. קראו את מקטע הכיסוי.
+An UNKNOWN verdict means we could not prove it safe — coverage or confidence was too low.
+פסק דין "לא נבדק" אומר שלא הצלחנו להוכיח שהמערכת בטוחה — הכיסוי או רמת הוודאות היו נמוכים מדי.
 
 New to this? Read plain-language/concepts.he.md — it explains RLS, service_role, secrets and the
 rest in plain Hebrew, once, with no jargon.
@@ -328,3 +396,30 @@ rest in plain Hebrew, once, with no jargon.
 Tiers 1–2 (live / DAST) require you to own the target and confirm authorization.
 בדיקות live/DAST דורשות בעלות על היעד ואישור מפורש.
 ```
+
+### Machine-readable footer: the run record and the gate
+
+Two blocks belong at the very bottom, and both are about reproducibility rather than about safety.
+
+**Run record** (`result.runRecord`) — print it verbatim. It says which tool version, which commit
+and which model produced this verdict, so a report pasted into an issue three weeks later can still
+be traced to the code that made it. **It attests what was run; it is never a statement that the
+repository is secure**, and its own `note` says so. Do not dress it up as a certificate, a seal, or a
+pass mark.
+
+```
+Run record / רשומת הרצה:
+  tool 0.2.0 · commit 41e7c0b · model sha256:5749af6b… · ledgers reconcile: yes
+  verdict: unknown · confirmed P0: 0 · confirmed P1: 0 · generated: (caller did not supply a clock)
+
+This records WHAT WAS RUN. It is not a statement that this repository is secure.
+זוהי רשומה של מה שהורץ. אין בה קביעה שהמאגר הזה מאובטח.
+```
+
+**Gate mode.** For CI or an agent's pre-deploy hook, `node grader.mjs <path> --gate` sets the process
+exit code from the verdict — `1` on any confirmed P0/P1, `2` on `unknown` (not proven safe), `0`
+otherwise — and writes one summary line to stderr while the full report still goes to stdout. Say so
+in the footer when a report was produced in gate mode, and print that line. Because a reviewer
+finding can never reach `confirmed` and an unsettled reviewer P0/P1 pushes `clean` to `unknown`,
+every path an agent's output can take raises the exit code and none lowers it: **an agent cannot talk
+this gate green.** See `severity-model.md`.

@@ -881,7 +881,16 @@ test('the example\'s flow-sequence tool lists parse as lists, not as strings', (
 // a check that did not happen is indistinguishable from the check having passed.
 // ---------------------------------------------------------------------------
 
-const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] } }
+// `discovery` says the engine READ everything it set out to read. LAW 4 refuses a `clean` verdict
+// on a model that never states what was seen, so without this block the assertions below would be
+// about discovery coverage rather than about the dynamic-testing gate.
+const EMPTY_MODEL = {
+  database: { parserVersion: 2, tables: [] },
+  discovery: {
+    counts: { filesDiscovered: 1, filesParsed: 1, configParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+    reconciles: true,
+  },
+}
 const gradeWith = (opts) => grade(EMPTY_MODEL, opts)
 const scanRow = (r, subject) => Object.values(r.coverage.scanCoverage)
   .filter(Array.isArray).flat().find(s => s.subject === subject)
