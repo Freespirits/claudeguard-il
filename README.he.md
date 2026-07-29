@@ -82,6 +82,16 @@ Tier 1–2. **בודקים רק מערכות שבבעלותכם או שיש לכ
 **סיכוני LLM** (חשיפת מפתח, prompt injection, ניצול כלים של agent, DoS עלות) · manifest ואחסון
 באנדרואיד/iOS · בידוד ו-IPC ב-Electron · Docker/K8s/Terraform · GitHub Actions ו-supply-chain.
 
+## בנוי למי שלא מומחה (עברית פשוטה)
+
+הקהל הוא אנשים שבנו אפליקציה אמיתית עם כלי AI ומעולם לא למדו אבטחה. לכן כל ממצא בדוח נפתח בשורת
+**"בפשטות"** — בלי ז'רגון, לפני כל הסבר טכני: מה בדיוק חשוף, למה זה חשוב, ומה הדבר האחד שכדאי לעשות.
+בנוסף יש מדריך למתחילים, [`core/plain-language/concepts.he.md`](core/plain-language/concepts.he.md),
+שמלמד את הרעיונות פעם אחת בעברית פשוטה — המודל של דפדפן מול שרת, `service_role` מול המפתח האנונימי,
+RLS, IDOR, prompt injection ו-denial of wallet — בלי קשר לסריקה מסוימת. הטקסט של כל ממצא נמצא ב-
+[`core/plain-language/findings.md`](core/plain-language/findings.md), לפי מזהה הממצא, ומגיע גם לתוסף
+וגם ל-skill.
+
 ## איך זה בנוי
 
 `core/` הוא מקור האמת היחיד (markdown פשוט). `scripts/build.mjs` מעתיק אותו לשני העטיפות, כך

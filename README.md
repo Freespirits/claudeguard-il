@@ -77,6 +77,17 @@ security headers/CORS/cookies · rate limiting · **LLM risks** (key exposure, p
 agent-tool abuse, cost DoS) · Android/iOS manifest & storage · Electron isolation & IPC ·
 Docker/K8s/Terraform · GitHub Actions & dependency/supply-chain. Full catalog in `core/checks/`.
 
+## Built for non-experts (plain Hebrew)
+
+The audience is people who built a real app with an AI tool and never learned security. So every
+finding opens with a **"בפשטות / In plain words"** line — jargon-free, before any technical prose:
+what is actually exposed, why it matters, and the one thing to do. There is also a standalone
+beginner's guide, [`core/plain-language/concepts.he.md`](core/plain-language/concepts.he.md), that
+teaches the underlying ideas once in plain Hebrew — the browser-vs-server model, `service_role` vs
+the anon key, RLS, IDOR, prompt injection, denial-of-wallet — independent of any scan. The
+per-finding text lives in [`core/plain-language/findings.md`](core/plain-language/findings.md),
+keyed by finding id, and ships to both the plugin and the claude.ai skill.
+
 ## How it works
 
 Most AI security review reads files one at a time and forms an impression. That misses things for

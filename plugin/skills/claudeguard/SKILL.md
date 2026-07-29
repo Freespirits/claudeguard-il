@@ -56,8 +56,11 @@ grader are real scripts; on claude.ai you apply the same method by hand from
    `references/i18n/{he,en}.md`. The headline verdict counts **only `confirmed`** findings;
    `likely` and `needs-review` go in the quieter section below it. Always print the coverage
    section — it is what stops a quiet report from being mistaken for a safe one. Every finding:
-   what+why, evidence, exploit scenario, business impact — in Hebrew **and** English — plus the
-   guard to apply.
+   a plain-words line first (look the finding `id` up in `references/plain-language/findings.md`
+   and print its `HE` + `EN` — this audience is non-expert, so the jargon-free line comes before
+   the technical prose), then what+why, evidence, exploit scenario, business impact — in Hebrew
+   **and** English — plus the guard to apply. Point beginners to
+   `references/plain-language/concepts.he.md`, which teaches the concepts once in plain Hebrew.
 
 6. **Guard / fix.** Each finding's `guard:` field names the recipe in `references/guard-recipes/`;
    include the paste-ready snippet. Applying fixes is opt-in and dry-run first (see `cg-fix`), and
@@ -97,6 +100,11 @@ is incomplete), `grade.md` (severity + confidence policy), `false-positives.md` 
 mistakes that made earlier versions wrong — read this one), `coverage.md` (the accounting).
 
 **Report & i18n:** `references/report-template.md`, `references/i18n/{he,en}.md`.
+
+**Plain language (for non-experts):** `references/plain-language/findings.md` (a jargon-free HE+EN
+line per finding id, printed as the `בפשטות / In plain words` line) and
+`references/plain-language/concepts.he.md` (a standalone beginner's guide to RLS, service_role,
+secrets, IDOR, prompt injection and the rest, in plain Hebrew).
 
 ## Test tiers
 
