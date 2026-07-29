@@ -27,6 +27,22 @@ passive_live:
   enabled: false
   i_own_or_control_these_targets: false   # must be true to run Tier 1
 
+  # OPTIONAL — the Supabase RLS spot-check (`--supabase-url --anon-key --table`).
+  #
+  # This one request carries your anon key in its headers, so its destination is the only place in
+  # Tier 1 where getting the host wrong hands a CREDENTIAL to a stranger. It therefore needs its own
+  # attestation and will not accept anything else:
+  #
+  #   - every *.supabase.co host is refused by default (see DEFAULT_BLOCKED), so listing your
+  #     project under `targets` above deliberately does NOT authorise it;
+  #   - only the exact project named here is probed;
+  #   - the request is built from THIS value, not from the --supabase-url argument, so the host that
+  #     was checked and the host that is contacted cannot differ;
+  #   - `never_touch` still wins over it.
+  #
+  # Leave unset unless you are probing your own project.
+  supabase_project: null                  # e.g. "https://abcdefgh.supabase.co"
+
 # Tier 2 — active DAST. Sends real attack traffic (injection, auth/IDOR, fuzzing).
 # Requires explicit written-authorization attestation AND ownership. Dry-run by default.
 active_dast:
