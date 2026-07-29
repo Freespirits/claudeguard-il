@@ -1,0 +1,15 @@
+{
+  "notes": "INTENT: an LLM call site with no rate limit and no token ceiling is the classic denial-of-wallet — one loop empties the account overnight, with no breach involved. Because a limiter could live at the edge or in middleware this pass does not follow, these are weak-evidence findings (needs-review), NOT confirmed: the harness still requires them (recall gate applies to all planted findings, not only confirmed ones). The route is deliberately authenticated and body-validated so the ONLY findings are the two LLM ones — a grader change that starts flagging the auth/validation would surface as an unexpected finding (precision drop). The fixed variant adds an Upstash rate limit and max_tokens, so it must be silent.",
+  "scan": { "secrets": false },
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-LLM-002", "severity": "P2", "confidence": "needs-review", "subject": "llm:app/api/chat/route.ts", "at": "app/api/chat/route.ts" },
+      { "id": "CG-LLM-004", "severity": "P3", "confidence": "needs-review", "subject": "llm:app/api/chat/route.ts", "at": "app/api/chat/route.ts" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

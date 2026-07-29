@@ -13,7 +13,7 @@
 // Usage: node project_model.mjs [path] [--json]
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
-import { stripSql, stripJs } from './lib/strip_comments.mjs'
+import { stripSql, stripJs, CODE } from './lib/strip_comments.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -53,20 +53,34 @@ function classifySecretName(name) {
   return 'none'
 }
 
+const rel = p => relative(ROOT, p).split(sep).join('/')
+
+// DISCOVERY LEDGER — what the engine could and could NOT see, tracked as it walks. This is a
+// DIFFERENT axis from the coverage ledger the grader builds: coverage accounts for every subject we
+// ENUMERATED; discovery accounts for what we FAILED to enumerate. A silently skipped directory or an
+// unparsed file is invisible to coverage — a clean-looking report can hide the fact that we never
+// opened half the repo. Every skip below carries a reason, so "we found nothing" can be told apart
+// from "we looked nowhere".
+const discovery = {
+  skippedDirs: [],   // directories not descended into, with why
+  notableSkips: [],  // files we wanted to parse but could not, with why
+  counts: { filesDiscovered: 0, filesParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+}
+const MAX_LEDGER_ROWS = 200 // cap the detail lists so a huge repo cannot balloon the model
+
 function* walk(dir) {
   let entries
-  try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+  try { entries = readdirSync(dir, { withFileTypes: true }) }
+  catch { if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: rel(dir), reason: 'read-error' }); return }
   for (const e of entries) {
     const full = join(dir, e.name)
     if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) continue
-      if (e.name.startsWith('.') && e.name !== '.github') continue
+      if (SKIP_DIRS.has(e.name)) { if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: rel(full), reason: 'ignored build/vendor dir' }); continue }
+      if (e.name.startsWith('.') && e.name !== '.github') { if (discovery.skippedDirs.length < MAX_LEDGER_ROWS) discovery.skippedDirs.push({ dir: rel(full), reason: 'dotfile dir' }); continue }
       yield* walk(full)
     } else if (e.isFile()) yield full
   }
 }
-
-const rel = p => relative(ROOT, p).split(sep).join('/')
 
 // ---------- collect files ----------
 const files = new Map() // rel -> record
@@ -74,13 +88,16 @@ const allPaths = []
 for (const abs of walk(ROOT)) {
   const r = rel(abs)
   allPaths.push(r)
+  discovery.counts.filesDiscovered++
   const ext = extname(abs).toLowerCase()
-  if (!CODE_EXT.has(ext)) continue
+  // Not source we model (images, json, lockfiles, …). Not a failure — just outside the parser.
+  if (!CODE_EXT.has(ext)) { discovery.counts.unsupported++; continue }
   let size = 0
-  try { size = statSync(abs).size } catch { continue }
-  if (size > MAX_FILE) continue
+  try { size = statSync(abs).size } catch { discovery.counts.readErrors++; if (discovery.notableSkips.length < MAX_LEDGER_ROWS) discovery.notableSkips.push({ file: r, reason: 'stat failed' }); continue }
+  if (size > MAX_FILE) { discovery.counts.oversized++; if (discovery.notableSkips.length < MAX_LEDGER_ROWS) discovery.notableSkips.push({ file: r, reason: `oversized: ${Math.round(size / 1024)}KB > ${Math.round(MAX_FILE / 1024)}KB cap` }); continue }
   let text
-  try { text = readFileSync(abs, 'utf8') } catch { continue }
+  try { text = readFileSync(abs, 'utf8') } catch { discovery.counts.readErrors++; if (discovery.notableSkips.length < MAX_LEDGER_ROWS) discovery.notableSkips.push({ file: r, reason: 'read failed (not valid UTF-8?)' }); continue }
+  discovery.counts.filesParsed++
   files.set(r, { path: r, abs, ext, text, lines: text.split(/\r?\n/) })
 }
 
@@ -482,17 +499,63 @@ const tablesUsedInCode = new Map()
 // This must be VISIBLE, never a silent skip, or we would claim complete coverage while blind.
 const DYNAMIC_TABLE_REF_RE = /\.from\(\s*(?!['"])([A-Za-z_$][\w$.]*)\s*\)/g
 const dynamicTableRefs = []
+// The Supabase client factories, used to prove that a bare `from(...)` is a table query and not,
+// say, RxJS's `from`. A .from('x') is only a table reference when the thing before the dot is a
+// Supabase client; a bare from('x') only when `from` was destructured off one.
+const SUPA_FACTORY_NAMES = new Set(['createServerClient', 'createBrowserClient',
+  'createRouteHandlerClient', 'createServerComponentClient', 'createClientComponentClient',
+  'createMiddlewareClient', 'createPagesBrowserClient', 'createPagesServerClient', 'createClient'])
 for (const [r, f] of files) {
+  // Scan RAW text — a table name and an import path both LIVE inside string literals, so blanking
+  // strings would erase the very data we read. Instead use the stripper's MASK to reject any match
+  // whose `.from` / `from` token sits inside a comment or a string: real code is CODE at that
+  // offset, a commented-out `.from('ghost')` is COMMENT. This kills the "table named only in a
+  // comment" false positive without losing the table name.
+  const { mask } = stripJs(f.text)
+  const inCode = idx => mask[idx] === CODE
+
   let m; TABLE_REF_RE.lastIndex = 0
   while ((m = TABLE_REF_RE.exec(f.text))) {
+    if (!inCode(m.index)) continue
     const t = m[1].toLowerCase()
     if (!tablesUsedInCode.has(t)) tablesUsedInCode.set(t, [])
-    tablesUsedInCode.get(t).push(r)
+    if (!tablesUsedInCode.get(t).includes(r)) tablesUsedInCode.get(t).push(r)
   }
   DYNAMIC_TABLE_REF_RE.lastIndex = 0
   while ((m = DYNAMIC_TABLE_REF_RE.exec(f.text))) {
+    if (!inCode(m.index)) continue
     const line = f.text.slice(0, m.index).split(/\r?\n/).length
     dynamicTableRefs.push({ file: r, line, expr: m[1] })
+  }
+
+  // Destructured access: `const supabase = createServerClient(...); const { from } = supabase;
+  // from('orders')`. The dotted scan above needs a leading dot, so the destructured call is
+  // invisible to it. Enumerate it ONLY when `from` is destructured from something that actually
+  // holds a Supabase client — a client variable assigned from a factory, or a factory call
+  // directly. Without this scoping, an unrelated `const { from } = rxjs` (RxJS's Observable
+  // factory) invents phantom tables on genuinely clean code — a false positive the adversarial
+  // pass caught.
+  const clientVars = new Set()
+  const assignRe = /(?:const|let|var)\s+(\w+)\s*=\s*(?:await\s+)?(\w+)\s*[(<]/g
+  let am
+  while ((am = assignRe.exec(f.text))) {
+    if (inCode(am.index) && SUPA_FACTORY_NAMES.has(am[2])) clientVars.add(am[1])
+  }
+  const rhsAlts = []
+  if (clientVars.size) rhsAlts.push(`(?:${[...clientVars].join('|')})\\b`)
+  rhsAlts.push(`(?:${[...SUPA_FACTORY_NAMES].join('|')})\\s*[(<]`)
+  const destructRe = new RegExp(
+    `(?:const|let|var)\\s*\\{[^}]*\\bfrom\\b[^}]*\\}\\s*=\\s*(?:${rhsAlts.join('|')})`, 'g')
+  let destructInCode = false, dm
+  while ((dm = destructRe.exec(f.text))) { if (inCode(dm.index)) { destructInCode = true; break } }
+  if (destructInCode) {
+    const BARE_FROM_RE = /(?<!\.)\bfrom\s*\(\s*['"]([a-zA-Z0-9_]+)['"]\s*\)/g
+    while ((m = BARE_FROM_RE.exec(f.text))) {
+      if (!inCode(m.index)) continue
+      const t = m[1].toLowerCase()
+      if (!tablesUsedInCode.has(t)) tablesUsedInCode.set(t, [])
+      if (!tablesUsedInCode.get(t).includes(r)) tablesUsedInCode.get(t).push(r)
+    }
   }
 }
 
@@ -651,37 +714,80 @@ const SUPABASE_FACTORIES = [
   ['createPagesBrowserClient', 'anon-user-scoped'],
   ['createPagesServerClient', 'anon-user-scoped'],
 ]
+const FACTORY_IDENTITY = new Map(SUPABASE_FACTORIES)
+const FACTORY_NAMES = new Set([...FACTORY_IDENTITY.keys(), 'createClient'])
+
+// Resolve import aliases for the known factory names, so `import { createClient as cc }` followed by
+// `cc(...)` is still recognised. Without this, a one-line alias — a semantics-preserving edit —
+// silently hides a service-role client entirely: the subject never enters the model and CG-DB-006
+// vanishes. Scoped to `@supabase/*` imports so a `createClient` from some other library is not
+// mistaken for a Supabase factory.
+function factoryAliasesFor(text) {
+  const aliases = new Map() // localName -> canonicalFactory
+  const impRe = /import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*['"](@supabase\/[^'"]+)['"]/g
+  let im
+  while ((im = impRe.exec(text))) {
+    for (const part of im[1].split(',')) {
+      const mm = /^\s*([A-Za-z_$][\w$]*)\s*(?:as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(part)
+      if (!mm) continue
+      const orig = mm[1], local = mm[2] || mm[1]
+      if (FACTORY_NAMES.has(orig) && local !== orig) aliases.set(local, orig)
+    }
+  }
+  return aliases
+}
+
 const supabaseClients = []
 for (const [r, f] of files) {
-  for (const [fn, identity] of SUPABASE_FACTORIES) {
-    const re = new RegExp(`\\b${fn}\\s*[(<]`, 'g')
+  // Reject factory calls that sit in a comment: a `createClient(url, SERVICE_ROLE_KEY)` written in
+  // a doc example must never manufacture a service-role client (and a P0). The import specifier is
+  // a STRING, so aliases are read from raw text; the CALL sites are checked against the mask.
+  const { mask } = stripJs(f.text)
+  const inCode = idx => mask[idx] === CODE
+  const aliases = factoryAliasesFor(f.text)
+
+  // The ssr/auth-helpers factories, under their canonical names AND any local alias.
+  const namedFactories = new Map() // localName -> { canonical, identity }
+  for (const [fn, identity] of SUPABASE_FACTORIES) namedFactories.set(fn, { canonical: fn, identity })
+  for (const [local, orig] of aliases) {
+    if (orig !== 'createClient') namedFactories.set(local, { canonical: orig, identity: FACTORY_IDENTITY.get(orig) })
+  }
+  for (const [localName, { canonical, identity }] of namedFactories) {
+    const re = new RegExp(`\\b${localName}\\s*[(<]`, 'g')
     let m
     while ((m = re.exec(f.text))) {
+      if (!inCode(m.index)) continue
       supabaseClients.push({
         file: r,
         line: f.text.slice(0, m.index).split(/\r?\n/).length,
-        factory: fn,
+        factory: canonical,
         identity,
         // RLS is the correct control for this identity; IDOR must never be `confirmed` here.
         rlsIsTheControl: true,
       })
     }
   }
-  // Plain createClient(url, KEY) — identity depends entirely on WHICH key.
-  const re = /\bcreateClient\s*(?:<[^>]*>)?\s*\(([^)]{0,400})\)/gs
-  let m
-  while ((m = re.exec(f.text))) {
-    const args = m[1]
-    const usesServiceRole = /SERVICE_ROLE/i.test(args)
-    const usesAnon = /ANON/i.test(args)
-    supabaseClients.push({
-      file: r,
-      line: f.text.slice(0, m.index).split(/\r?\n/).length,
-      factory: 'createClient',
-      identity: usesServiceRole ? 'service-role' : usesAnon ? 'anon-public' : 'unknown-key',
-      // service_role BYPASSES RLS entirely, so RLS is not a control for it.
-      rlsIsTheControl: !usesServiceRole,
-    })
+
+  // Plain createClient(url, KEY) — identity depends entirely on WHICH key — plus its aliases.
+  const createClientLocals = new Set(['createClient'])
+  for (const [local, orig] of aliases) if (orig === 'createClient') createClientLocals.add(local)
+  for (const localName of createClientLocals) {
+    const re = new RegExp(`\\b${localName}\\s*(?:<[^>]*>)?\\s*\\(([^)]{0,400})\\)`, 'gs')
+    let m
+    while ((m = re.exec(f.text))) {
+      if (!inCode(m.index)) continue
+      const args = m[1]
+      const usesServiceRole = /SERVICE_ROLE/i.test(args)
+      const usesAnon = /ANON/i.test(args)
+      supabaseClients.push({
+        file: r,
+        line: f.text.slice(0, m.index).split(/\r?\n/).length,
+        factory: 'createClient',
+        identity: usesServiceRole ? 'service-role' : usesAnon ? 'anon-public' : 'unknown-key',
+        // service_role BYPASSES RLS entirely, so RLS is not a control for it.
+        rlsIsTheControl: !usesServiceRole,
+      })
+    }
   }
 }
 
@@ -844,6 +950,55 @@ for (const p of artifacts.infoPlist) {
   })
 }
 
+// ---------- finish the discovery ledger ----------
+//
+// The counts above cover files. These cover the higher-level subjects, and — critically — where
+// the engine MODELLED a subject but only partially: a route whose HTTP methods it could not read,
+// an import it could not resolve, a `.from(x)` it could not follow. Those are not failures to
+// enumerate (they ARE enumerated), but they are failures to fully MODEL, and hiding them would let
+// a partial analysis pass for a complete one.
+const routeLikeFiles = allPaths.filter(p =>
+  /^pages\/api\//.test(p) ||
+  /^(app|src\/app)\/.*\/route\.(t|j)sx?$/.test(p) ||
+  /^(supabase\/functions|netlify\/functions|api)\/.*\.(t|j)sx?$/.test(p))
+const thirdPartyPkgs = new Set()
+for (const set of bareImports.values()) for (const p of set) thirdPartyPkgs.add(p)
+let importEdges = 0
+for (const set of imports.values()) importEdges += set.size
+
+discovery.routes = {
+  // Every route-kind file becomes a modeled route, so found === modeled by construction; the real
+  // signal is how many we could only PARTIALLY model.
+  foundByFilesystem: routeLikeFiles.length,
+  modeled: routes.length,
+  withUnknownMethods: routes.filter(r => r.methods.length === 1 && r.methods[0] === 'UNKNOWN').length,
+}
+discovery.imports = {
+  edgesResolvedToFiles: importEdges,
+  thirdPartyPackages: thirdPartyPkgs.size,
+  unresolvedWorkspaceImports: unresolvedWorkspaceImports.length,
+  // Non-literal table refs behind a generic CRUD helper: enumerated as a hole, never followed.
+  dynamicTableRefs: dynamicTableRefs.length,
+}
+discovery.schema = {
+  sources: schemaSources,
+  tablesEnumerated: tables.size,
+  // The single most consequential discovery fact for a Supabase app: if this is false, RLS state
+  // was NOT discoverable from the repo at all, and every RLS pass/fail is really "unknown".
+  rlsVerifiable: schemaSources.includes('migrations'),
+}
+// The ledger must add up, or it is lying: everything discovered is either parsed, unsupported,
+// oversized, or a read error. Asserted here so a future change to the collect loop that forgets to
+// count a branch fails loudly instead of silently under-reporting.
+{
+  const c = discovery.counts
+  const accounted = c.filesParsed + c.unsupported + c.oversized + c.readErrors
+  discovery.reconciles = accounted === c.filesDiscovered
+  if (!discovery.reconciles) {
+    discovery.discrepancy = `filesDiscovered=${c.filesDiscovered} but parsed+unsupported+oversized+readErrors=${accounted}`
+  }
+}
+
 const model = {
   root: ROOT.split(sep).join('/'),
   generatedBy: 'claudeguard/project_model',
@@ -853,6 +1008,11 @@ const model = {
     routes: routes.length, tables: tables.size, envVars: envVars.length, llmSites: llmSites.length,
   },
   framework, artifacts,
+  // DISCOVERY coverage — a first-class output, and a DIFFERENT axis from the grader's analysis
+  // coverage. This says what the engine could and could not SEE; the grader's ledger says how it
+  // GRADED what it saw. A report that shows only analysis coverage can look complete while the
+  // engine silently skipped half the repo. See core/methodology/discovery.md.
+  discovery,
   // Coverage is a first-class output: what we could NOT analyze must be as visible as what we
   // could, or a clean report reads as "safe" when it is really "unexamined".
   graphCoverage: {

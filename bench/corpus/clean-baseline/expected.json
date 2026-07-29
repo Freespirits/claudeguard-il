@@ -1,0 +1,8 @@
+{
+  "notes": "INTENT: the cry-wolf case. A fully correct Next.js + Supabase app built ONLY from recommended patterns — t3-env guarding server vars, @supabase/ssr user-scoped createServerClient, RLS on with uid-scoped policies, middleware auth with a matcher, zod validation, an Upstash rate limit, a server-side LLM call with max_tokens, and a CSP in next.config. It must produce ZERO findings. Any finding here is by construction a false positive, and for this non-expert audience a false P0 is the tool's worst failure: it makes someone rotate live keys and announce a breach that never happened. This is the single most important case in the corpus.",
+  "scan": { "secrets": false },
+  "clean": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

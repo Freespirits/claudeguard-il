@@ -1,0 +1,14 @@
+{
+  "notes": "INTENT: a committed credential VALUE (here AWS's documentation example access key, a safe non-secret used only as a test vector) is exactly the case that justifies a confirmed P0 — it is a value match, not a name match, so LAW 3 permits the P0. Secrets are graded via the scanners option, so this case runs run_gitleaks.mjs (gitleaks if installed, regex fallback otherwise) and feeds its output to grade(). Matching is by shape (id+severity+confidence+file), NOT exact subject, because gitleaks and the fallback embed different rule ids in the subject. The fixed variant reads the credential from process.env with only an empty .env.example, so the scanner finds nothing.",
+  "scan": { "secrets": true },
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-SEC-001", "severity": "P0", "confidence": "confirmed", "at": "lib/aws.ts" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

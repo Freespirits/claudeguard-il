@@ -26,6 +26,26 @@ function gradeRepo(files) {
 
 const NEXT = '{"name":"x","dependencies":{"next":"15.0.0","openai":"4.60.0","@supabase/supabase-js":"2.45.0"}}'
 
+test('REGRESSION: a browser-exposed LLM SDK is still checked for rate limit and token ceiling', () => {
+  // dangerouslyAllowBrowser used to `continue` past the denial-of-wallet checks, hiding them on
+  // exactly the worst sites — the ones already leaking the key. Disposition is exclusive (fail),
+  // but the findings are additive: the same site is a P0 leak AND unthrottled AND unbounded.
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'app/api/chat/route.ts': `import OpenAI from 'openai'
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, dangerouslyAllowBrowser: true })
+export async function POST() {
+  return Response.json(await openai.chat.completions.create({ model: 'gpt-4o-mini', messages: [] }))
+}`,
+  })
+  const ids = r.findings.filter(f => f.subject.startsWith('llm:')).map(f => f.id)
+  assert.ok(ids.includes('CG-LLM-001'), 'the browser-exposed SDK is a P0')
+  assert.ok(ids.includes('CG-LLM-002'), 'and it is still flagged for no rate limit')
+  assert.ok(ids.includes('CG-LLM-004'), 'and for no token ceiling')
+  assert.equal(r.coverage.llmSites.counts.fail, 1, 'the disposition is a single exclusive fail')
+  assert.equal(r.coverage.llmSites.counts.undeterminable, 0)
+})
+
 // ---------------------------------------------------------------------------
 // These three rules exist because the engine was computing facts that no rule consumed —
 // routes[].hasRateLimit, routes[].readsIdParam, routes[].ownershipFilter and

@@ -196,7 +196,38 @@ Never offer `/cg-fix` on a finding in this section. Only `confirmed` findings ar
 
 ---
 
-## Coverage / כיסוי
+## Discovery coverage / כיסוי גילוי
+
+**A report has two coverage axes, and they answer different questions.** *Discovery* coverage (this
+section) asks **what did the engine manage to see?** — how many files it parsed, how many it
+skipped and why, and which subjects it could only partially model. *Analysis* coverage (the next
+section) asks **of what it saw, what did it grade?** Accounting for every subject you enumerated
+means nothing if the engine silently never opened half the repo — so discovery is printed first,
+from the grader's `discovery` block.
+
+```
+Files discovered:            170     קבצים שנמצאו
+  parsed (code):              26       נותחו
+  unsupported (not code):    144       לא נתמכים
+  oversized / read errors:     0       גדולים מדי / שגיאת קריאה
+Directories not entered:       4  (build/vendor and dotfile dirs — listed with reasons)
+Routes found on disk:          2 · fully modeled: 0 · methods unread: 2
+Unresolved imports:            0 · dynamic table refs: 0
+Schema sources: migrations   → RLS state IS verifiable from the repo
+```
+
+List every `notableSkip` (a file we wanted to parse but could not) and every route with unread
+methods, each with its reason — this is the honest short list of what the engine could not fully
+model. If `discovery.reconciles` is false, say so loudly: the ledger did not add up, and the counts
+cannot be trusted until it does.
+
+The single most consequential line for a Supabase app is `schema.rlsVerifiable`. When it is false,
+there are no migrations in the repo, so **every RLS pass or fail is really "unknown"** — print the
+`verifyQuery` and treat the RLS rows accordingly.
+
+---
+
+## Analysis coverage / כיסוי ניתוח
 
 **Coverage is what stops a quiet report from being mistaken for a safe one.** A findings list looks
 identical whether we examined everything and found little, or examined almost nothing. This section

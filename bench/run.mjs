@@ -1,0 +1,335 @@
+#!/usr/bin/env node
+// Independent benchmark harness for ClaudeGuardIL.
+//
+// WHY THIS EXISTS: no change to the engine or the grader may claim "improvement" without evidence.
+// This harness measures the tool against a labeled ground-truth corpus (bench/corpus/), so a
+// regression that silently stops detecting a planted vulnerability — or starts crying wolf at a
+// correct app — fails a release gate instead of shipping.
+//
+// It imports grade() directly, exactly as the test suite does, and runs the real engine
+// (project_model.mjs) as a subprocess. For cases that plant a committed secret it also runs the
+// real secret scanner (run_gitleaks.mjs) and feeds it to grade() through the `scanners` option,
+// mirroring how `/cg --secrets` wires them together.
+//
+// Ground truth is DERIVED FROM REALITY: expected.json for each case records what the grader
+// actually produces today, asserted so it stays that way. The `notes` field states the INTENT
+// first, so a future grader change that breaks a case is visible as a diff against a stated goal,
+// not just against an opaque list of ids.
+//
+// Usage:
+//   node bench/run.mjs           run every case, print the scorecard, exit non-zero on a gate fail
+//   node bench/run.mjs --dump    print the grader's ACTUAL findings per variant (for authoring
+//                                expected.json) and skip the gates
+//
+// Zero runtime dependencies — Node builtins only, a hard project constraint.
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { performance } from 'node:perf_hooks'
+import { isDeepStrictEqual } from 'node:util'
+import { grade } from '../plugin/scripts/grader.mjs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const CORPUS = join(HERE, 'corpus')
+const ENGINE = join(HERE, '..', 'plugin', 'scripts', 'project_model.mjs')
+const GITLEAKS = join(HERE, '..', 'plugin', 'scripts', 'run_gitleaks.mjs')
+
+// The subdirectory names a case may carry. `vulnerable` is graded for RECALL (its planted findings
+// must all appear); `fixed` and `clean` are graded for the FALSE-POSITIVE gate (no unexpected
+// confirmed finding may appear on correct code). `clean` and `fixed` are treated identically.
+const VARIANTS = ['vulnerable', 'fixed', 'clean']
+const CLEAN_VARIANTS = new Set(['fixed', 'clean'])
+
+const DUMP = process.argv.includes('--dump')
+
+// ---------------------------------------------------------------------------
+// Running the real tools
+// ---------------------------------------------------------------------------
+
+function runEngine(dir) {
+  return JSON.parse(execFileSync(process.execPath, [ENGINE, dir], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  }))
+}
+
+// The secret scanner is a separate subprocess whose JSON is the exact shape grade() expects at
+// `scanners.secrets` ({ engine, scannedGitHistory, findings: [{file,line,rule,masked}] }).
+function runSecretScanner(dir) {
+  return JSON.parse(execFileSync(process.execPath, [GITLEAKS, dir], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Corpus discovery
+// ---------------------------------------------------------------------------
+
+function discoverCases() {
+  if (!existsSync(CORPUS)) return []
+  const cases = []
+  for (const name of readdirSync(CORPUS).sort()) {
+    const dir = join(CORPUS, name)
+    if (!statSync(dir).isDirectory()) continue
+    const variants = VARIANTS.filter(v => existsSync(join(dir, v)) && statSync(join(dir, v)).isDirectory())
+    if (!variants.length) continue
+    const expPath = join(dir, 'expected.json')
+    const expected = existsSync(expPath) ? JSON.parse(readFileSync(expPath, 'utf8')) : null
+    cases.push({ id: name, dir, variants, expected, expPath })
+  }
+  return cases
+}
+
+// ---------------------------------------------------------------------------
+// Grading one variant
+// ---------------------------------------------------------------------------
+
+function evaluate(caseObj, variant) {
+  const dir = join(caseObj.dir, variant)
+  const wantSecrets = !!caseObj.expected?.scan?.secrets
+
+  const t0 = performance.now()
+  const model = runEngine(dir)
+  const opts = {}
+  let secretScan = null
+  if (wantSecrets) {
+    secretScan = runSecretScanner(dir)
+    opts.scanners = { secrets: secretScan }
+  }
+  const result = grade(model, opts)
+  const ms = performance.now() - t0
+
+  // Stability: grading the SAME model+scanners twice must be byte-for-byte identical. Determinism
+  // is what lets a user trust the diff after a fix; the Set/Map iteration inside the ledger is
+  // exactly the kind of thing that can quietly reorder, so we pin it here.
+  const again = grade(model, opts)
+  const stable = isDeepStrictEqual(result, again)
+
+  return { variant, dir, model, result, secretScan, ms, stable, discovery: model.discovery }
+}
+
+// ---------------------------------------------------------------------------
+// Matching actual findings against the ground truth
+// ---------------------------------------------------------------------------
+
+const atOf = f => (f.evidence?.at?.[0]) || {}
+
+/** Does an actual finding satisfy an `at` clause of the form "file" or "file:line"? */
+function atMatches(expectedAt, f) {
+  if (!expectedAt) return true
+  const m = /^(.*):(\d+)$/.exec(expectedAt)
+  const wantFile = m ? m[1] : expectedAt
+  const wantLine = m ? Number(m[2]) : null
+  const a = atOf(f)
+  if (a.file !== wantFile) return false
+  if (wantLine != null && a.line !== wantLine) return false
+  return true
+}
+
+/**
+ * Consume-matching so that N expected findings of the same id require N distinct actual findings.
+ * A finding matches on id + severity + confidence, plus `subject` and `at` when the ground truth
+ * pins them. Matching by shape (not by exact subject) keeps the secret cases stable whether the
+ * scan came from gitleaks or the regex fallback, which use different rule ids in the subject.
+ */
+function matchMustFind(mustFind, actual) {
+  const pool = actual.slice()
+  const matched = []
+  const missing = []
+  for (const exp of mustFind) {
+    const i = pool.findIndex(f =>
+      f.id === exp.id &&
+      f.severity === exp.severity &&
+      f.confidence === exp.confidence &&
+      (exp.subject ? f.subject === exp.subject : true) &&
+      atMatches(exp.at, f))
+    if (i === -1) missing.push(exp)
+    else { matched.push(pool[i]); pool.splice(i, 1) }
+  }
+  return { matched, missing, leftover: pool }
+}
+
+// ---------------------------------------------------------------------------
+// Per-variant scoring
+// ---------------------------------------------------------------------------
+
+function score(caseObj, ev) {
+  const exp = caseObj.expected?.[ev.variant] || {}
+  const findings = ev.result.findings
+  const isClean = CLEAN_VARIANTS.has(ev.variant)
+
+  const mustFind = exp.mustFind || []
+  const allowedAlternates = new Set(exp.allowedAlternates || [])
+  const expectConfirmed = new Set(exp.expectConfirmed || [])
+
+  const { matched, missing } = matchMustFind(mustFind, findings)
+
+  // The set of ids that are legitimately allowed to appear for this variant.
+  const validIds = new Set([...allowedAlternates, ...expectConfirmed, ...mustFind.map(m => m.id)])
+  const unexpected = findings.filter(f => !validIds.has(f.id))
+
+  // False positives are UNEXPECTED CONFIRMED findings on a clean/fixed variant — the cry-wolf case
+  // that makes this audience rotate live keys over nothing.
+  const unexpectedConfirmed = isClean
+    ? findings.filter(f => f.confidence === 'confirmed' && !expectConfirmed.has(f.id))
+    : []
+
+  const disc = ev.discovery?.counts || { filesParsed: 0, filesDiscovered: 0 }
+
+  return {
+    variant: ev.variant,
+    isClean,
+    findings,
+    mustFindCount: mustFind.length,
+    matchedCount: matched.length,
+    missing,
+    valid: findings.length - unexpected.length,
+    total: findings.length,
+    unexpected,
+    unexpectedConfirmed,
+    stable: ev.stable,
+    ms: ev.ms,
+    filesParsed: disc.filesParsed,
+    filesDiscovered: disc.filesDiscovered,
+    secretScan: ev.secretScan,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dump mode — print the grader's real output so expected.json can be authored from it
+// ---------------------------------------------------------------------------
+
+function dump(cases) {
+  for (const c of cases) {
+    console.log(`\n=== ${c.id} ===`)
+    for (const variant of c.variants) {
+      const ev = evaluate(c, variant)
+      console.log(`\n  [${variant}]  files ${ev.discovery?.counts.filesParsed}/${ev.discovery?.counts.filesDiscovered} parsed, stable=${ev.stable}, ${ev.ms.toFixed(0)}ms`)
+      if (ev.secretScan) console.log(`  secret scan: engine=${ev.secretScan.engine} history=${ev.secretScan.scannedGitHistory} count=${ev.secretScan.count}`)
+      if (!ev.result.findings.length) { console.log('    (no findings)'); continue }
+      for (const f of ev.result.findings) {
+        const a = atOf(f)
+        const loc = a.file ? `${a.file}${a.line != null ? ':' + a.line : ''}` : '-'
+        console.log(`    ${f.severity} ${f.confidence.padEnd(12)} ${f.id.padEnd(14)} ${f.subject}`)
+        console.log(`        at ${loc}`)
+      }
+    }
+  }
+  console.log('\n(dump mode — gates not evaluated)')
+}
+
+// ---------------------------------------------------------------------------
+// Scorecard + gates
+// ---------------------------------------------------------------------------
+
+const pct = (n, d) => (d === 0 ? '100.0%' : (100 * n / d).toFixed(1) + '%')
+
+function run(cases) {
+  const failures = []
+  const rows = []
+
+  // Aggregates.
+  let totalMustFind = 0, totalMatched = 0
+  let totalFindings = 0, totalValid = 0
+  let cleanVariants = 0, unexpectedConfirmedTotal = 0
+  let filesParsed = 0, filesDiscovered = 0
+  let allStable = true, totalMs = 0
+
+  for (const c of cases) {
+    if (!c.expected) {
+      failures.push(`${c.id}: no expected.json — a case without ground truth cannot be graded`)
+      continue
+    }
+    for (const variant of c.variants) {
+      const ev = evaluate(c, variant)
+      const s = score(c, ev)
+      rows.push({ caseId: c.id, ...s })
+
+      totalMustFind += s.mustFindCount
+      totalMatched += s.matchedCount
+      totalFindings += s.total
+      totalValid += s.valid
+      filesParsed += s.filesParsed
+      filesDiscovered += s.filesDiscovered
+      totalMs += s.ms
+      if (!s.stable) allStable = false
+      if (s.isClean) { cleanVariants++; unexpectedConfirmedTotal += s.unexpectedConfirmed.length }
+
+      // ---- gates ----
+      for (const m of s.missing) {
+        failures.push(`${c.id}/${variant}: expected finding NOT produced — ${m.id} ${m.severity}/${m.confidence}` +
+          `${m.subject ? ' ' + m.subject : ''} (recall gate)`)
+      }
+      for (const f of s.unexpectedConfirmed) {
+        failures.push(`${c.id}/${variant}: UNEXPECTED confirmed finding on clean code — ${f.id} ${f.severity} ${f.subject} (false-positive gate)`)
+      }
+      if (!s.stable) failures.push(`${c.id}/${variant}: grade() was not deterministic across two runs (stability gate)`)
+    }
+  }
+
+  // ---- scorecard ----
+  console.log('\nClaudeGuardIL benchmark scorecard')
+  console.log('='.repeat(78))
+  console.log(
+    'case/variant'.padEnd(38) +
+    'recall'.padEnd(9) +
+    'prec'.padEnd(8) +
+    'FP'.padEnd(5) +
+    'stable'.padEnd(8) +
+    'ms')
+  console.log('-'.repeat(78))
+  for (const r of rows) {
+    const name = `${r.caseId}/${r.variant}`
+    const recall = r.mustFindCount ? pct(r.matchedCount, r.mustFindCount) : '  -  '
+    const prec = r.total ? pct(r.valid, r.total) : '  -  '
+    const fp = r.isClean ? String(r.unexpectedConfirmed.length) : '-'
+    const bad = r.missing.length || r.unexpectedConfirmed.length || !r.stable
+    console.log(
+      (bad ? '! ' : '  ') + name.padEnd(36) +
+      recall.padEnd(9) +
+      prec.padEnd(8) +
+      fp.padEnd(5) +
+      (r.stable ? 'yes' : 'NO').padEnd(8) +
+      r.ms.toFixed(0))
+  }
+  console.log('-'.repeat(78))
+
+  console.log('\nAggregate metrics')
+  console.log(`  recall (planted vulns detected)   ${pct(totalMatched, totalMustFind)}  (${totalMatched}/${totalMustFind})`)
+  console.log(`  precision (valid / all reported)  ${pct(totalValid, totalFindings)}  (${totalValid}/${totalFindings})`)
+  console.log(`  false positives (confirmed on clean) ${unexpectedConfirmedTotal}  over ${cleanVariants} clean variant(s)  = ${pct(unexpectedConfirmedTotal, cleanVariants)}`)
+  console.log(`  discovery coverage (parsed / found)  ${pct(filesParsed, filesDiscovered)}  (${filesParsed}/${filesDiscovered})`)
+  console.log(`  stability (deterministic re-runs)    ${allStable ? 'all stable' : 'UNSTABLE'}`)
+  console.log(`  runtime                              ${totalMs.toFixed(0)}ms total, ${(totalMs / Math.max(1, rows.length)).toFixed(0)}ms per variant`)
+
+  // ---- verdict ----
+  console.log('\n' + '='.repeat(78))
+  if (failures.length) {
+    console.error(`FAIL — ${failures.length} release gate(s) tripped:`)
+    for (const f of failures) console.error('  - ' + f)
+    process.exit(1)
+  }
+  console.log('PASS — all release gates green:')
+  console.log('  - recall 100% on every planted vulnerability')
+  console.log('  - zero unexpected confirmed findings on fixed/clean code')
+  console.log('  - output deterministic across re-runs')
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Exports — so test/benchmark.test.mjs can assert the same gates in-process (no duplicated logic).
+// ---------------------------------------------------------------------------
+
+export { discoverCases, evaluate, score, CLEAN_VARIANTS }
+
+// Only take over the process when invoked directly; imported by the test, this file just exports.
+const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+if (isMain) {
+  const cases = discoverCases()
+  if (!cases.length) {
+    console.error('no cases found under bench/corpus/')
+    process.exit(1)
+  }
+  if (DUMP) dump(cases)
+  else run(cases)
+}
