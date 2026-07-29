@@ -682,8 +682,11 @@ function gradeRoutes(model, ledger, findings, allow) {
     const mwCovers = mwAuth && (matchers.length ? matchers.some(m => matcherCovers(m, urlPath)) : true)
 
     // Impact-if-true, decided once: a route holding the service-role key bypasses RLS entirely,
-    // so an unauthenticated one is a total compromise rather than a scoped one.
-    const severity = r.usesServiceRole ? 'P0' : r.mutating ? 'P1' : 'P2'
+    // so an unauthenticated one is a total compromise rather than a scoped one. "Holding" includes
+    // reaching one through an import — the engine's reachesServiceRoleClient — so moving the
+    // privileged client into a helper does not downgrade the finding (audit #6).
+    const usesServiceRole = r.usesServiceRole || r.reachesServiceRoleClient
+    const severity = usesServiceRole ? 'P0' : r.mutating ? 'P1' : 'P2'
 
     // A route's DISPOSITION is exclusive — exactly one per subject, that is LAW 2. Its FINDINGS
     // are not: an endpoint can be unauthenticated *and* unvalidated *and* unthrottled, and each is
@@ -701,8 +704,8 @@ function gradeRoutes(model, ledger, findings, allow) {
         why: 'Neither the handler nor a middleware matcher that covers this path contains any recognisable authentication.',
         at: firstAt(r.file),
         exploit: `Anyone sends ${r.methods.join('/')} to ${urlPath} without logging in.`,
-        impact: r.usesServiceRole
-          ? 'The handler holds the service-role key, which bypasses RLS, so an anonymous caller acts as database owner.'
+        impact: usesServiceRole
+          ? 'The handler reaches the service-role key, which bypasses RLS, so an anonymous caller acts as database owner.'
           : r.mutating
             ? 'An anonymous caller changes data through an endpoint intended for signed-in users.'
             : 'An anonymous caller reads data through an endpoint intended for signed-in users.',
@@ -765,7 +768,7 @@ function gradeRoutes(model, ledger, findings, allow) {
     // Supabase client, RLS with auth.uid() is the correct and sufficient control, so `.eq('id', id)`
     // is idiomatic rather than broken — flagging it there would flood every correctly-built
     // Supabase app. A service-role client bypasses RLS entirely, so nothing else is watching.
-    if (r.usesServiceRole && r.readsIdParam && !r.ownershipFilter) {
+    if (usesServiceRole && r.readsIdParam && !r.ownershipFilter) {
       findings.push(finding({
         id: 'CG-WEB-004', subject,
         title_en: `Route ${urlPath} looks up a record by id with no ownership check`,
