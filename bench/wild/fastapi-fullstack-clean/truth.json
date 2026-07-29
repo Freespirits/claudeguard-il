@@ -1,0 +1,18 @@
+{
+  "repo": "fastapi/full-stack-fastapi-template",
+  "source_url": "https://github.com/fastapi/full-stack-fastapi-template",
+  "ref": "c9e70d65c74f7adda417fc8de0757207ff77514c",
+  "profile": "python-fastapi",
+  "fetched": [
+    "repo/backend/app/core/security.py",
+    "repo/backend/app/api/deps.py",
+    "repo/backend/app/api/routes/items.py",
+    "repo/backend/app/api/routes/login.py",
+    "repo/backend/app/core/config.py",
+    "repo/backend/pyproject.toml"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [],
+  "expectClean": true,
+  "notes": "The official FastAPI full-stack reference template (recall/precision case; NOT authored by us). Reviewed the security-critical backend slice and found nothing worth flagging -- it is a positive/precision control that a competent reviewer passes: (1) Authentication -- every items route depends on CurrentUser (get_current_user in deps.py decodes the JWT with settings.SECRET_KEY and checks is_active); the superuser-only HTML route in login.py is gated by Depends(get_current_active_superuser). No unauthenticated mutating route. (2) Access control / anti-IDOR -- read_item/update_item/delete_item all load by id then enforce 'not superuser and item.owner_id != current_user.id -> 403', and list queries are scoped to owner_id; this is the CORRECT ownership check, the opposite of IDOR. (3) Injection -- all DB access goes through SQLModel/SQLAlchemy select().where() with bound parameters; no string-built SQL. (4) Credentials -- passwords hashed with Argon2+Bcrypt (pwdlib); JWT signed HS256 with an env/config SECRET_KEY. Deliberate NON-findings (a scanner that flags these is a false positive): SECRET_KEY defaults to secrets.token_urlsafe(32) (a fresh random value, not a committed secret); POSTGRES_PASSWORD/FIRST_SUPERUSER_PASSWORD come from env, and a model_validator (_enforce_non_default_secrets) actually RAISES in non-local environments if the documented placeholder 'changethis' is left in place; EMAIL_TEST_USER='test@example.com' is a harmless default, not a secret; password-recovery deliberately returns an identical response for unknown emails to prevent user enumeration; BACKEND_CORS_ORIGINS is an explicit allow-list (default []), not a wildcard. Included as a Python precision test to complement the breakableflask recall case."
+}

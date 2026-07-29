@@ -140,7 +140,11 @@ function weaknessMatch(label, site) {
 // an app shipping no security headers. The tool reports one representative location (e.g. the first
 // open rule) while the labeller may point at any instance in the same file, so matching these on line
 // would undercount a real detection. Matched on file + weakness only.
-const FILE_LEVEL_CATEGORY = new Set(['firebase-open-rules', 'missing-security-headers'])
+// rls-disabled is a per-TABLE property, not a per-line one: the tool points at the `create table`
+// while the labeller points at the `disable row level security` / `grant … to anon` line, often in a
+// different setup script in the same repo. Matching it on line would score a real detection as a miss
+// (the verdict is already `critical`). Same reasoning as the open-rules file.
+const FILE_LEVEL_CATEGORY = new Set(['firebase-open-rules', 'missing-security-headers', 'rls-disabled'])
 
 // Do this label and this finding site describe the same defect at the same place? A file-level
 // weakness (or a file-level finding, line null) agrees on file+weakness; everything else also needs
