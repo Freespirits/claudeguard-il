@@ -1,0 +1,23 @@
+{
+  "repo": "ptnghia-j/ChordMiniApp",
+  "source_url": "https://github.com/ptnghia-j/ChordMiniApp",
+  "ref": "83e192dd52f241ab60ba7edeefcfac93fa492ced",
+  "profile": "firebase",
+  "fetched": [
+    "repo/package.json",
+    "repo/.env.example",
+    "repo/firebase/firebase.json",
+    "repo/firebase/firestore.rules",
+    "repo/firebase/storage.rules",
+    "repo/src/config/firebase.ts",
+    "repo/src/utils/firebaseAdmin.ts"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "firebase-open-rules", "cwe": "CWE-284", "file": "repo/firebase/firestore.rules", "line": 129, "severity": "high", "confidence": "certain", "note": "transcriptions grants 'allow create: if true' (129) and 'allow update: if true' (132) -- any unauthenticated internet client can create/overwrite documents. The identical open-write pattern repeats on translationCache (148/149), translations (165/166), lyrics (183/186), segmentationJobs (199/200), melody (211/212) and keyDetections (278/279). Enables cache poisoning (attacker-controlled chord/lyric data served to all users), data tampering and unbounded write cost." },
+    { "id": "L2", "category": "firebase-open-rules", "cwe": "CWE-284", "file": "repo/firebase/firestore.rules", "line": 78, "severity": "medium", "confidence": "certain", "note": "The audioCache create (70-85) and update (88-100) rules include an explicit 'request.auth == null' branch, so unauthenticated clients may write/replace audio-cache documents subject only to loose field-shape validation; isWithinRateLimit() is a stub that always returns true (line 61)." },
+    { "id": "L3", "category": "firebase-open-rules", "cwe": "CWE-284", "file": "repo/firebase/storage.rules", "line": 81, "severity": "medium", "confidence": "likely", "note": "Storage /video/{fileName} allows write with no authentication check (only content-type/size/filename validation, 81-83); /temp allows unauthenticated create/update (96-98) and 'allow delete: if true' (101), letting anyone delete other users' temp objects." }
+  ],
+  "expectClean": false,
+  "notes": "Real, actively-developed public Next.js music-analysis web app (recall case; NOT authored by us). The Firestore rules were deliberately relaxed to 'allow create/update: if true' on many collections (comments literally read 'TEMPORARY: Allow all writes to isolate validation issues' / 'SIMPLIFIED: Allow all writes to eliminate permission errors') and shipped -- classic firebase-open-rules regression. Deliberate NON-findings verified before labeling: (a) the many 'allow read: if true' rules are intentional public reads of a non-sensitive ML cache, not flagged; (b) private collections feedback/errorLogs use 'allow read: if false' and there is a trailing default-deny (291), so this is a nuanced real ruleset, not a toy; (c) .env.example contains only placeholders (no committed secret) and FIREBASE_SERVICE_ACCOUNT_KEY is empty; (d) NEXT_PUBLIC_FIREBASE_* values are Firebase web config, which is public by design, not a secret; (e) firebaseAdmin.ts loads the service account from a server-only env var with an ADC fallback -- correct. So the sole issue class is the open write rules."
+}

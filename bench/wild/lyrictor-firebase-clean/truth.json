@@ -1,0 +1,17 @@
+{
+  "repo": "jtCodes/lyrictor",
+  "source_url": "https://github.com/jtCodes/lyrictor",
+  "ref": "f3edd8928f229999cf48240b7d68949474ae794a",
+  "profile": "firebase",
+  "fetched": [
+    "repo/package.json",
+    "repo/.env.example",
+    "repo/firestore.rules",
+    "repo/firestorage.rules",
+    "repo/src/api/firebase.ts"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [],
+  "expectClean": true,
+  "notes": "Real public Firebase web app (a lyric editor; Vite + React). Reviewed as a Firebase PRECISION test case and found nothing to flag. firestore.rules are model-correct: user settings and projects are owner-scoped (request.auth != null && request.auth.uid == uid), username reservations are set-once with an ownership check (request.resource.data.uid == request.auth.uid), and published projects are create/update/delete-gated by owner. firestorage.rules scope every object to /users/{uid}/... with request.auth.uid == uid plus size and content-type validation and a trailing default-deny. Deliberate NON-findings (this is the point of the case): the two 'allow read: if true' rules are on 'usernames' (public availability check, create-gated, no update/delete) and 'published' (projects intentionally shared for public viewing) -- a naive scanner may falsely flag these as firebase-open-rules, but a competent reviewer recognizes intentional public READS with no write exposure. Also NOT a finding: src/api/firebase.ts exposes VITE_FIREBASE_* config to the browser, but the Firebase web 'apiKey' is a public project identifier (contrast with a real secret like an OpenAI key); .env.example is empty placeholders with no committed credential; no admin/service-account key appears in client code."
+}

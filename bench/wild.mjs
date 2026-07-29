@@ -136,16 +136,34 @@ function weaknessMatch(label, site) {
   return false
 }
 
-// Does any finding site match this label? A file-level finding (line null) matches on file+weakness.
+// Weaknesses that are a property of a WHOLE FILE/CONFIG, not a point: a rules file being world-open,
+// an app shipping no security headers. The tool reports one representative location (e.g. the first
+// open rule) while the labeller may point at any instance in the same file, so matching these on line
+// would undercount a real detection. Matched on file + weakness only.
+const FILE_LEVEL_CATEGORY = new Set(['firebase-open-rules', 'missing-security-headers'])
+
+// Do this label and this finding site describe the same defect at the same place? A file-level
+// weakness (or a file-level finding, line null) agrees on file+weakness; everything else also needs
+// the line within tolerance.
+function pairMatches(label, s) {
+  if (!weaknessMatch(label, s)) return false
+  if (!fileMatch(normFile(label.file), s.file)) return false
+  if (FILE_LEVEL_CATEGORY.has(label.category) || s.line == null || label.line == null) return true
+  return Math.abs(s.line - label.line) <= LINE_TOLERANCE
+}
+
+// Does any finding site match this label? (recall direction)
 function findMatch(label, sites) {
-  const lf = normFile(label.file)
-  for (const s of sites) {
-    if (!weaknessMatch(label, s)) continue
-    if (!fileMatch(lf, s.file)) continue
-    if (s.line == null || label.line == null) return s // file-level on either side
-    if (Math.abs(s.line - label.line) <= LINE_TOLERANCE) return s
-  }
+  for (const s of sites) if (pairMatches(label, s)) return s
   return null
+}
+
+// Does this finding site match ANY label? (precision direction) — so a finding that correctly
+// identifies a labelled bug is never counted a false positive, even when a SIBLING finding already
+// matched the same label (two rules detecting one issue is not one-and-one-FP).
+function siteMatchesAnyLabel(s, labels) {
+  for (const label of labels) if (pairMatches(label, s)) return true
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -180,15 +198,14 @@ function scoreCase(caseDir, id) {
   // Candidate false positives: CONFIRMED security findings that match no label. (Compliance-pillar
   // findings and non-confirmed findings are excluded — the first is a different axis, the second the
   // tool itself flags as unproven.) A candidate FP may be a real issue the labeller missed.
-  const matchedSiteKeys = new Set()
-  for (const label of labels) { const m = findMatch(label, sites); if (m) matchedSiteKeys.add(m.id + '@' + m.file + ':' + m.line) }
   const candidateFP = []
   const seenFp = new Set()
   for (const s of sites) {
     if (s.pillar === 'compliance') continue
     if (s.confidence !== 'confirmed') continue
+    if (s.severity === 'P4') continue // informational (e.g. "RLS on, no policies → deny-all") is not cry-wolf
+    if (siteMatchesAnyLabel(s, labels)) continue // correctly identifies a labelled bug → not a false positive
     const key = s.id + '@' + s.file + ':' + s.line
-    if (matchedSiteKeys.has(key)) continue
     if (seenFp.has(key)) continue
     seenFp.add(key)
     candidateFP.push(s)

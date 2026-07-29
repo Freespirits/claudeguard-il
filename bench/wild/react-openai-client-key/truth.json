@@ -1,0 +1,21 @@
+{
+  "repo": "sergiecode/openai-api-chatbot-reactjs",
+  "source_url": "https://github.com/sergiecode/openai-api-chatbot-reactjs",
+  "ref": "991a3f6b0cebda14ff4ddc30fee24ce0191c8395",
+  "profile": "ai-saas",
+  "fetched": [
+    "repo/package.json",
+    "repo/.env.template",
+    "repo/src/services/openai.ts",
+    "repo/src/components/Chatbot.tsx",
+    "repo/src/App.tsx",
+    "repo/vite.config.ts"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "llm-key-client", "cwe": "CWE-522", "file": "repo/src/services/openai.ts", "line": 5, "severity": "high", "confidence": "certain", "note": "The OpenAI SDK is instantiated in browser code with dangerouslyAllowBrowser:true (line 5) and apiKey read from import.meta.env.VITE_OPENAI_API_KEY (line 4). Vite inlines VITE_-prefixed vars into the client bundle at build time, so the secret OpenAI key ships to every visitor's browser, where it can be extracted and abused (billing/quota theft)." },
+    { "id": "L2", "category": "llm-no-limit", "cwe": "CWE-770", "file": "repo/src/services/openai.ts", "line": 15, "severity": "medium", "confidence": "likely", "note": "Chat completions are called directly from the client with no backend, so there is no server-side rate limiting or per-user quota; any visitor holding the browser-exposed key can issue unbounded requests against the account." }
+  ],
+  "expectClean": false,
+  "notes": "Small public Vite + React 19 OpenAI chatbot demo (recall case; NOT authored by us). The primary, unambiguous issue is the client-side LLM key: OpenAI is constructed in the browser with dangerouslyAllowBrowser:true and a VITE_-prefixed key that Vite bundles into shipped JS. No credential value is committed (.env.template holds only a placeholder and .env is gitignored), so this is an llm-key-client architectural exposure rather than exposed-secret. Secondary llm-no-limit label reflects that the direct-from-browser design has no server-side rate/token cap."
+}

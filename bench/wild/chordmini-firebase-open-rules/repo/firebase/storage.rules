@@ -1,0 +1,109 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for ChordMiniApp
+// Public cached audio is readable by clients, but writes are restricted to
+// quarantine paths and trusted server-side promotion.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Helper functions for validation
+    function isValidAudioFile() {
+      // Allow common audio formats and octet-stream for MP3 files
+      return (request.resource != null &&
+              (request.resource.contentType.matches('audio/.*') ||
+               request.resource.contentType == 'application/octet-stream')) ||
+             (resource != null &&
+              (resource.contentType.matches('audio/.*') ||
+               resource.contentType == 'application/octet-stream'));
+    }
+    
+    function isValidFileSize() {
+      // Limit file size to 50MB (typical for 5-minute songs)
+      return request.resource != null && request.resource.size <= 50 * 1024 * 1024;
+    }
+
+    function isValidTempFileSize() {
+      // Temp offload path supports larger files used by analysis routes.
+      return request.resource != null && request.resource.size <= 100 * 1024 * 1024;
+    }
+
+    function isValidTempFileName(fileName) {
+      // Offload uploader writes: temp/<13-digit-timestamp>-<safe-file-name>
+      return fileName.matches('^[0-9]{13}-[A-Za-z0-9._-]{1,160}$');
+    }
+
+    function isValidFileName() {
+      // Ensure filename follows our pattern: contains video ID in brackets
+      // Check both existing resource name and new request resource name
+      return (resource != null && resource.name.matches('.*\\[.{11}\\].*')) ||
+             (request.resource != null && request.resource.name.matches('.*\\[.{11}\\].*'));
+    }
+
+    function isValidYouTubeVideoId(videoId) {
+      return videoId.matches('^[A-Za-z0-9_-]{11}$');
+    }
+
+    function isValidBrowserCandidateFileName(fileName) {
+      return fileName.matches('^[a-f0-9]{64}\\.mp3$');
+    }
+    
+    // Audio files storage - allow anonymous access for caching
+    match /audio/{fileName} {
+      // Allow read access to everyone (for serving cached audio)
+      allow read: if true;
+      
+      // Public cached audio is promoted by trusted server-side validation only.
+      allow write: if false;
+      
+      // Allow delete only for cleanup operations (optional)
+      allow delete: if false; // Disable deletion for now
+    }
+
+    // Quarantine path for browser-side yt-dlp extraction candidates.
+    match /audio-candidates/{userId}/{videoId}/{fileName} {
+      allow read: if false;
+      allow create: if request.auth != null &&
+                      request.auth.uid == userId &&
+                      isValidYouTubeVideoId(videoId) &&
+                      isValidBrowserCandidateFileName(fileName) &&
+                      request.resource.contentType == 'audio/mpeg' &&
+                      isValidFileSize();
+      allow update, delete: if false;
+    }
+    
+    // Video files storage (if needed in the future)
+    match /video/{fileName} {
+      // Allow read access to everyone
+      allow read: if true;
+      
+      // Allow write access with validation
+      allow write: if request.resource.contentType.matches('video/.*') &&
+                      request.resource.size <= 100 * 1024 * 1024 && // 100MB limit
+                      isValidFileName();
+      
+      // Disable deletion
+      allow delete: if false;
+    }
+    
+    // Temporary files (for processing)
+    match /temp/{fileName} {
+      // Reads are required so the client SDK can resolve a download URL after upload.
+      allow get: if true;
+      allow list: if false;
+
+      // Allow temporary audio uploads up to 100MB for analysis handoff.
+      allow create, update: if isValidAudioFile() &&
+                              isValidTempFileSize() &&
+                              isValidTempFileName(fileName);
+      
+      // Allow deletion for cleanup
+      allow delete: if true;
+    }
+    
+    // Default deny for all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
