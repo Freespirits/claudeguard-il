@@ -261,11 +261,12 @@ function finding(f) {
     id, subject, severity, evidence, at = [], why,
     title_en, title_he, exploit, impact, guard = null, cwe = null, owasp = null,
     autofixable = false, tier = 'static', nameOnly = false, assumption = null,
-    provenance = 'rule', source = null,
+    provenance = 'rule', source = null, pillar = 'security',
   } = f
 
   if (!SEVERITY_ORDER.includes(severity)) throw new Error(`${id}: bad severity ${severity}`)
   if (!CONFIDENCE_BY_EVIDENCE[evidence]) throw new Error(`${id}: bad evidence ${evidence}`)
+  if (pillar !== 'security' && pillar !== 'compliance') throw new Error(`${id}: bad pillar ${pillar}`)
   if (nameOnly && severity === 'P0') {
     throw new Error(`LAW 3: ${id} claims P0 from name-only evidence. A variable name is not a credential.`)
   }
@@ -275,6 +276,11 @@ function finding(f) {
     severity,
     confidence: CONFIDENCE_BY_EVIDENCE[evidence],
     provenance,
+    // Which trouble this finding is about. `security` is a breach; `compliance` is a legal exposure
+    // (accessibility, and later privacy/terms). A compliance finding is graded and provable but is
+    // NOT a breach — `summarize()` keeps it out of the security verdict entirely, so a wide-open
+    // database and a missing alt attribute never share a badge.
+    pillar,
     // WHICH external tool established this, or null when one of our own rules did. Reconciliation
     // keys on it (see reconcileDuplicates): three tools flagging one line must produce one finding,
     // and when our own rule already graded that defect, its grade is the authority — that is what
@@ -3060,11 +3066,19 @@ function sortFindings(findings) {
 }
 
 function summarize(findings, discovery = null) {
-  const confirmed = findings.filter(f => f.confidence === 'confirmed')
+  // The two pillars are summarised separately and never mix. A compliance finding (a missing alt
+  // attribute, no accessibility statement) is real and provable, but it is a LEGAL exposure, not a
+  // breach — folding it into the security badge would make "you might get sued" and "you might get
+  // hacked" the same red light, which helps nobody. So the security verdict below is computed over
+  // security findings ONLY, and compliance gets its own summary.
+  const securityFindings = findings.filter(f => (f.pillar || 'security') !== 'compliance')
+  const complianceFindings = findings.filter(f => f.pillar === 'compliance')
+
+  const confirmed = securityFindings.filter(f => f.confidence === 'confirmed')
   // Unproven catastrophe: impact-if-true is P0/P1, but the evidence never reached `confirmed`.
   // These are exactly the findings the old verdict discarded — and the reason a repo with an open
   // unauthenticated DELETE could print green.
-  const unproven = findings.filter(f =>
+  const unproven = securityFindings.filter(f =>
     f.confidence !== 'confirmed' && (f.severity === 'P0' || f.severity === 'P1'))
   const discoveryCoverage = assessDiscoveryCoverage(discovery)
 
@@ -3100,6 +3114,19 @@ function summarize(findings, discovery = null) {
       total: findings.length,
       bySeverity: Object.fromEntries(SEVERITY_ORDER.map(s => [s, findings.filter(f => f.severity === s).length])),
       byConfidence: Object.fromEntries(CONFIDENCE_ORDER.map(c => [c, findings.filter(f => f.confidence === c).length])),
+    },
+    // The compliance pillar's own summary — legal exposure, not a breach. Rendered as its own report
+    // section, never mixed into the security badge above. `violations` counts the settled ones (a
+    // missing alt is definitive); `needsReview` is the honestly-uncertain rest. `total === 0` here is
+    // NOT the same as compliant — the rendered-DOM half of WCAG is declared, not checked (grade or
+    // declare), which the report states plainly.
+    compliance: {
+      total: complianceFindings.length,
+      violations: complianceFindings.filter(f => f.confidence === 'confirmed').length,
+      needsReview: complianceFindings.filter(f => f.confidence === 'needs-review').length,
+      likely: complianceFindings.filter(f => f.confidence === 'likely').length,
+      bySeverity: Object.fromEntries(SEVERITY_ORDER.map(s =>
+        [s, complianceFindings.filter(f => f.severity === s).length])),
     },
   }
 }

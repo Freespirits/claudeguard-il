@@ -78,6 +78,11 @@ Badge, taken straight from the grader's `verdict.level`:
 | `unknown` | ⚪ | UNKNOWN | לא נבדק | nothing confirmed, but an unproven P0/P1 is still open **or** discovery coverage is below its floor |
 | `clean` | 🟢 | CLEAN | נקי | nothing confirmed, nothing unproven-and-catastrophic open, coverage above the floor |
 
+**This badge is the *security* pillar only.** Compliance findings (`pillar: "compliance"` — the
+accessibility checks) have their own headline and their own section, below, and they **never** move
+this badge. A green security badge sitting next to an open accessibility exposure is not a
+contradiction — see [the Compliance pillar section](#compliance-pillar) and `severity-model.md#pillars`.
+
 <a id="unknown-badge"></a>
 ### `unknown` / `לא נבדק` — not proven safe
 
@@ -237,6 +242,94 @@ handler imports — a path this pass does not follow. Open the file and check.
 ```
 
 Never offer `/cg-fix` on a finding in this section. Only `confirmed` findings are auto-fixable.
+
+---
+
+<a id="compliance-pillar"></a>
+## Compliance pillar — accessibility (ת"י 5568 / WCAG 2.0 AA) · a legal exposure, not a breach
+
+**This section is rendered from `summary.compliance` and the `pillar: "compliance"` findings, and it
+is kept entirely separate from the security badge above.** A compliance violation is real and
+provable, but it is a *lawsuit*, not a *breach* — so it has its own headline, its own findings list,
+and its own coverage rows, and it never reddens, greens, or otherwise touches the security verdict.
+See `severity-model.md#pillars`. **Omit this whole section only when `summary.compliance.total` is 0
+*and* no accessibility surface was discovered** — if a11y checks ran and everything passed, still
+print the headline (so a clean compliance result is visible), and always print the declared
+rendered-DOM row, because static checks are only half of ת"י 5568.
+
+### The compliance headline (its own badge, next to but never mixed with security)
+
+Drive it from `summary.compliance`: `violations` (confirmed) is the count that carries legal weight;
+`needsReview` is the honestly-uncertain rest. State the exposure in the statute's own terms — the ₪
+ranges are the point, because they are what makes this legible to a non-lawyer owner.
+
+```
+נגישות (ת"י 5568 חלק 1 / WCAG 2.0 AA): {violations} הפרות מאומתות · {needsReview} דורשות בדיקה.
+חשיפה משפטית: תביעה אזרחית עד ₪50,000 ללא הוכחת נזק, וצו נגישות של ₪7,500 ליום עד לתיקון.
+Accessibility (IS 5568 pt.1 / WCAG 2.0 AA): {violations} confirmed violations · {needsReview} to review.
+Legal exposure: civil suit up to ₪50,000 with no proof of harm required, plus a ₪7,500/day order.
+```
+
+When `violations` is 0 but static checks ran, say so honestly — it is not a clean bill, because the
+rendered-DOM half was not checked:
+
+```
+נגישות: לא נמצאו הפרות בבדיקות הסטטיות · אך זו אינה הצהרת התאמה מלאה (ראו למטה).
+Accessibility: no violations in the static checks · this is NOT a full conformance statement (see below).
+```
+
+### Compliance findings
+
+Same twice-headed (EN then HE) per-finding block as the security findings, with the same fields —
+**but the `severity` line reads in legal terms, not attacker terms.** A `confirmed` compliance finding
+is a *violation* (הפרה); a `needs-review` one is *to check* (לבדיקה). Sort P1→P4, then confidence,
+then `id`. Look each `CG-A11Y-*` id up in `plain-language/findings.md` for the בפשטות / In plain words
+line exactly as for security.
+
+| # | ID | Severity | Confidence / ודאות | Title (EN) | כותרת (HE) | File |
+|---|----|----------|--------------------|------------|-----------|------|
+| 1 | CG-A11Y-STATEMENT | 🟠 P1 | confirmed / מאומת | No published accessibility statement | לא פורסמה הצהרת נגישות | — |
+| 2 | CG-A11Y-001 | 🟠 P1 | confirmed / מאומת | Content image with no `alt` | תמונת תוכן ללא `alt` | components/Hero.tsx:14 |
+
+The `severity` line in each block, in legal register:
+
+```
+חומרה: 🟠 P1 · חשיפה משפטית אם לא יתוקן · ודאות: מאומת (הפרה)
+Severity: 🟠 P1 · legal exposure if unfixed · confidence: confirmed (violation)
+```
+
+### The declared rendered-DOM row (grade-or-declare — always printed)
+
+Static analysis can only reach part of ת"י 5568. Print this row in every compliance section, so a
+reader never mistakes "passed the static checks" for "accessible":
+
+```
+נבדק סטטית: {n} בדיקות (alt, lang, תוויות, מוקד מקלדת, הצהרת נגישות).
+לא נבדק — דורש DOM מרונדר ובדיקה ידנית: ניגודיות צבע (1.4.3), סדר וניראות מוקד (2.4.3/2.4.7),
+התנהגות ARIA בפועל, והכרזת תוכן דינמי. להתאמה מלאה נדרשת גם בדיקת DOM (מסוג axe-core) ובדיקה
+ידנית — וממונה נגישות (רכז נגישות) אם הארגון מעל סף הגודל.
+Statically checked: {n} checks (alt, lang, labels, keyboard, accessibility statement).
+NOT checked — needs a rendered DOM + manual testing: colour contrast (1.4.3), focus order/visible
+(2.4.3/2.4.7), ARIA-in-practice, dynamic-content announcements. Full conformance also needs a
+rendered-DOM audit (axe-core-class) and manual testing — and a named accessibility coordinator
+(רכז נגישות) if you are over the size threshold.
+```
+
+### The two mandatory artifacts (always remind)
+
+Both are legally required in their own right, independent of any single markup finding:
+
+```
+מסמכים שהחוק מחייב, גם אם כל השאר תקין:
+1. הצהרת נגישות מפורסמת ונגישה (למשל /accessibility או /נגישות).
+2. ממונה נגישות (רכז נגישות) בעל שם, אם הארגון מעל סף הגודל.
+Legally required regardless of the findings above:
+1. A published, reachable accessibility statement (e.g. /accessibility or /נגישות).
+2. A named accessibility coordinator, if the organisation is over the size threshold.
+```
+
+The compliance subject sets (`a11yImages`, `a11yForms`, …) appear in the **Analysis coverage** table
+below like any other set, satisfying LAW 2 — accessibility is graded-or-declared, not sampled.
 
 ---
 
