@@ -17,6 +17,7 @@ Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 | Coverage accounting | **Unusual and load-bearing.** Every subject the engine enumerates is `pass`/`fail`/`undeterminable`/`allowlisted`, asserted arithmetically at runtime. Everything it sees but does not grade gets a declared row. |
 | Dataflow / injection (SQLi, XSS, SSRF) | **Delegated, on purpose.** See [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md). Without semgrep or Snyk installed, this surface depends on reviewer judgement. |
 | Business logic | **New, and capped.** Seven of ten taxonomy classes implemented; three declared unsupportable. Every finding is `judgement` → `likely`, never `confirmed`. |
+| Vibecoder hygiene | **Four cheap greps, graded, capped.** CG-HYG-001..004: a placeholder credential shipped in source, base64 used as encryption, an auth token in web storage, a TODO left in auth code. None may reach `confirmed` — the engine sees the sink but not whether it matters, so `likely` with a named assumption is the honest ceiling for a regex. Measured at **0 findings on 4 clean reference repos and 0 on this repository's own source**. |
 | Active probing (Tier 2) | **Four GET probes.** A smoke test, not a scanner. See below. |
 | Parser depth | **Regex plus lightweight parsing, not a type-aware AST.** Dynamic requires, barrel re-exports and unusual routing can escape it. Stated in `limits` on every model. |
 | **Compliance pillar (NEW)** | **Accessibility shipped, privacy documented.** A second pillar beside security: legal exposure, not breach. `pillar:'compliance'` findings never touch the security badge. Accessibility (ת"י 5568 / WCAG 2.0 AA): CG-A11Y-001..007 graded, statement + rendered-DOM declared, cry-wolf-tested. Privacy (data-security regs): CG-PRIV-* domain spec written, grader next. See below. |
@@ -120,18 +121,31 @@ Ordered. Each item says what "done" means.
 
 ### 1 · Wire up what is already built
 
-Three finished components have no invocation path:
+This section listed three unwired components. **Two of the three were wired and this file was not
+updated** — the entry stayed on the list long after the work landed, which is its own small version
+of the dishonesty this document is supposed to prevent. Both were re-verified end to end before
+being struck, rather than taken on trust a second time:
 
-- **The Snyk adapter.** `run_snyk.mjs` is complete and the grader already accepts `--snyk`, but no
-  skill passes it. Done when `/cg-scan` runs it where available and its four coverage rows render.
-- **The business-logic intent loop.** This one is structurally broken, not merely unwired: the grader
-  imports `loadIntent` and never calls it, and its CLI has no `--intent` flag, so
-  `claudeguard.intent.yml` **cannot be consumed even if a user writes one by hand.** The tier is
-  therefore incapable of ever reporting `confirmed`. Done when a user can produce the file through a
-  guided pass, the grader discovers it, and the report shows `assumed → confirmed`.
-- **`dynamic_gate.mjs`.** Deliberately left unwired — see the section above. It is a documented
-  dependency inversion, not an oversight, and the day a HexStrike or Strix adapter lands it is the
-  precondition that already exists.
+- ~~**The Snyk adapter.**~~ **Done.** `/cg-scan` runs `run_snyk.mjs` when `detect_tools.mjs` reports
+  Snyk installed *and* authenticated, and passes `--snyk` to the grader. Verified against the
+  recorded real payloads in `test/fixtures/snyk/`: 8 findings (CG-SNYK-001 dep-vulns, CG-SNYK-006 IaC
+  misconfigurations), **all at `needs-review`** — Snyk is a `JUDGEMENT_SOURCE`, so its output can
+  never reach `confirmed` — and all four `scan:snyk-*` coverage rows render, in the ran case *and* in
+  the unauthenticated one ("SNYK_TOKEN is not set, so the adapter did not run it"). The consent
+  boundary holds: Snyk Code is the only scan that sends source off the machine and stays off until
+  the user says yes.
+- ~~**The business-logic intent loop.**~~ **Done.** The claim here was the strongest in this file —
+  "structurally broken", "cannot be consumed even if a user writes one by hand", "incapable of ever
+  reporting `confirmed`" — and it is simply not true of the current code. The grader has `--intent`,
+  calls `loadIntent`, and auto-discovers `claudeguard.intent.yml` at the repo root. Verified as the
+  full round trip: no file → `assumed`; `--propose-intent` drafts one with `TODO:` markers for the
+  rules it refuses to invent; committing it at the root → **`confirmed`**, via auto-discovery and via
+  the explicit flag. The ceiling still holds — `CG-BIZ` findings stay capped at `likely` by a
+  module-load assertion, because a confirmed intent file does not turn a guess about business rules
+  into a proof.
+- **`dynamic_gate.mjs`.** Still unwired, and still **deliberately** so — see the section above. It is
+  a documented dependency inversion, not an oversight, and the day a HexStrike or Strix adapter lands
+  it is the precondition that already exists. This is the only genuine entry left in this section.
 
 ### 2 · Close the non-JS blind spot
 
