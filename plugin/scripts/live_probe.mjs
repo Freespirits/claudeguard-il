@@ -9,7 +9,7 @@
 // the three copies drifted apart. Every check below now records only what was seen on the wire;
 // grader.mjs maps a `kind` to a severity and is the single authority on it.
 // See CONTEXT.md, "Fact" and "Grader".
-import { loadScope, gateTier1, normalizeHost, canonicalUrl, parseArgs } from './_scope.mjs'
+import { loadScope, gateTier1, gateSupabaseProject, normalizeHost, canonicalUrl, parseArgs } from './_scope.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const url = args.url
@@ -136,9 +136,19 @@ for (const p of paths) {
 
 // 3) optional Supabase RLS spot-check (only if user supplied their own project + anon key)
 if (args['supabase-url'] && args['anon-key'] && args.table) {
-  const su = normalizeHost(args['supabase-url'])
-  // still respect the gate: the supabase host must not be blocked-by-target-rules? It's the user's own project.
-  const q = `${args['supabase-url'].replace(/\/$/, '')}/rest/v1/${args.table}?select=*&limit=1`
+  // This request carries the anon key in its headers, so an ungated destination here does not just
+  // contact the wrong host — it HANDS IT A CREDENTIAL. The previous version computed the host into a
+  // variable, never checked it, and fetched the raw argument; a listener on an unauthorised host
+  // received the key verbatim. The query is now built from `gate.origin`, the canonical form of the
+  // ATTESTED project, so the host that was checked and the host that is contacted are the same
+  // string by construction.
+  const sbGate = gateSupabaseProject(args['supabase-url'], loaded.scope)
+  if (!sbGate.allowed) {
+    console.error('GATE FAILED — the Supabase spot-check was NOT run:')
+    for (const r of sbGate.reasons) console.error('  - ' + r)
+    console.error('  Nothing was sent to it, and no key left this machine.')
+  } else {
+  const q = `${sbGate.origin}/rest/v1/${encodeURIComponent(args.table)}?select=*&limit=1`
   try {
     const rr = await fetch(q, { headers: { apikey: args['anon-key'], Authorization: 'Bearer ' + args['anon-key'], 'User-Agent': UA } })
     if (rr.status === 200) {
@@ -151,6 +161,7 @@ if (args['supabase-url'] && args['anon-key'] && args.table) {
       }
     }
   } catch { /* ignore */ }
+  }
 }
 
 console.log(JSON.stringify({

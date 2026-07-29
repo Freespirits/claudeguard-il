@@ -256,6 +256,76 @@ export function isBlocked(host, scope) {
   return all.some(p => hostMatches(host, p))
 }
 
+/** `never_touch` alone. The user's explicit refusals, without the provider defence-in-depth list. */
+export function isNeverTouch(host, scope) {
+  const never = Array.isArray(scope?.never_touch) ? scope.never_touch : []
+  return never.some(p => hostMatches(host, p))
+}
+
+/**
+ * Gate the optional Supabase RLS spot-check.
+ *
+ * WHY THIS IS ITS OWN GATE, and why the obvious shortcut is wrong.
+ *
+ * `live_probe.mjs` used to compute `normalizeHost(--supabase-url)` into a variable, never check it,
+ * and then `fetch()` the RAW argument with the user's anon key in the `apikey` and `Authorization`
+ * headers. The comment beside it read "still respect the gate: the supabase host must not be
+ * blocked-by-target-rules? It's the user's own project" — the right question, unanswered, shipped.
+ * The result was a credential-bearing request to any host the caller named, while the gate had
+ * approved a completely different one. An external review found it; a listener on an unauthorised
+ * host received the key verbatim.
+ *
+ * It cannot simply call `gateTier1`, and that is the whole difficulty: every Supabase host is in
+ * DEFAULT_BLOCKED, so Tier 1 refuses the ONE host class this check exists to probe. That is
+ * presumably why the gate was skipped rather than fixed.
+ *
+ * Nor may the permission come from `targets`. A provider host in `targets` is exactly what
+ * DEFAULT_BLOCKED exists to refuse; letting `targets` win would dissolve that layer for Stripe,
+ * OpenAI and everything else on the list at the same time.
+ *
+ * So the user's own project gets its own attestation, naming that one project and nothing else, and
+ * the request is built from the CANONICAL form of the ATTESTED value — never from the argument.
+ * That is what makes the host that was checked and the host that is contacted the same string by
+ * construction rather than by inspection.
+ *
+ * @returns {{allowed:boolean, reasons:string[], origin:string|null}}
+ */
+export function gateSupabaseProject(input, scope) {
+  const reasons = []
+  const pl = scope?.passive_live || {}
+  if (pl.enabled !== true) reasons.push('set passive_live.enabled: true in claudeguard.scope.yml')
+  if (pl.i_own_or_control_these_targets !== true) reasons.push('set passive_live.i_own_or_control_these_targets: true')
+
+  const attested = pl.supabase_project
+  if (!attested) {
+    reasons.push('set passive_live.supabase_project to your OWN project URL (e.g. https://abcd.supabase.co). ' +
+      'A Supabase host is refused by default, so it has to be named here explicitly — listing it under `targets` deliberately will not work.')
+  }
+
+  const canonAttested = attested ? canonicalUrl(attested) : null
+  if (attested && !canonAttested) reasons.push(`passive_live.supabase_project ("${attested}") is not a valid http(s) URL`)
+
+  const canonInput = canonicalUrl(input)
+  if (!canonInput) reasons.push(`--supabase-url ("${input}") is not a valid http(s) URL`)
+
+  if (canonAttested && canonInput) {
+    const a = normalizeHost(canonAttested)
+    const b = normalizeHost(canonInput)
+    if (a !== b) {
+      reasons.push(`--supabase-url resolves to "${b}", but passive_live.supabase_project attests "${a}". ` +
+        'Only the attested project is probed, and the request is built from the attested value.')
+    }
+    // An explicit refusal always wins, even over the user's own attestation.
+    if (isNeverTouch(a, scope)) reasons.push(`"${a}" is listed in never_touch`)
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    origin: reasons.length === 0 ? new URL(canonAttested).origin : null,
+  }
+}
+
 export function inTargets(host, scope) {
   const targets = Array.isArray(scope?.targets) ? scope.targets : []
   return targets.some(p => hostMatches(host, p))
