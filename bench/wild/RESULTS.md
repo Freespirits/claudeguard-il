@@ -5,7 +5,7 @@ reviewer **blind to ClaudeGuardIL** (no sight of its rules or output), in a neut
 vocabulary. This is a *measurement*, not a gate — unlike `bench/run.mjs`, whose recall is 100% by
 construction. Run it with `node bench/wild.mjs`.
 
-## The corpus (6 real repos, pinned to commit SHAs)
+## The corpus (9 real repos, pinned to commit SHAs)
 
 | Case | Repo | Kind | Labels |
 |------|------|------|--------|
@@ -13,29 +13,42 @@ construction. Run it with `node bench/wild.mjs`.
 | nextjs-subscription-payments | `vercel/nextjs-subscription-payments` | precision (clean) | 0 |
 | lyrictor-firebase-clean | `jtCodes/lyrictor` | precision (clean) | 0 |
 | chordmini-firebase-open-rules | `ptnghia-j/ChordMiniApp` | recall | 3 (firebase-open-rules) |
+| chartgpt-service-role-client | `whoiskatrin/chart-gpt` | recall | 1 (privileged-key-client) |
+| promptos-forgeable-admin-session | `Yuvadi29/PromptOS` | recall | 3 (missing-auth, idor) |
 | react-openai-client-key | `sergiecode/openai-api-chatbot-reactjs` | recall | 2 (llm-key-client, llm-no-limit) |
 | owasp-nodegoat | `OWASP/NodeGoat` | recall | 9 (rce, ssrf, sqli, xss, cookie, headers, tls, secret) |
+| breakableflask-python | `stephenbradshaw/breakableflask` | recall (Python) | 7 (rce, sqli, other) |
 
 ## The numbers (covered categories)
 
 ```
-recall, detected at all : 5/9  (56%)
-recall, CONFIRMED       : 4/9  (44%)
+recall, detected at all : 8/13  (62%)
+recall, CONFIRMED       : 7/13  (54%)
 candidate false positives: 0
-coverage gaps (no rule) : 5
+coverage gaps (no rule) : 12
 ```
 
 **Read them honestly, split by profile — this is the real story:**
 
-- **On ClaudeGuardIL's target profile (Next.js / Supabase / Firebase / AI): 5/5 detected.** chordmini's
-  3 open-Firebase-rules and react-openai's 2 (client LLM key + no rate limit) all caught. Strong.
-- **Off-profile (Express): 0/4.** NodeGoat is an Express app, and the four misses are Express-specific
-  patterns ClaudeGuardIL's Next.js/Supabase-focused rules don't reach: an `express-session` cookie with
-  no flags, `helmet` headers, an inbound `http.createServer` (its TLS check is for *outbound* http://),
-  and a hard-coded secret literal (which needs gitleaks + git history, not run here). Honest coverage
-  boundary, now documented.
-- **5 gaps** (rce, ssrf, sql-injection, xss) are categories ClaudeGuardIL deliberately delegates to
-  semgrep/Snyk (ADR 0007). Reported as gaps, never blamed on detection quality.
+- **On ClaudeGuardIL's target profile (Next.js / Supabase / Firebase / AI): 8/9 detected.** chordmini's
+  3 open-Firebase-rules, chart-gpt's client `service_role` key, react-openai's client LLM key + missing
+  rate limit, and 2 of PromptOS's 3 admin-access findings — all caught. Strong on the surface it is
+  built for.
+- **The one on-profile MISS is instructive:** PromptOS's admin cookie is *forgeable* because the
+  middleware decodes the base64 payload but never verifies the HMAC signature login attaches. That is a
+  deep **semantic logic** bug — deterministic rules see an auth check present and abstain; catching it
+  needs a reviewer that reasons about what the code *means*. Exactly the long tail an LLM reviewer
+  (e.g. Anthropic's `claude-code-security-review`, wired in as a capped `likely` layer) would cover.
+- **Python (breakableflask): 0/7, and honestly so.** ClaudeGuardIL's engine does not parse Python, so it
+  declares the backend out of scope and grades the app **`unknown`** — "not proven safe" — never a false
+  `clean`. All 7 labels (rce, sql-injection) land as coverage gaps. This is the Python gap that the same
+  LLM-review layer, being language-agnostic, would close.
+- **Off-profile Express (NodeGoat): 0/4.** Express-specific patterns the Next.js/Supabase rules don't
+  reach — an `express-session` cookie with no flags, `helmet` headers, an inbound `http.createServer`
+  (the TLS check is for *outbound* http://), a hard-coded literal (needs gitleaks + git history).
+- **12 gaps** (rce, ssrf, sql-injection, xss) are categories ClaudeGuardIL deliberately delegates to
+  semgrep/Snyk (ADR 0007) — the bulk from the Python and Express recall cases. Reported as gaps, never
+  blamed on detection quality.
 
 ## What the benchmark CAUGHT — and the fixes it drove
 
@@ -73,6 +86,10 @@ Harness-matching artifacts fixed in the scorer (not the tool):
 
 ## Next
 
-Grow the corpus (more real Supabase RLS-off / unauth-route recall cases — the code-search backends were
-rate-limited this round), and close the Express coverage boundary NodeGoat exposed if that audience
-matters. The instrument now exists; every repo added makes the number more honest.
+The corpus doubled its recall surface (6 → 9 cases) and the two gaps it now makes concrete point the
+same way: **a language-agnostic, semantics-aware LLM-review layer** — e.g. Anthropic's
+`claude-code-security-review`, adapted as a `likely`-capped reviewer that never touches the
+deterministic verdict — would close both the Python gap (breakableflask) and the deep-logic gap
+(PromptOS's unverified-HMAC session). Otherwise: keep growing the corpus (more Supabase RLS-off /
+unauth-route recall cases), and close the Express boundary if that audience matters. The instrument now
+exists; every repo added, and every gap closed, makes the number more honest.

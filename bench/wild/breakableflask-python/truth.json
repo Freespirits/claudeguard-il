@@ -1,0 +1,24 @@
+{
+  "repo": "stephenbradshaw/breakableflask",
+  "source_url": "https://github.com/stephenbradshaw/breakableflask",
+  "ref": "553e8b2f51c14f259f565d5df478339c366a9172",
+  "profile": "python-flask",
+  "fetched": [
+    "repo/main.py",
+    "repo/requirements.txt",
+    "repo/README.md",
+    "repo/database-requirements.txt"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "rce", "cwe": "CWE-95", "file": "repo/main.py", "line": 379, "severity": "critical", "confidence": "certain", "note": "The /evaluate route passes the untrusted request.form['expression'] (set at line 376) straight into eval() -- direct Python code injection / remote code execution from an unauthenticated POST." },
+    { "id": "L2", "category": "rce", "cwe": "CWE-502", "file": "repo/main.py", "line": 329, "severity": "critical", "confidence": "certain", "note": "The /cookie route calls pickle.loads(b64decode(request.cookies['value'])) on an attacker-controlled cookie -- deserialisation of untrusted data yields arbitrary code execution (a crafted pickle runs on load)." },
+    { "id": "L3", "category": "rce", "cwe": "CWE-78", "file": "repo/main.py", "line": 360, "severity": "critical", "confidence": "certain", "note": "The /lookup route concatenates request.form['address'] (line 357) into a shell string and runs it via rp()->popen() (rp defined line 172), so 'x; <cmd>' gives OS command injection." },
+    { "id": "L4", "category": "rce", "cwe": "CWE-1336", "file": "repo/main.py", "line": 468, "severity": "critical", "confidence": "certain", "note": "The /sayhi route interpolates request.form['name'] (line 454) into a template string that is then passed to render_template_string() -- server-side template injection in Jinja2, exploitable to RCE (e.g. {{ ''.__class__.__mro__[1].__subclasses__() }})." },
+    { "id": "L5", "category": "injection-sql", "cwe": "CWE-89", "file": "repo/main.py", "line": 481, "severity": "high", "confidence": "certain", "note": "The /listservices route builds a WHERE clause by string-formatting the user-controlled 'category' query param (request.args at line 476) directly into SQL, then executes it at line 484 -- classic SQL injection via a string-formatted query." },
+    { "id": "L6", "category": "other", "cwe": "CWE-611", "file": "repo/main.py", "line": 399, "severity": "high", "confidence": "certain", "note": "The /xml route parses untrusted request.form['xml'] with an lxml XMLParser explicitly configured load_dtd=True and no_network=False (line 397) -- XML External Entity (XXE) injection enabling local file disclosure and SSRF." },
+    { "id": "L7", "category": "other", "cwe": "CWE-347", "file": "repo/main.py", "line": 276, "severity": "high", "confidence": "likely", "note": "verify_token() honours the 'None' JWT algorithm (allowed at line 32; verify_token_none at 242-263 accepts a token whose signature segment is empty), so an attacker can forge an unsigned token with sub='admin' and reach the admin branch at line 520 -- JWT signature-verification bypass / privilege escalation." }
+  ],
+  "expectClean": false,
+  "notes": "Provenance: stephenbradshaw/breakableflask, a real public single-file intentionally-vulnerable Flask app (recall case; NOT authored by us). Vulnerability classes are corroborated by the repo's own README.md and vulnerability_index.md (Python code injection, OS command injection, pickle deserialisation, XXE, padding oracle, SSTI, SQL injection, JWT None/alg-confusion). Labeled independently from reading main.py. This case deliberately tests a Python (Flask) surface the tool may not cover -- labeled honestly regardless. Deliberate non-findings: the AES KEY and ADMIN_SECRET are random per-run (lines 24/26), not hardcoded secrets; app.run binds 127.0.0.1 by default (line 661), so no exposed-bind label. A padding-oracle exists in /config (decrypt at line 431) and reflected HTML injection/XSS is pervasive across routes; these were not separately labeled to keep the high-confidence RCE/injection set clean."
+}
