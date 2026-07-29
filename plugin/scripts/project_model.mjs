@@ -403,14 +403,18 @@ for (const [r, f] of files) {
     }
   }
 }
-// declared env files
-const envFiles = allPaths.filter(p => /(^|\/)\.env(\.|$)/.test(p) && !/\.example$/.test(p))
+// declared env files. `.example`/`.template`/`.sample`/`.dist` are ILLUSTRATIVE — they exist to show
+// which vars to set, with placeholder values, and are meant to be committed. Grading them produces a
+// cry-wolf secret finding on a file that holds no real secret (found by the wild benchmark on a real
+// repo's `.env.template`). Only `.example` was excluded before; the other three conventions are equally
+// illustrative.
+const envFiles = allPaths.filter(p => /(^|\/)\.env(\.|$)/.test(p) && !/\.(example|template|sample|dist)$/i.test(p))
 const envDeclared = new Map() // NAME -> {file,line,hasValue}
 for (const p of allPaths.filter(x => /(^|\/)\.env/.test(x))) {
   const text = readParsedConfig(p); if (text == null) continue
   text.split(/\r?\n/).forEach((ln, i) => {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(ln)
-    if (m) envDeclared.set(m[1], { file: p, line: i + 1, hasValue: m[2].trim().length > 2, example: /\.example$/.test(p) })
+    if (m) envDeclared.set(m[1], { file: p, line: i + 1, hasValue: m[2].trim().length > 2, example: /\.(example|template|sample|dist)$/i.test(p) })
   })
 }
 

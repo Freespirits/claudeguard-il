@@ -413,7 +413,15 @@ function gradeEnvVars(model, ledger, findings, allow) {
     }
 
     const decl = v.declared || {}
-    const at = firstAt(decl.file || v.usages?.[0]?.file, decl.line || v.usages?.[0]?.line)
+    // An illustrative-file declaration (.env.example/.template/.sample/.dist) holds a PLACEHOLDER, not
+    // the leak — point the finding at a real usage instead, so it lands where the exposure actually is
+    // (the client code the bundler inlines into) rather than at a template's `your-key-here`. Only fall
+    // back to the illustrative declaration when there is no usage at all. (wild benchmark: a real
+    // repo's `.env.template` produced a confirmed secret finding on a placeholder value.)
+    const declReal = decl.file && !decl.example
+    const at = declReal
+      ? firstAt(decl.file, decl.line)
+      : firstAt(v.usages?.[0]?.file || decl.file, v.usages?.[0]?.line || decl.line)
 
     switch (v.exposure) {
       case 'bundler-inlined-public-prefix': {
@@ -672,21 +680,43 @@ function gradeTables(model, ledger, findings, allow) {
 
     const permissive = (t.policies || []).filter(p => p.permissive)
     if (permissive.length) {
-      const p0 = permissive[0]
+      // A world-open (`true`) predicate — but the COMMAND decides how bad. A world-WRITABLE policy
+      // (`for all`/insert/update/delete) is never intentional: anyone can modify or delete every row,
+      // so it stays a definitive P0. A read-only `for select using (true)` is the STANDARD Supabase
+      // pattern for public-by-design data — a products table, published posts — so a confirmed P0
+      // there is cry-wolf (it turns the canonical vercel/nextjs-subscription-payments starter
+      // `critical`). Read-only is impact-if-true P1 (a full read leak IF the table is private) at
+      // `weak`→needs-review, since we cannot tell a public table from a leak; the assumption says so.
+      // (Found by the wild benchmark, bench/wild/nextjs-subscription-payments.)
+      const write = permissive.find(p => p.cmd !== 'select')
+      const p0 = write || permissive[0]
+      const readOnly = !write
       const loc = splitAt(p0.at)
       findings.push(finding({
         id: 'CG-DB-002', subject,
-        title_en: `Table "${t.name}" has RLS on, but a policy allows everyone`,
-        title_he: `לטבלה "${t.name}" יש RLS, אך מדיניות אחת מתירה לכולם`,
-        severity: 'P0', evidence: 'definitive',
-        why: `Policy "${p0.name}" uses \`true\` as its predicate, which matches every row for every caller.`,
+        title_en: readOnly
+          ? `Table "${t.name}" is world-readable (a policy allows everyone to read)`
+          : `Table "${t.name}" has RLS on, but a policy allows everyone`,
+        title_he: readOnly
+          ? `הטבלה "${t.name}" קריאה לכולם (מדיניות מתירה קריאה לכל אחד)`
+          : `לטבלה "${t.name}" יש RLS, אך מדיניות אחת מתירה לכולם`,
+        severity: readOnly ? 'P1' : 'P0',
+        evidence: readOnly ? 'weak' : 'definitive',
+        why: `Policy "${p0.name}" uses \`true\` as its predicate for \`${p0.cmd}\`, which matches every row for every caller.`,
         at: firstAt(loc.file, loc.line),
-        exploit: 'Anyone with the anon key runs the policy\'s command against every row.',
-        impact: 'RLS is enabled but not enforcing anything — the protection reads as present in the dashboard while granting full access.',
+        exploit: readOnly
+          ? 'Anyone with the anon key reads every row this policy covers.'
+          : 'Anyone with the anon key runs the policy\'s command against every row.',
+        impact: readOnly
+          ? 'Every row is world-readable. Fine if this table is public by design (products, published content); a full data leak if it holds anything private.'
+          : 'RLS is enabled but not enforcing anything — the protection reads as present in the dashboard while granting full access.',
         guard: 'guard-recipes/rls-policies.md#owner-scoped-policy',
         cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: readOnly
+          ? 'That this table holds private data. If it is public by design (a products or published-content table), a world-readable SELECT policy is correct — allowlist it.'
+          : null,
       }))
-      ledger.record('tables', subject, 'fail', `permissive policy "${p0.name}"`)
+      ledger.record('tables', subject, 'fail', `permissive policy "${p0.name}" (${p0.cmd})`)
       continue
     }
 
@@ -1880,23 +1910,32 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
     if (allow.has(subject)) { ledger.record('firebaseRules', subject, 'allowlisted', 'user allowlist'); continue }
 
     if (r.openRules.length) {
-      const o = r.openRules[0]
+      // A world-WRITABLE `if true` is never intentional (anyone can modify/delete every document) →
+      // definitive P0. A read-only `allow read: if true` is the common public-data pattern (published
+      // content, a public profile) → P1 impact-if-true at `weak`→needs-review, since we cannot tell a
+      // public collection from a leak. Same cry-wolf split as the Supabase read-only-permissive case;
+      // found by the wild benchmark on jtCodes/lyrictor (intentional public reads graded critical).
+      const writableRule = r.openRules.find(x => /write|create|update|delete/i.test((x.ops || []).join(',')) || !(x.ops || []).length)
+      const o = writableRule || r.openRules[0]
       const ops = (o.ops || []).join(', ') || 'read, write'
-      const writable = /write|create|update|delete/.test(ops)
+      const writable = !!writableRule
       findings.push(finding({
         id: 'CG-FB-001', subject,
-        title_en: `Firebase rules allow ${ops} to anyone`,
-        title_he: `כללי Firebase מתירים ${ops} לכל אחד`,
-        severity: 'P0', evidence: 'definitive',
+        title_en: writable ? `Firebase rules allow ${ops} to anyone` : `Firebase rules are world-readable (${ops} to anyone)`,
+        title_he: writable ? `כללי Firebase מתירים ${ops} לכל אחד` : `כללי Firebase מאפשרים קריאה (${ops}) לכל אחד`,
+        severity: writable ? 'P0' : 'P1',
+        evidence: writable ? 'definitive' : 'weak',
         why: `A rule grants \`${ops}\` with the condition \`true\`, which every request satisfies — including one with no account at all.`,
         at: firstAt(r.file, o.line, `allow ${ops}: if true`),
         exploit: 'The Firebase config object ships in your client bundle by design. Anyone reads it out of DevTools and queries the database directly with the SDK.',
         impact: writable
           ? 'Anyone can read, modify and delete everything this rule covers. This is the Firebase equivalent of running with no access control at all.'
-          : 'Everything this rule covers is world-readable, including anything a user uploaded expecting privacy.',
+          : 'Everything this rule covers is world-readable. Fine if it is public by design (published content, a public profile); a leak if it holds anything private.',
         guard: 'guard-recipes/firebase-rules.md#owner-scoped',
         cwe: 'CWE-284', owasp: 'A01:2021', autofixable: false,
-        assumption: 'That this path holds anything not intended to be public. A deliberately public collection is a legitimate use — allowlist it.',
+        assumption: writable
+          ? 'That this path holds anything not intended to be public. A deliberately public collection is a legitimate use — allowlist it.'
+          : 'That this path holds private data. If it is public by design (published content, a public profile), a world-readable rule is correct — allowlist it.',
       }))
       ledger.record('firebaseRules', subject, 'fail', `${r.openRules.length} rule(s) with an unconditional \`true\``)
       continue

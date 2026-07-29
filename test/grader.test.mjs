@@ -457,10 +457,13 @@ test('a migration that creates a table and never enables RLS is a confirmed P0',
   assert.deepEqual(subjectsIn(result.coverage.tables, 'fail'), ['table:orders'])
 })
 
-test('RLS enabled with a `using (true)` policy is still a P0', () => {
-  // The worst of both worlds: the dashboard shows RLS as ON, so the user believes the table is
-  // protected, while the policy matches every row for every caller. Silence here would be a
-  // false negative dressed as a green checkmark.
+test('a read-only `for select using (true)` policy is a needs-review world-readable finding, NOT a confirmed P0', () => {
+  // The nuance the wild benchmark forced (bench/wild/nextjs-subscription-payments): `for select
+  // using (true)` is the STANDARD Supabase pattern for public-by-design data — a products table,
+  // published posts — so a confirmed P0 there turned the canonical starter `critical`, which is
+  // cry-wolf. It is still surfaced (P1, world-readable IF the table is private) but as needs-review
+  // with the public-by-design assumption, not a confirmed breach. Impact stays uncapped; confidence
+  // carries the "we can't tell intent" doubt.
   const result = grade(modelOf({
     'supabase/migrations/001_init.sql': `create table public.profiles ( id uuid primary key );
 alter table public.profiles enable row level security;
@@ -470,11 +473,27 @@ create policy "anyone can read" on public.profiles for select using (true);`,
   const f = result.findings.find(x => x.id === 'CG-DB-002')
   assert.ok(f)
   assert.equal(f.subject, 'table:profiles')
-  assert.equal(f.severity, 'P0')
-  assert.equal(f.confidence, 'confirmed')
+  assert.equal(f.severity, 'P1')
+  assert.equal(f.confidence, 'needs-review')
+  assert.ok(f.assumption, 'names the public-by-design escape so a one-second check settles it')
   assert.match(f.evidence.why, /anyone can read/, 'name the policy so the user can find it')
   assert.ok(!result.findings.some(x => x.id === 'CG-DB-001'),
     'RLS IS enabled — reporting both would be two rules disagreeing about one table')
+})
+
+test('a WRITABLE `using (true)` policy is STILL a confirmed P0 — world-writable is never intentional', () => {
+  // The other half of the split: `for all`/insert/update/delete with a `true` predicate lets anyone
+  // modify or delete every row. There is no public-by-design reading of that, so it stays definitive.
+  const result = grade(modelOf({
+    'supabase/migrations/001_init.sql': `create table public.notes ( id uuid primary key );
+alter table public.notes enable row level security;
+create policy "wide open" on public.notes for all using (true);`,
+  }))
+  const f = result.findings.find(x => x.id === 'CG-DB-002')
+  assert.ok(f, 'a world-writable policy must still fire')
+  assert.equal(f.severity, 'P0')
+  assert.equal(f.confidence, 'confirmed')
+  assert.equal(f.evidence.strength, 'definitive')
 })
 
 test('a Prisma-only schema is allowlisted, not flagged for missing RLS', () => {
