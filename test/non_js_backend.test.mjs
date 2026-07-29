@@ -216,14 +216,32 @@ test('a manifest alone is enough — the source may live in another repo', () =>
   assert.match(row.note, /outside this repository/)
 })
 
-test('CRY WOLF: ClaudeGuardIL itself gains no declared backend row', () => {
-  // The tool must not detect a backend in its own tree. This repo is JS/TS end to end; a row here
-  // would mean the detector fires on incidental files, which is how a coverage table stops being read.
+test('CRY WOLF: ClaudeGuardIL gains no declared backend row from its own source', () => {
+  // The tool must not detect a backend it does not have. This guard used to assert zero rows on a
+  // self-scan, because the tree was JS/TS end to end. It no longer is: `bench/wild/` vendors real
+  // third-party repos at pinned SHAs, two of them Python (breakableflask, full-stack-fastapi), and
+  // declaring THOSE is the detector working — unread .py files under our own root are exactly the
+  // hole `grade-or-declare.md` forbids leaving silent. Dropping the assertion would have thrown the
+  // cry-wolf property away with the stale premise, so it is narrowed instead of relaxed: a row may
+  // only ever cite vendored corpus code. The instant the detector fires on an incidental file in
+  // `plugin/`, `core/`, `scripts/` or `test/` — which is how a coverage table stops being read —
+  // this fails, and it names the file.
   const model = JSON.parse(execFileSync(process.execPath, [ENGINE, REPO], {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
   }))
+  const CORPUS = 'bench/'
   const langs = model.discovery.routes.frameworkGaps.filter(g => g.language)
-  assert.deepEqual(langs, [], `self-scan declared a non-JS backend: ${JSON.stringify(langs.map(g => g.framework))}`)
+  for (const g of langs) {
+    // A row citing nothing would clear the filter below vacuously — and would be unactionable to a
+    // reader besides, since "review this backend by hand" has to say which files.
+    assert.ok([...(g.files ?? []), ...(g.manifests ?? [])].length > 0,
+      `the ${g.framework} row cites no file or manifest`)
+  }
+  const ours = langs
+    .flatMap(g => [...(g.files ?? []), ...(g.manifests ?? [])])
+    .filter(p => !p.startsWith(CORPUS))
+  assert.deepEqual(ours, [],
+    `self-scan declared a non-JS backend from ClaudeGuardIL's own source: ${JSON.stringify(ours)}`)
 })
 
 test('the model stays deterministic with the declaration in it', () => {
