@@ -25,6 +25,29 @@ All of Tier 1, plus:
 9. The interactive `--i-am-authorized` flag was passed for a non-dry-run execution.
 Print the loud warning banner and a one-line summary of what will be sent, then proceed.
 
+## The host that is checked must be the host that is opened
+
+Every precondition above is worthless if the string the gate validates is not the string the runner
+sends. Building the dynamic-testing gate found that it was not: the shipped matcher stripped the
+scheme with a regex and cut at the first `/`, so a URL's **userinfo** survived into the comparison.
+`https://staging.myapp.com:443@evil.com` was gated as `staging.myapp.com` — because dropping the
+port from both sides left exactly the allowlisted name — and then fetched from `evil.com`. With
+`localhost:3000`, the target that ships in `SCOPE.example.yml`, `https://localhost:3000@169.254.169.254`
+cleared Tier 1 and Tier 2 and reached the cloud-metadata service. Four more spellings did the same:
+`?` and `#` end an authority for the URL parser but not for a scan that only looks for `/`, so
+`evil.com?x=.staging.example.com` matched `*.staging.example.com`; a trailing root dot
+(`api.stripe.com.`) is the same name to DNS and a different string to `===`, so the third-party
+blocklist missed it; `split(':')[0]` is `[` for every `::`-leading IPv6 literal, so a `[::1]` target
+matched `[::ffff:169.254.169.254]`; and dropping the port made `localhost:3000` license
+`localhost:5432`.
+
+The rule that replaces all of it: **both the gated host and the sent URL come from one WHATWG URL
+parse.** `normalizeHost()` returns the host `fetch` will actually open — userinfo discarded,
+authority ended at `/ \ ? #`, IDN in punycode, decimal/octal/hex and IPv4-mapped-IPv6 addresses in
+one canonical spelling, root dot stripped. `canonicalUrl()` returns the URL the runner may request,
+with credentials removed. A pattern that names a port means **that** port; a pattern without one
+still covers any port. Anything unparseable returns a sentinel that matches nothing.
+
 ## Refusal behavior
 If a precondition is missing, respond with exactly what is missing and how to fix it
 (e.g. "set `active_dast.i_am_authorized_in_writing: true` in claudeguard.scope.yml"). Do **not**:

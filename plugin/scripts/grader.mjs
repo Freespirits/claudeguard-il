@@ -1700,15 +1700,117 @@ const OBSERVATION_POLICY = {
     impact: 'Your domain lends its credibility to a phishing page.',
     guard: 'guard-recipes/security-headers.md#redirects', cwe: 'CWE-601',
   },
+
+  // ---- dynamic testing (Tier 2/3, behind the gate in dynamic_gate.mjs) --------------------
+  //
+  // These five are the reason dynamic testing is worth the liability it carries. A working PoC is
+  // the DEFINITIVE evidence a static heuristic can never have, so it is the honest route to
+  // `confirmed` for exactly the classes the static engine can only call `likely` or
+  // `needs-review` — "an auth call is present but may not gate the handler" becomes "an
+  // unauthenticated request returned another principal's record". Nothing was argued into a
+  // higher confidence; better evidence was fetched, which is the only route the model allows.
+  //
+  // They are only reachable through the gate. A tool the gate refused produces no observation at
+  // all — it produces a `scanCoverage` row in gradeScanners saying which tool was refused and why.
+  'exploited-sqli': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-SQLI-POC',
+    title_en: 'SQL injection proved with a working payload', title_he: 'הזרקת SQL הוכחה עם payload עובד',
+    exploit: 'An attacker sends the same payload and reads, changes or deletes anything the database user can reach.',
+    impact: 'The database is readable and writable by anyone who finds this parameter. This was proven against the running system, not inferred from the code.',
+    guard: 'guard-recipes/zod-validation.md#parameterised-queries', cwe: 'CWE-89', owasp: 'A03:2021',
+  },
+  'exploited-idor': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-IDOR-POC',
+    title_en: 'Another user\'s record was fetched by changing an id', title_he: 'רשומה של משתמש אחר נשלפה על ידי שינוי מזהה',
+    exploit: 'An attacker increments the id in the URL and reads every other account\'s data.',
+    impact: 'Every record of this type belongs to whoever asks for it. A live request returned a record the caller does not own.',
+    guard: 'guard-recipes/auth-middleware.md#ownership-check', cwe: 'CWE-639', owasp: 'A01:2021',
+  },
+  'exploited-xss': {
+    sev: 'P1', evidence: 'definitive', id: 'CG-DAST-XSS-POC',
+    title_en: 'Injected script executed in the page', title_he: 'סקריפט שהוזרק רץ בדף',
+    exploit: 'An attacker sends a victim a link whose script runs on your origin with the victim\'s session.',
+    impact: 'Session theft and actions performed as the victim. The script was observed executing, not merely reflected.',
+    guard: 'guard-recipes/zod-validation.md#output-encoding', cwe: 'CWE-79', owasp: 'A03:2021',
+  },
+  'auth-bypass-confirmed': {
+    sev: 'P0', evidence: 'definitive', id: 'CG-DAST-AUTHZ-POC',
+    title_en: 'A protected endpoint answered without authentication', title_he: 'נקודת קצה מוגנת ענתה ללא אימות',
+    exploit: 'An attacker calls the endpoint with no session at all and gets the protected response.',
+    impact: 'Whatever the endpoint guards is not guarded. This resolves a route the static tier could only mark undeterminable.',
+    guard: 'guard-recipes/auth-middleware.md', cwe: 'CWE-306', owasp: 'A01:2021',
+  },
+  'exposed-service': {
+    // Severity is decided per port by `refineExposedService`, because one flat severity here would
+    // either cry wolf on every site (port 443 is a web server doing its job) or shrug at a
+    // world-readable database. Both failures are the same failure: a severity that does not track
+    // what the attacker gets.
+    sev: 'P3', evidence: 'definitive', id: 'CG-LIVE-EXPOSE-SVC',
+    title_en: 'A network service is reachable from outside', title_he: 'שירות רשת נגיש מבחוץ',
+    exploit: 'An attacker connects to the port directly, without going through your application.',
+    impact: 'Depends on the service. Anything that is not your web server is an extra way in.',
+    guard: 'guard-recipes/container-iac.md#compose-exposure', cwe: 'CWE-1327',
+    refine: refineExposedService,
+  },
+}
+
+/**
+ * Ports whose job is to answer the public. An open 443 is the site working, and reporting it would
+ * put a confirmed finding on every target ClaudeGuardIL is ever pointed at — the cry-wolf failure
+ * that teaches this audience to close the report.
+ */
+const EXPECTED_PUBLIC_PORTS = new Set([80, 443])
+
+/**
+ * Ports that should essentially never answer the open internet. Impact-if-true here is a database,
+ * a cache, an orchestrator or a remote desktop with no application in front of it.
+ */
+const SENSITIVE_PORTS = new Set([
+  1433, 1521, 3306, 5432, 5984, 6379, 9042, 9200, 9300, 11211, 27017, 27018,  // data stores
+  2375, 2376, 2379, 6443, 10250,                                              // container / cluster control planes
+  3389, 5900, 623,                                                            // remote desktop / lights-out management
+  5601, 15672,                                                                // admin consoles
+])
+
+function portOf(observation) {
+  if (Number.isInteger(observation?.port)) return observation.port
+  const m = /(?:^|[/:])(\d{1,5})$/.exec(String(observation?.subject ?? ''))
+  return m ? Number(m[1]) : null
+}
+
+function refineExposedService(o) {
+  const port = portOf(o)
+  if (port !== null && EXPECTED_PUBLIC_PORTS.has(port)) {
+    return { allowlist: `port ${port} answering is the web server doing its job, not an exposure` }
+  }
+  if (port !== null && SENSITIVE_PORTS.has(port)) {
+    return {
+      sev: 'P1',
+      title_en: `A data or control-plane service is reachable on port ${port}`,
+      title_he: `שירות נתונים או ניהול נגיש בפורט ${port}`,
+      exploit: `An attacker connects to port ${port} directly and talks to the service without passing through your application or its authorization.`,
+      impact: 'Your application\'s access rules are irrelevant to someone who can reach the datastore itself.',
+    }
+  }
+  return {}
 }
 
 function gradeObservations(observations, ledger, findings) {
   ledger.declare('liveObservations')
   for (const o of observations || []) {
     const subject = `observation:${o.tier}:${o.kind}:${o.subject || o.at || 'target'}`
-    const p = OBSERVATION_POLICY[o.kind]
-    if (!p) {
+    const base = OBSERVATION_POLICY[o.kind]
+    if (!base) {
       ledger.record('liveObservations', subject, 'undeterminable', `no rule owns observation kind "${o.kind}"`)
+      continue
+    }
+    // A `refine` hook lets one kind carry a severity that depends on the observation itself — an
+    // open port 443 and an open port 5432 are the same `kind` and nowhere near the same finding.
+    // It may only narrow within the policy table; it never authors a confidence, because
+    // confidence stays a pure function of evidence.
+    const p = base.refine ? { ...base, ...base.refine(o) } : base
+    if (p.allowlist) {
+      ledger.record('liveObservations', subject, 'allowlisted', p.allowlist)
       continue
     }
     findings.push(finding({
@@ -1914,6 +2016,48 @@ function gradeScanners(scanners, ledger, findings, allow) {
       }
     }
   }
+
+  // ---- dynamic testing ----
+  //
+  // GRADE OR DECLARE, applied to a tool that may never have run. Dynamic testing is the resolver
+  // for the static tier's `undeterminable` worklist — a route nobody could settle from source gets
+  // settled by an unauthenticated request. So when it does NOT run, the honest output is not
+  // silence and it is certainly not a pass: it is a row saying which tool was refused or missing
+  // and why, sitting in the same table as everything else, so a reader can tell "we probed and it
+  // held" from "we never probed".
+  //
+  // Every refusal is its own row. A single "the gate blocked some things" line would hide the one
+  // that matters — a target the operator believed was in scope and is not.
+  const dyn = scanners.dynamic
+  if (dyn) {
+    if (dyn.enabled !== true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        'dynamic testing is off (dynamic_testing.enabled is not true in claudeguard.scope.yml), so nothing was probed against the running system and every route the static tier could not settle is still unsettled')
+    } else if (dyn.available !== true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        `dynamic testing is enabled but the tooling was not reachable (${dyn.unavailableReason || 'no reason given'}) — the gate held, and nothing ran`)
+    } else if (dyn.dryRun === true) {
+      ledger.record('scanCoverage', 'scan:dynamic', 'undeterminable',
+        `dry_run is true, so the gate produced a plan of ${(dyn.decisions || []).length} action(s) and sent nothing — set dynamic_testing.execution.dry_run: false to actually probe`)
+    } else {
+      const executed = (dyn.decisions || []).filter(d => d.allowed).length
+      ledger.record('scanCoverage', 'scan:dynamic', 'pass',
+        `${executed} gated action(s) ran against the allowlisted target(s) at tier ${dyn.tier || 'unknown'}`)
+    }
+
+    // One row per refusal. Two identical refusals are one row — the ledger answers a duplicate
+    // subject with a throw, and a repeated refusal is the same coverage fact, not a new one.
+    const seenRefusals = new Set()
+    for (const d of dyn.decisions || []) {
+      if (d.allowed) continue
+      const subject = `scan:dynamic:${d.tool || 'unnamed-tool'}:${d.target || 'unnamed-target'}`
+      if (seenRefusals.has(subject)) continue
+      seenRefusals.add(subject)
+      ledger.record('scanCoverage', subject, 'undeterminable',
+        `the dynamic-testing gate refused ${d.tool || 'a tool'} against ${d.target || 'an unnamed target'}: ` +
+        ((d.reasons || []).join('; ') || 'no reason recorded'))
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2115,7 +2259,7 @@ export function mergeReviewerFindings(graded, reviewerFindings = []) {
  * @param {object} model            output of project_model.mjs
  * @param {object} [opts]
  * @param {object[]} [opts.observations]  tier-tagged observations from live_probe / dast_runner
- * @param {object} [opts.scanners]        { secrets, sast, dependencies } outputs from the adapters
+ * @param {object} [opts.scanners]        { secrets, sast, dependencies, dynamic } adapter outputs
  * @param {string[]} [opts.allowlist]     subject ids the user has accepted
  */
 export function grade(model, opts = {}) {
@@ -2197,7 +2341,7 @@ if (isMain) {
   const flags = new Map()
   const positional = []
   const TAKES_VALUE = new Set(['--model', '--observations', '--allowlist',
-    '--scanners', '--secrets', '--sast', '--dependencies', '--reviewer'])
+    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--reviewer'])
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (TAKES_VALUE.has(a)) flags.set(a, argv[++i])
@@ -2231,8 +2375,9 @@ if (isMain) {
     secrets: readJsonFlag('--secrets') || combined.secrets || null,
     sast: readJsonFlag('--sast') || combined.sast || null,
     dependencies: readJsonFlag('--dependencies') || combined.dependencies || null,
+    dynamic: readJsonFlag('--dynamic') || combined.dynamic || null,
   }
-  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies
+  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies || scanners.dynamic
 
   let result = grade(readModel(), {
     observations: obsFile ? JSON.parse(readFileSync(obsFile, 'utf8')).observations : [],
