@@ -77,6 +77,14 @@ The policy itself is written out in the `claudeguard` skill's `references/method
    ledger under `allowlisted` rather than vanishing — an accepted risk is still a risk somebody
    accepted, and it has to remain visible.
 
+   **Business-logic intent.** The grader reads `claudeguard.intent.yml` from the scanned repo root
+   automatically when it is there, and is silent when it is not — a missing optional config is a
+   coverage fact, never a finding. Check `result.businessLogic.status`: `confirmed` means the audit
+   ran against the author's stated ownership rules; `assumed` means it ran against a model guessed
+   from column names, and every conclusion in that section is worth less. When it is `assumed`, tell
+   the user (in step 9) that `/cg-intent` turns the guess into a review — do **not** write the file
+   yourself; proposing and confirming are two different acts, and the confirmation is theirs.
+
 3. **Detect the stack and pick catalogs.** From `model.framework` and `model.artifacts`, plus a
    Glob/Grep pass for anything the engine does not model. That leftover list is short: manifests,
    plists, Dockerfiles, compose files, Terraform, GitHub workflows and Firebase rules are all
@@ -92,11 +100,28 @@ The policy itself is written out in the `claudeguard` skill's `references/method
    back to regex/entropy), `run_semgrep.mjs` (SAST), `run_dep_audit.mjs` (deps). Do **not** install
    anything; you may offer the install command.
 
+   **Snyk**, if `detect_tools.mjs` reports it **installed AND authenticated** (both booleans true).
+   Run it *in addition to* `run_dep_audit.mjs`, never instead — dropping npm-audit would silently
+   lose the `scan:dependencies` row the day a token expires. Its reachability and dataflow are the
+   two things a regex cannot have, so the grader can raise a dependency finding to `likely` on a
+   reachable path.
+
+   ```bash
+   node ${CLAUDE_PLUGIN_ROOT}/scripts/run_snyk.mjs <path> > cg-snyk.json
+   ```
+
+   **Consent, stated as a prohibition:** *never pass `--code` on your own initiative.* `snyk code`
+   (SAST) **uploads the user's source to Snyk's cloud** — everything else runs locally. Ask exactly
+   one plain HE+EN question, safe option first, and pass `--code` only on an explicit yes. `SNYK_TOKEN`
+   being present is **not** consent; a prior run is not consent. If `claudeguard.scope.yml` already
+   carries `snyk.code_scan_uploads_source: true`, the adapter reads it itself and no flag is needed.
+
    Feed their output to the grader — do not grade it yourself:
 
    ```bash
    node ${CLAUDE_PLUGIN_ROOT}/scripts/grader.mjs --model cg-model.json \
-     --secrets cg-secrets.json --sast cg-sast.json --dependencies cg-deps.json > cg-graded.json
+     --secrets cg-secrets.json --sast cg-sast.json --dependencies cg-deps.json \
+     --snyk cg-snyk.json > cg-graded.json
    ```
 
    The grader owns the severity for scanner findings too, and it is deliberately sceptical: a

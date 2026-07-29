@@ -33,11 +33,14 @@
 //   node grader.mjs <repo-path> [--json]        # runs the engine, then grades
 //   node project_model.mjs . | node grader.mjs  # grades a model on stdin
 //   node grader.mjs <repo-path> --observations live.json
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { auditBusinessLogic, loadIntent, proposeIntent, renderIntentYaml, TAXONOMY } from './business_logic.mjs'
+// Only these two are used. An earlier version imported proposeIntent/renderIntentYaml/TAXONOMY too
+// and called none of them — an import list advertising a proposer the grader did not have, which is
+// how the whole intent tier shipped unreachable. The proposal now round-trips through grade().
+import { auditBusinessLogic, loadIntent } from './business_logic.mjs'
 
 // ---------------------------------------------------------------------------
 // Policy tables — the whole severity model, in one readable place.
@@ -3238,6 +3241,10 @@ export function grade(model, opts = {}) {
       status: businessLogic.status,
       error: businessLogic.error,
       columnsKnown: businessLogic.columnsKnown,
+      // Which file the conclusions rest on. Auto-discovery that never names the file it used is a
+      // confident silence — the reader must be able to see whether an intent was confirmed and from
+      // where. Null when the audit ran assumed.
+      intentPath: opts.intentPath ?? null,
       resources: businessLogic.resources,
       assumptions: businessLogic.assumptions,
       // Printed verbatim so the user can paste it into claudeguard.intent.yml and correct it.
@@ -3259,7 +3266,8 @@ if (isMain) {
   const flags = new Map()
   const positional = []
   const TAKES_VALUE = new Set(['--model', '--observations', '--allowlist',
-    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--snyk', '--reviewer'])
+    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--snyk', '--reviewer',
+    '--intent', '--check-intent'])
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (TAKES_VALUE.has(a)) flags.set(a, argv[++i])
@@ -3299,10 +3307,48 @@ if (isMain) {
   const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies ||
     scanners.dynamic || scanners.snyk
 
-  let result = grade(readModel(), {
+  const model = readModel()
+
+  // --check-intent <file>: validate an intent file and exit. `loadIntent` throws-and-catches on a
+  // bad shape (unknown key, wrong type, a transition to an undeclared state), so this is the tool
+  // the /cg-intent skill uses to catch a typo'd `owner_by:` before it silently disables a check.
+  const checkFile = flag('--check-intent')
+  if (checkFile) {
+    const r = loadIntent(checkFile)
+    if (r.status === 'confirmed') { console.log(`ok: ${checkFile} is a valid intent file`); process.exit(0) }
+    console.error(r.status === 'missing' ? `--check-intent: no such file "${checkFile}"` : `invalid intent: ${r.error}`)
+    process.exit(1)
+  }
+
+  // --propose-intent: print the draft the tool would generate and exit. Routed through grade() so
+  // the string printed here is byte-identical to the `businessLogic.proposedIntent` the report
+  // carries — one code path, no second `columnsKnown` expression to drift.
+  if (flag('--propose-intent')) {
+    console.log(grade(model, {}).businessLogic.proposedIntent || '')
+    process.exit(0)
+  }
+
+  // Intent resolution. An explicit --intent wins; otherwise the file the user was told to commit,
+  // next to the repo that was SCANNED (model.root), never the cwd — running the grader from
+  // elsewhere must not bind an unrelated project's intent file. An auto-discovered file that is
+  // absent is silence (a missing optional config is not a finding). An EXPLICITLY named one that is
+  // absent is a typo, and grading without it silently is the failure this flag exists to prevent.
+  const intentFlag = flag('--intent')
+  const autoPath = model.root ? join(model.root, 'claudeguard.intent.yml') : null
+  const intentPath = intentFlag || (autoPath && existsSync(autoPath) ? autoPath : null)
+  const loadedIntent = intentPath ? loadIntent(intentPath) : { status: 'missing', intent: null, error: null }
+  if (intentFlag && loadedIntent.status === 'missing') {
+    console.error(`--intent: no such file "${intentPath}"`)
+    process.exit(2)
+  }
+
+  let result = grade(model, {
     observations: obsFile ? JSON.parse(readFileSync(obsFile, 'utf8')).observations : [],
     allowlist: allowFile ? JSON.parse(readFileSync(allowFile, 'utf8')).subjects : [],
     scanners: anyScanner ? scanners : null,
+    intent: loadedIntent.intent,
+    intentError: loadedIntent.error,
+    intentPath: loadedIntent.status === 'confirmed' ? intentPath : null,
   })
 
   // Reviewer findings (auditor subagent output) are validated and merged AFTER grading, so the
