@@ -15,6 +15,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
 import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comments.mjs'
 import { scanA11yElements, scanStatementSignals, scanWidgetSignals, STMT_PATH_RE } from './lib/a11y_scan.mjs'
+import { scanTransport, scanCookies } from './lib/privacy_scan.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -2469,6 +2470,31 @@ const a11y = {
   widget: { detected: a11yWidgetVendors.size > 0, vendors: [...a11yWidgetVendors] },
 }
 
+// ---------- privacy / data-security (compliance pillar) ----------
+//
+// Facts for the privacy checks (תקנות הגנת הפרטיות (אבטחת מידע)). Compliance, not security: the grader
+// turns these into pillar:'compliance' findings that never touch the security badge. The lib
+// (lib/privacy_scan.mjs) owns every false-positive trap — localhost, xmlns/schema namespaces, comment
+// context, env-conditional `secure`, indirection → abstain — so the engine only collects the facts.
+const privacyTransport = []
+const privacyCookies = []
+const MAX_PRIVACY_FACTS = 300
+for (const [r, f] of files) {
+  for (const t of scanTransport(f.text, r)) { if (privacyTransport.length >= MAX_PRIVACY_FACTS) break; privacyTransport.push({ ...t, file: r }) }
+  for (const c of scanCookies(f.text)) { if (privacyCookies.length >= MAX_PRIVACY_FACTS) break; privacyCookies.push({ ...c, file: r }) }
+}
+// Does this repo KEEP a personal-data database? The data-security regulations bind a business that
+// holds personal data — a static marketing site does not carry the obligations, so the declared
+// obligation list is gated on this. Signal: any modeled table, or a Supabase/Firebase/ORM data layer.
+const privacyDataLayer = tables.size > 0
+  || !!(framework.supabase || framework.firebase)
+  || ['prisma', '@prisma/client', 'drizzle-orm', 'mongoose', 'typeorm', 'sequelize', 'knex'].some(has)
+const privacy = {
+  transport: privacyTransport,
+  cookies: privacyCookies,
+  hasDataLayer: privacyDataLayer,
+}
+
 const model = {
   root: ROOT.split(sep).join('/'),
   generatedBy: 'claudeguard/project_model',
@@ -2520,6 +2546,8 @@ const model = {
   llmSites,
   // Compliance pillar (accessibility). Facts only; the grader owns the ת"י 5568 / WCAG severities.
   a11y,
+  // Compliance pillar (privacy / data security). Facts only; the grader owns the תקנות severities.
+  privacy,
   mobile: { android: androidManifests, ios: iosPlists, networkSecurityConfigs },
   // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
   // graded subject set, so silence about them is no longer indistinguishable from safety.

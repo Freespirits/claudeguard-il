@@ -2311,6 +2311,115 @@ function gradeAccessibility(model, ledger, findings, allow) {
     '(רכז נגישות) if over the size threshold.' + widgetNote)
 }
 
+// ---------------------------------------------------------------------------
+// Privacy / data security (compliance pillar) — תקנות הגנת הפרטיות (אבטחת מידע), 2017.
+//
+// The SECOND compliance domain, same pillar mechanism as accessibility: pillar:'compliance', legal-
+// exposure severity, no P0, and summarize() keeps all of it off the security badge. The regulation is
+// overwhelmingly process and paperwork invisible to a repo, so this is grade-or-declare taken to its
+// limit — a thin GRADED slice (cleartext transit, session-cookie flags, from lib/privacy_scan.mjs)
+// and the rest DECLARED as `undeterminable` obligation rows tied to their תקנה. The absence of a
+// security policy / an audit / a pen-test is NEVER asserted from source: that would be the exact
+// false positive the tool exists to avoid. See core/checks/privacy-data-security.md.
+// ---------------------------------------------------------------------------
+
+// Obligations a source scan cannot verify — declared, never asserted as violations. `level` is the
+// security level they attach to; the level itself is user-confirmed (CG-PRIV-LEVEL).
+const PRIVACY_OBLIGATIONS = [
+  { id: 'CG-PRIV-DEF-DOC', reg: '2', level: 'all', what: 'a database definition document (מסמך הגדרות מאגר)' },
+  { id: 'CG-PRIV-VETTING', reg: '7', level: 'all', what: 'personnel vetting before access is granted' },
+  { id: 'CG-PRIV-ACCESS-LIST', reg: '8', level: 'all', what: 'a maintained least-privilege roles/permissions list' },
+  { id: 'CG-PRIV-ACCESS-VERIFY', reg: '9(א)', level: 'all', what: 'practical verification that access is restricted to authorised users' },
+  { id: 'CG-PRIV-PHYSICAL', reg: '6', level: 'all', what: 'physical security of the systems holding the data' },
+  { id: 'CG-PRIV-PORTABLE', reg: '12', level: 'all', what: 'portable-media restriction + standard encryption on export' },
+  { id: 'CG-PRIV-POLICY', reg: '4', level: 'medium+high', what: 'a written security policy (נוהל אבטחה)' },
+  { id: 'CG-PRIV-AUTHN', reg: '9(ב)', level: 'medium+high', what: 'authentication rules: password strength, lockout, rotation ≤6mo, auto-logout, revocation on termination' },
+  { id: 'CG-PRIV-AUDIT-LOG', reg: '10', level: 'medium+high', what: 'tamper-resistant access logging retained at least 24 months' },
+  { id: 'CG-PRIV-NET', reg: '14', level: 'medium+high', what: 'network security: intrusion/malware defences (14א) and strong remote-access auth (14ג)' },
+  { id: 'CG-PRIV-SEPARATION', reg: '13', level: 'medium+high', what: 'system isolation and patching (no end-of-life versions)' },
+  { id: 'CG-PRIV-OUTSOURCING', reg: '15', level: 'medium+high', what: 'data-processor contracts (permitted data, return/destruction, breach reporting)' },
+  { id: 'CG-PRIV-BREACH', reg: '11', level: 'medium+high', what: 'a breach-notification process to the Privacy Protection Authority' },
+  { id: 'CG-PRIV-AUDIT-24MO', reg: '16', level: 'medium+high', what: 'an independent security audit at least every 24 months' },
+  { id: 'CG-PRIV-BACKUP', reg: '18', level: 'medium+high', what: 'backup procedures' },
+  { id: 'CG-PRIV-RISK-SURVEY', reg: '5(ג)', level: 'high', what: 'a risk survey (סקר סיכונים) every 18 months' },
+  { id: 'CG-PRIV-PENTEST', reg: '5(ד)', level: 'high', what: 'penetration testing (מבדקי חדירות) every 18 months' },
+  { id: 'CG-PRIV-ARCH-INVENTORY', reg: '5(א)', level: 'high', what: 'a current system-architecture inventory' },
+  { id: 'CG-PRIV-BACKUP-COPY', reg: '18', level: 'high', what: 'a maintained backup copy with verified integrity and a tested recovery path' },
+]
+
+function gradePrivacy(model, ledger, findings, allow) {
+  for (const s of ['privacyTransport', 'privacyCookies', 'privacyObligations']) ledger.declare(s)
+  const p = model.privacy
+  if (!p) return
+
+  // CG-PRIV-TLS — cleartext personal data in transit (תקנה 14(ב)). The lib already suppressed
+  // localhost, xmlns/schema namespaces, comments, and non-request-target strings, so a fact here is a
+  // real http:// request target (or an explicit TLS-off DB connection) to a non-local host.
+  for (const t of (p.transport || [])) {
+    const subject = `priv:transport:${t.file}:${t.at.line}:${t.kind}`
+    if (allow.has(subject)) { ledger.record('privacyTransport', subject, 'allowlisted', 'user allowlist'); continue }
+    const dbTls = t.kind === 'db-tls-disabled'
+    findings.push(finding({
+      id: 'CG-PRIV-TLS', subject, pillar: 'compliance',
+      title_en: dbTls ? `Database connection to ${t.host} disables TLS` : `Cleartext http:// request to ${t.host}`,
+      title_he: dbTls ? `החיבור למסד הנתונים ${t.host} מבטל TLS` : `בקשת http:// לא מוצפנת אל ${t.host}`,
+      severity: 'P1',
+      // http-target is a strong static fact; db-tls-disabled is weak (a managed provider may enforce
+      // TLS server-side regardless), so needs-review, not a confirmed violation. Impact-if-true is the
+      // same P1 — the uncertainty lives in confidence, not severity.
+      evidence: dbTls ? 'weak' : 'strong',
+      why: dbTls
+        ? 'A database/backend connection to a non-local host explicitly disables TLS, so anything the app reads or writes — including personal data — can travel in cleartext.'
+        : 'A request goes to a non-local host over plain http://, so any personal data in it (and its response) travels unencrypted and can be read or altered in transit.',
+      at: firstAt(t.file, t.at.line, t.snippet),
+      exploit: 'Anyone on the network path — shared Wi-Fi, a compromised router, an ISP — reads or modifies the data in transit.',
+      impact: 'Transmitting personal data without encryption violates תקנה 14(ב). Exposure: an enforcement order from the Privacy Protection Authority, and a reportable security event if data is actually intercepted.',
+      guard: 'guard-recipes/security-headers.md#tls',
+      cwe: 'CWE-319', owasp: 'A02:2021',
+      assumption: dbTls
+        ? 'That the managed database provider does not enforce TLS server-side regardless of this client flag.'
+        : 'That this request actually carries personal data rather than only public information.',
+    }))
+    ledger.record('privacyTransport', subject, 'fail', dbTls ? 'TLS explicitly disabled to a non-local host' : 'plain http:// request target')
+  }
+
+  // CG-PRIV-COOKIE — a session cookie without Secure/HttpOnly (supports תקנה 9(ב)/14). The lib emits
+  // only when it can see the literal options object and Secure and/or HttpOnly is the problem.
+  for (const c of (p.cookies || [])) {
+    const subject = `priv:cookie:${c.file}:${c.at.line}:${c.name}`
+    if (allow.has(subject)) { ledger.record('privacyCookies', subject, 'allowlisted', 'user allowlist'); continue }
+    const flags = (c.missing || []).filter(x => x === 'secure' || x === 'httpOnly')
+    findings.push(finding({
+      id: 'CG-PRIV-COOKIE', subject, pillar: 'compliance',
+      title_en: `Session cookie "${c.name}" is missing ${flags.join(' and ')}`,
+      title_he: `לעוגיית ההתחברות "${c.name}" חסר ${flags.join(' ו-')}`,
+      severity: 'P2', evidence: 'strong',
+      why: `The session cookie "${c.name}" is set without ${flags.join(' and ')}, weakening the authentication control the regulation requires.`,
+      at: firstAt(c.file, c.at.line, c.snippet),
+      exploit: flags.includes('httpOnly')
+        ? 'An XSS foothold reads the session cookie from document.cookie and hijacks the session.'
+        : 'The session cookie rides a plain-HTTP hop and is captured in transit.',
+      impact: 'A weakness in the authentication controls the data-security regulation requires (תקנה 9(ב)/14). Exposure: a gap an Authority audit or a post-breach review would flag.',
+      guard: 'guard-recipes/security-headers.md#cookies',
+      cwe: 'CWE-1004', owasp: 'A05:2021',
+      assumption: `That "${c.name}" is genuinely a session/authentication cookie rather than a non-sensitive one that matched the name heuristic.`,
+    }))
+    ledger.record('privacyCookies', subject, 'fail', `missing ${flags.join(', ')}`)
+  }
+
+  // Declared: the security-level classifier + the process obligations (grade-or-declare). Only when
+  // the repo actually KEEPS a personal-data database — the regulation binds a data holder, not a
+  // static site. Every row is `undeterminable`, never asserted as a violation (LAW 1 / cry-wolf).
+  if (p.hasDataLayer) {
+    ledger.record('privacyObligations', 'priv:level', 'undeterminable',
+      'CG-PRIV-LEVEL: the database security level (basic/medium/high) is not knowable from source — it depends on record and authorised-user counts. Confirm it (sensitive data? ≥100k subjects? >100 users?); obligations are listed conservatively at Medium until then.')
+    for (const o of PRIVACY_OBLIGATIONS) {
+      ledger.record('privacyObligations', `priv:obligation:${o.id}`, 'undeterminable',
+        `${o.id} (תקנה ${o.reg}, ${o.level}): ${o.what} — organisational, not visible in the repo; confirm it holds.`)
+    }
+  }
+}
+
 function declareUngradedSurfaces(model, ledger) {
   ledger.declare('ungradedSurfaces')
   const a = model.artifacts || {}
@@ -3741,8 +3850,9 @@ export function grade(model, opts = {}) {
   gradeIac(model, ledger, findings, allow)
   gradeFirebaseRules(model, ledger, findings, allow)
   // Compliance pillar. Runs like any other rule, but its findings are pillar:'compliance' and never
-  // touch the security verdict (see summarize). ת"י 5568 / WCAG 2.0 AA.
+  // touch the security verdict (see summarize). ת"י 5568 / WCAG 2.0 AA, and the privacy regs.
   gradeAccessibility(model, ledger, findings, allow)
+  gradePrivacy(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
   const businessLogic = gradeBusinessLogic(model, ledger, findings, allow, opts)
