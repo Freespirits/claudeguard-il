@@ -764,6 +764,71 @@ for (const [name, def] of Object.entries(SERVER_FRAMEWORKS)) {
   }
 }
 
+// ---------- non-JS backends ----------
+//
+// THE SAME DEFECT, ONE LANGUAGE OVER. `SERVER_FRAMEWORKS` above is keyed on npm package names, and
+// `CODE_EXT` has no `.py`, `.go`, `.rb` or `.php` — so a Flask, FastAPI, Django, Gin, Rails or
+// Laravel server is invisible TWICE: every one of its files falls into
+// `discovery.counts.unsupported`, and no framework this pass knows how to look for is a dependency.
+// The report then renders `routes | 0 | 0 | 0 | 0 | 0` with NOT ONE declared row, so a repository
+// whose entire HTTP surface, every auth decorator and every hand-built SQL string went unread
+// prints exactly like a repository that has no server at all. Mobile got its declaration path
+// (`artifacts.nativeSource`); backend languages got nothing — and for a security gate, silence
+// about the server is the precise silent-clean failure grade-or-declare exists to kill.
+//
+// Detected by manifest AND/OR source extension, either alone being enough: a service whose sources
+// live in a submodule still declares its dependencies here, and a directory of `.py` files with no
+// manifest is still a Python codebase this pass cannot read.
+//
+// These are DECLARATIONS, never findings. A non-JS backend is not a vulnerability, it is an
+// unexamined surface, and nothing here may move the verdict. They ride the existing `frameworkGaps`
+// channel, which `declareUngradedSurfaces` already files as `undeterminable` rows under
+// `ungradedSurfaces` — being the net for exactly this case is what that channel is for.
+const NON_JS_BACKENDS = [
+  {
+    name: 'python', label: 'Python', ext: '.py', extRe: /\.py$/,
+    manifests: new Set(['requirements.txt', 'pyproject.toml', 'Pipfile']),
+    review: 'routes declared with @app.route / @router.get / urls.py, endpoints with no auth decorator, SQL built by f-string or %-formatting, and os.system / subprocess(…, shell=True) reached from request data',
+  },
+  {
+    name: 'go', label: 'Go', ext: '.go', extRe: /\.go$/,
+    manifests: new Set(['go.mod']),
+    review: 'handlers registered on net/http, gin, chi or echo with no auth middleware on their group, SQL built with fmt.Sprintf instead of placeholders, and os/exec calls reached from request data',
+  },
+  {
+    name: 'ruby', label: 'Ruby', ext: '.rb', extRe: /\.rb$/,
+    manifests: new Set(['Gemfile']),
+    review: 'controller actions with no before_action authorisation filter, routes.rb entries nobody guards, string-interpolated ActiveRecord `where` clauses, and system / backtick calls reached from params',
+  },
+  {
+    name: 'php', label: 'PHP', ext: '.php', extRe: /\.php$/,
+    manifests: new Set(['composer.json']),
+    review: 'endpoints with no session or permission check, SQL concatenated from $_GET/$_POST instead of a prepared statement, and shell_exec / include of a request-controlled path',
+  },
+]
+
+const nonJsBackendGaps = []
+for (const b of NON_JS_BACKENDS) {
+  const src = allPaths.filter(p => b.extRe.test(p))
+  const mans = allPaths.filter(p => b.manifests.has(p.split('/').pop()))
+  if (!src.length && !mans.length) continue
+  const n = src.length
+  const reason = n
+    // What the row must give the reader is the size of the hole and the work it implies, so the
+    // count and three real paths lead — an undeterminable row without an instruction is an apology.
+    ? `${n} ${b.label} file${n === 1 ? '' : 's'} (e.g. ${src.slice(0, 3).join(', ')})${mans.length ? `, declared by ${mans.slice(0, 2).join(', ')}` : ''} — the static tier parses JavaScript and TypeScript only, so it read NONE of them: no ${b.label} route, auth check or injection sink is counted anywhere in this report, and a 0 in the routes or tables rows describes the JavaScript half of this repo alone. Review this backend by hand for ${b.review} (checks/web.md — "Authentication & authorization", "API routes / IDOR / mass assignment", "Injection & XSS")`
+    : `${mans.slice(0, 3).join(', ')} declares a ${b.label} component but no ${b.ext} file was enumerated — its source is outside this repository (a submodule, a separate service, or generated at build time), so nothing about its routes, auth or injection surface could be read here; audit that service on its own against checks/web.md`
+  nonJsBackendGaps.push({
+    framework: b.name,
+    language: b.label,
+    declaredIn: mans.length ? mans.slice(0, 3).join(', ') : `${b.ext} source files`,
+    fileCount: n,
+    files: src.slice(0, MAX_LEDGER_ROWS),
+    manifests: mans.slice(0, MAX_LEDGER_ROWS),
+    reason,
+  })
+}
+
 // middleware-based auth (a route may be protected centrally — avoids false "no auth")
 const middlewareFiles = [...files.keys()].filter(r => /(^|\/)middleware\.(t|j)s$/.test(r))
 const middlewareAuth = middlewareFiles.some(r => AUTH_HINT.test(files.get(r).text))
@@ -2273,7 +2338,14 @@ discovery.routes = {
   // them against, and a zero here on a repo that depends on such a framework is a coverage hole
   // rather than a fact. That case is what `frameworkGaps` states out loud.
   fromFrameworkCalls: routes.filter(r => r.routeKey).length,
-  frameworkGaps: routeFrameworkGaps,
+  // Two kinds of gap, one channel, because the consequence is identical: a route count of 0 that
+  // means "we looked nowhere" rather than "there is nothing". The first kind is a JS server
+  // framework whose routes this pass could not follow; the second is a backend written in a
+  // language the parser does not read at all. Both are `undeterminable` rows under
+  // `ungradedSurfaces`, never findings. The two name spaces cannot collide — the first is keyed on
+  // SERVER_FRAMEWORKS' npm names, the second on language names — and LAW 2 throws if that ever
+  // stops being true, which is the guard we want.
+  frameworkGaps: [...routeFrameworkGaps, ...nonJsBackendGaps],
 }
 discovery.mobile = {
   androidManifests: androidManifests.length,
