@@ -101,6 +101,32 @@ test('fake-crypto: an encrypt-named context makes base64 fake-crypto even with a
   assert.equal(f[0].at.line, 2)
 })
 
+test('fake-crypto FP trap: base64 INSIDE a real crypto flow is an encoding hop, not fake crypto', () => {
+  // The shape a CORRECT signed token has: HMAC the payload, then base64 the payload half of
+  // `payload.signature`. Caught by the wild benchmark on Yuvadi29/PromptOS, where the base64 line
+  // also said `const token =` and so matched the sensitivity window. Firing here would be cry-wolf
+  // on an implementation doing the right thing — and would spend the user's trust for nothing.
+  const signed = [
+    'const signature = crypto',
+    '  .createHmac("sha256", SECRET)',
+    '  .update(payload)',
+    '  .digest("hex");',
+    'const token = Buffer.from(payload).toString("base64") + "." + signature;',
+  ].join('\n')
+  assert.equal(scanFakeCrypto(signed).length, 0, 'an HMAC signing chain above the call')
+  assert.equal(scanFakeCrypto(`const t = jwt.sign(claims, SECRET)\nconst b = btoa(token)`).length, 0, 'jwt.sign')
+  assert.equal(scanFakeCrypto(`const key = await crypto.subtle.importKey(...)\nbtoa(secret)`).length, 0, 'webcrypto')
+  assert.equal(scanFakeCrypto(`const h = await bcrypt.hash(password, 12)\nconst e = btoa(password)`).length, 0, 'bcrypt')
+})
+
+test('fake-crypto: the crypto suppressor keys on APIs, so crypto-ish PROSE still fires', () => {
+  // The suppressor must not be a magic word. A comment that merely says "sign"/"signature" above a
+  // btoa(password) is exactly the case this check exists for — no operation is actually happening.
+  assert.equal(scanFakeCrypto(`// sign the user in\nconst out = btoa(password)`).length, 1, 'prose "sign"')
+  assert.equal(scanFakeCrypto(`// add a signature later\nconst out = btoa(password)`).length, 1, 'prose "signature"')
+  assert.equal(scanFakeCrypto(`const signature = btoa(password)`).length, 1, 'a variable NAMED signature')
+})
+
 // --- 3) CLIENT TOKEN STORAGE ------------------------------------------------
 
 test('client-token-storage: a bearer/auth/session key in web storage is a fact', () => {
@@ -164,6 +190,36 @@ test('auth-todo FP trap: an ARIA role attribute is not auth context', () => {
 
 test('auth-todo FP trap: a marker inside a string is weaker and is not emitted', () => {
   assert.equal(scanAuthTodos(`const msg = "TODO: check auth"`).length, 0)
+})
+
+test('auth-todo FP trap: PROSE about markers is not a marker', () => {
+  // The self-scan case. ClaudeGuardIL's own comments describe this very check, and every one of
+  // them sits beside auth words — so without the leading-marker rule the tool fires nine times on
+  // its own source. Documentation that MENTIONS a TODO is not a TODO; a real one leads its comment.
+  const prose = [
+    '// a bearer token parked in localStorage, and a TODO left sitting inside auth code',
+    '// 4) AUTH TODOs — a TODO/FIXME/HACK/XXX marker within ~5 lines of an auth-ish token',
+    '// without it, `const s = "TODO: add requireAuth"` would satisfy an auth-hint regex',
+  ]
+  for (const line of prose) {
+    assert.equal(scanAuthTodos(`${line}\nfunction login() {}`).length, 0, line.slice(0, 50))
+  }
+})
+
+test('auth-todo: the leading-marker rule keeps every real comment style', () => {
+  // Only styles that are genuinely JS comments — this scanner runs on CODE_EXT files, so a `#` or
+  // an HTML comment would not be comment-masked in the first place and is not a case to support.
+  const real = [
+    '// TODO: check auth here',
+    '  // TODO: check auth here',                   // indented
+    '/* FIXME: verify the session */',
+    '/**\n * HACK: skip the permission check\n */',  // JSDoc continuation line
+    '// - TODO: bullet form',
+    '//TODO: no space after the slashes',
+  ]
+  for (const src of real) {
+    assert.equal(scanAuthTodos(`${src}\nfunction login() {}`).length, 1, JSON.stringify(src))
+  }
 })
 
 // --- determinism ------------------------------------------------------------

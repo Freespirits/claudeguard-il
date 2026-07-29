@@ -201,6 +201,20 @@ export function scanPlaceholderSecrets(text, path) {
 // JSON.stringify(headers) has none of these words and therefore never fires.
 const SENSITIVE_ID = /password|passwd|passphrase|\bpwd\b|secret|token|credential|api[_-]?key|apikey|private[_-]?key|access[_-]?key|client[_-]?secret|session[_-]?key|\bbearer\b|\bjwt\b/i
 
+// FP TRAP (real crypto nearby). A REAL cryptographic operation in the immediate window means this
+// base64 call is an ENCODING HOP INSIDE a genuine crypto flow — the payload half of a signed
+// `payload.signature` token, a wrapped ciphertext, a digest being made printable — and not a
+// stand-in FOR encryption. That is the documented false positive for this check, and it is the shape
+// a CORRECT implementation has, so the scanner must abstain or it cries wolf on code doing the right
+// thing. Found by the wild benchmark on `Yuvadi29/PromptOS`: an HMAC-SHA256 signing flow whose
+// base64 payload step was read as fake crypto, on a line that also happened to say `const token =`.
+//
+// Deliberately keyed on API NAMES (an operation actually happening) and never on a bare word like
+// "signature" or "sign" — prose such as `// sign the user in` above a `btoa(password)` must still
+// fire. Note this suppresses only the base64-as-encryption claim; it says nothing about whether the
+// surrounding crypto is USED correctly, which no regex can see.
+const REAL_CRYPTO_RE = /\b(?:createHmac|createCipheriv|createDecipheriv|createCipher|createDecipher|createSign|createVerify|privateEncrypt|publicEncrypt|privateDecrypt|publicDecrypt|bcrypt|argon2|scrypt(?:Sync)?|pbkdf2(?:Sync)?|SignJWT|jwtVerify|jose)\b|\bcrypto\s*\.\s*subtle\b|\bwebcrypto\b|\bjwt\s*\.\s*(?:sign|verify)\b/
+
 export function scanFakeCrypto(text) {
   const facts = []
   const src = String(text)
@@ -221,6 +235,12 @@ export function scanFakeCrypto(text) {
     if (SENSITIVE_ID.test(arg)) return true
     return SENSITIVE_ID.test(lines[line - 1] || '') || SENSITIVE_ID.test(lines[line - 2] || '')
   }
+  // ±3 lines, wider than the sensitivity window above: a signing chain is written across several
+  // lines (`crypto\n.createHmac(…)\n.update(…)\n.digest(…)`) and the base64 call lands below it.
+  const contextHasRealCrypto = (arg, line) => {
+    if (REAL_CRYPTO_RE.test(arg)) return true
+    return lines.slice(Math.max(0, line - 4), line + 3).some(l => REAL_CRYPTO_RE.test(l))
+  }
 
   // btoa(...) / atob(...). Arg captured up to the first ')'; nesting truncation is harmless for a
   // presence test. Run on RAW text — the mask rejects a call that is itself inside a comment or a
@@ -229,14 +249,18 @@ export function scanFakeCrypto(text) {
   let m
   while ((m = b64.exec(src))) {
     if (mask[m.index] !== CODE) continue
-    if (contextHasSensitive(m[2] || '', lineOf(m.index))) add(m.index)
+    const ln = lineOf(m.index)
+    if (contextHasRealCrypto(m[2] || '', ln)) continue
+    if (contextHasSensitive(m[2] || '', ln)) add(m.index)
   }
   // Buffer.from(x).toString('base64'). The 'base64' literal is BLANKED in stripJs's `code`, so this
   // MUST run on RAW text; the mask still gates out a commented-out call.
   const buf = /\bBuffer\.from\s*\(([^)]*)\)\s*\.\s*toString\s*\(\s*(['"`])base64\2\s*\)/g
   while ((m = buf.exec(src))) {
     if (mask[m.index] !== CODE) continue
-    if (contextHasSensitive(m[1] || '', lineOf(m.index))) add(m.index)
+    const ln = lineOf(m.index)
+    if (contextHasRealCrypto(m[1] || '', ln)) continue
+    if (contextHasSensitive(m[1] || '', ln)) add(m.index)
   }
 
   facts.sort((x, y) => x.at.line - y.at.line)
@@ -324,6 +348,20 @@ function hasAuthContext(windowText) {
   return ROLE_RE.test(windowText)
 }
 
+// FP TRAP (prose vs. marker). A real TODO/FIXME LEADS its comment — that is the convention every
+// codebase and every linter uses (`// TODO: fix this`). A marker sitting mid-sentence is PROSE
+// ABOUT markers, not a marker: `// ... and a TODO left sitting inside auth code` is documentation.
+//
+// This is the same failure the changelog records as "quoted source is no longer source": text that
+// DESCRIBES code was being read as code. Without this gate the tool fires nine times on its own
+// source — every comment in this file and in the grader that explains what the check does — which is
+// the most embarrassing possible cry-wolf for a tool whose thesis is that it does not cry wolf.
+//
+// So: everything between the line start and the marker must be comment syntax, whitespace or bullet
+// punctuation. No letters, no digits. That admits `//`, `/*`, ` * ` (JSDoc), `#`, `<!--` and list
+// bullets, and rejects any sentence, because a sentence has words in it.
+const MARKER_LEADS_RE = /^[\s/*#>+\-!<]*$/
+
 export function scanAuthTodos(text) {
   const facts = []
   const src = String(text)
@@ -340,6 +378,10 @@ export function scanAuthTodos(text) {
     // intentionally NOT emitted — only markers the stripper classified as COMMENT count.
     if (mask[m.index] !== COMMENT) continue
     const line = lineOf(m.index)
+    // FP TRAP: the marker must LEAD its comment, not appear inside a sentence about markers.
+    let ls = m.index
+    while (ls > 0 && src[ls - 1] !== '\n') ls--
+    if (!MARKER_LEADS_RE.test(src.slice(ls, m.index))) continue
     const from = Math.max(0, line - 1 - AUTH_RADIUS)
     const to = Math.min(lines.length, line + AUTH_RADIUS)   // slice end exclusive → covers +RADIUS
     // FP TRAP: a marker far from any auth token is ordinary backlog noise — require an auth-ish word
