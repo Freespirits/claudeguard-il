@@ -14,6 +14,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
 import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comments.mjs'
+import { scanA11yElements, scanStatementSignals, scanWidgetSignals, STMT_PATH_RE } from './lib/a11y_scan.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -2385,6 +2386,73 @@ discovery.schema = {
   }
 }
 
+// ---------- accessibility (compliance pillar) ----------
+//
+// Facts for the accessibility checks (ת"י 5568 / WCAG 2.0 AA). This is the COMPLIANCE pillar, not
+// security: the grader turns these into `pillar:'compliance'` findings that never touch the security
+// badge. The engine only reports what the markup IS — which elements exist, which attributes they
+// carry, whether an accessibility statement and a widget are present. Every severity, and every
+// false-positive trap (an empty `alt=""` is valid, a `{...spread}` could supply anything, a dynamic
+// child might be the label), lives in the grader. See lib/a11y_scan.mjs for the tokenizer.
+const UI_EXT = new Set(['.jsx', '.tsx', '.js', '.mjs', '.cjs', '.vue', '.svelte'])
+const a11yElements = []
+const a11yStatementEvidence = []
+const a11yWidgetVendors = new Set()
+let a11yTruncated = false
+const MAX_A11Y_ELEMENTS = 800
+
+const collectA11y = (path, text) => {
+  if (a11yElements.length >= MAX_A11Y_ELEMENTS) { a11yTruncated = true; return }
+  const { elements, truncated } = scanA11yElements(text)
+  if (truncated) a11yTruncated = true
+  for (const e of elements) {
+    if (a11yElements.length >= MAX_A11Y_ELEMENTS) { a11yTruncated = true; break }
+    a11yElements.push({ subject: `a11y:${path}:${e.line}:${e.tag}`, file: path, ...e })
+  }
+  for (const ev of scanStatementSignals(text, path)) a11yStatementEvidence.push({ file: path, ...ev })
+  for (const v of scanWidgetSignals(text)) a11yWidgetVendors.add(v)
+}
+
+// Parsed UI source, already in memory. `.ts` is excluded on purpose: it cannot carry JSX (that is
+// what `.tsx` is for), so scanning it only risks a `<Generic>` type param being mistaken for a tag.
+for (const [r, f] of files) if (UI_EXT.has(f.ext)) collectA11y(r, f.text)
+
+// Static HTML entrypoints (Vite/CRA `index.html`, a plain `public/…​.html`) are where `<html lang>`
+// and a footer statement link live, and they are NOT in CODE_EXT — so read them on demand, recorded
+// in the discovery ledger. XML comments are blanked first (offsets preserved) so a commented-out
+// `<img>` or a commented statement link can mislead in neither direction.
+const htmlEntrypoints = allPaths.filter(p => /\.html?$/i.test(p))
+for (const p of htmlEntrypoints.slice(0, 50)) {
+  let sz = 0
+  try { sz = statSync(join(ROOT, p)).size } catch { continue }
+  if (sz > MAX_FILE) continue
+  const raw = readParsedConfig(p)
+  if (raw == null) continue
+  collectA11y(p, blankXmlComments(raw))
+}
+
+// The statement is legally mandatory, and the FINDING is its ABSENCE — so presence is read
+// generously to avoid a false "missing statement". A routable accessibility page (by file path or by
+// a framework route's urlPath) or any statement link counts.
+const stmtRouteFromRoutes = routes.some(rt => rt.urlPath && STMT_PATH_RE.test(rt.urlPath))
+if (stmtRouteFromRoutes) {
+  const rt = routes.find(x => x.urlPath && STMT_PATH_RE.test(x.urlPath))
+  a11yStatementEvidence.push({ file: rt.file || '(route)', kind: 'route', at: rt.urlPath })
+}
+const a11y = {
+  scannedFiles: [...files.keys()].filter(r => UI_EXT.has(files.get(r).ext)).length
+    + Math.min(htmlEntrypoints.length, 50),
+  truncated: a11yTruncated,
+  elements: a11yElements,
+  statement: {
+    present: a11yStatementEvidence.length > 0,
+    evidence: a11yStatementEvidence.slice(0, 20),
+  },
+  // Informational only: a widget signals intent, but the law wants real conformance, so its absence
+  // is never itself a finding. The grader renders this, it does not grade it.
+  widget: { detected: a11yWidgetVendors.size > 0, vendors: [...a11yWidgetVendors] },
+}
+
 const model = {
   root: ROOT.split(sep).join('/'),
   generatedBy: 'claudeguard/project_model',
@@ -2392,6 +2460,7 @@ const model = {
     filesTotal: allPaths.length, codeFiles: files.size,
     clientReachable: clientReachable.size, serverReachable: serverReachable.size,
     routes: routes.length, tables: tables.size, envVars: envVars.length, llmSites: llmSites.length,
+    a11yElements: a11yElements.length,
   },
   framework, artifacts,
   // DISCOVERY coverage — a first-class output, and a DIFFERENT axis from the grader's analysis
@@ -2433,6 +2502,8 @@ const model = {
   envGuards,
   nextConfig: nextConfigFacts,
   llmSites,
+  // Compliance pillar (accessibility). Facts only; the grader owns the ת"י 5568 / WCAG severities.
+  a11y,
   mobile: { android: androidManifests, ios: iosPlists, networkSecurityConfigs },
   // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
   // graded subject set, so silence about them is no longer indistinguishable from safety.
@@ -2443,6 +2514,7 @@ const model = {
     'Heuristic parsing (regex + import resolution), not a type-aware AST. May miss dynamic requires, re-exports through barrels, and monorepo aliases.',
     'Client/server classification is decisive for public env prefixes and "use client" chains; other cases are reported as weaker signals.',
     'Database model reflects migrations in the repo, not the live database. Applied state is the ground truth.',
+    'Accessibility facts are read from static JSX/HTML tags. Component wrappers (<Button>, <Input>) are not resolved, and rendered-DOM properties (colour contrast, focus order/visible, ARIA-in-practice) are out of static reach — both are declared, not graded.',
   ],
 }
 
