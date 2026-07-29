@@ -68,7 +68,13 @@ security"*. Same knowledge and bilingual report; no repo scanning, subagents, or
 |------|------|--------|
 | **0 · Static** | Reads source, config, deps, `.env`, RLS, manifests, git history. | Default. No network, no credentials. |
 | **1 · Passive live** | Read-only checks on a running URL (TLS, headers, cookies, exposed files, public reads). | Requires `claudeguard.scope.yml` with ownership attestation. GET/HEAD only. |
-| **2 · Active DAST** | Real attack traffic (injection, IDOR, fuzzing). | Requires written-authorization + ownership attestation, target allowlist, rate limit; dry-run by default. |
+| **2 · Active probes** | Four GET probes against a running URL: a reflected-markup check, a single quote in an `id` parameter, an open-redirect check, and a CSP header check. **This is a smoke test, not a scanner** — no crawling, no authenticated flows, no parameter discovery, no IDOR, no fuzzing. Use Burp, ZAP or Nuclei for real DAST. | Requires written-authorization + ownership attestation, target allowlist, rate limit; dry-run by default. |
+
+> **On Tier 2's name.** An earlier version of this table said Tier 2 sent "injection, IDOR, fuzzing".
+> It never did — it sends the four probes above, and there is no IDOR probe at all. The claim is
+> corrected rather than deleted, because a security tool that overstates its own reach is doing the
+> thing this project exists to argue against. See [`ROADMAP.md`](ROADMAP.md) for what real dynamic
+> testing would require and why it is gated behind work that is deliberately unfinished.
 
 Copy `core/authorization/SCOPE.example.yml` to `claudeguard.scope.yml` and fill it in to enable
 Tiers 1–2. **Only test systems you own or are authorized in writing to test.**

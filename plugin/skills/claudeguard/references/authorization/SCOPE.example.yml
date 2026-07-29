@@ -43,7 +43,9 @@ passive_live:
   # Leave unset unless you are probing your own project.
   supabase_project: null                  # e.g. "https://abcdefgh.supabase.co"
 
-# Tier 2 — active DAST. Sends real attack traffic (injection, auth/IDOR, fuzzing).
+# Tier 2 — active probes. Sends four GET requests: a reflected-markup check, a quote in an `id`
+# parameter, an open-redirect check and a CSP check. A smoke test, NOT a scanner — no crawling,
+# no auth flows, no IDOR, no fuzzing (use Burp/ZAP/Nuclei for real DAST). See ROADMAP.md.
 # Requires explicit written-authorization attestation AND ownership. Dry-run by default.
 active_dast:
   enabled: false
