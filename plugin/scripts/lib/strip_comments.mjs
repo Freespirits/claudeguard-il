@@ -252,6 +252,85 @@ export function stripJs(src) {
   return { code: out.join(''), mask, templateExprs }
 }
 
+/**
+ * Strip comments from the CONFIG formats: YAML (workflows, compose), Dockerfile, and HCL
+ * (Terraform). Handles `#` line comments plus HCL's `//` and block comments.
+ *
+ * ONE DELIBERATE DIFFERENCE from stripSql/stripJs: quoted regions are marked STRING in the mask
+ * but are NOT blanked in `code`. In these formats the payload IS the string — `uses:
+ * "actions/checkout@v4"`, `cidr_blocks = ["0.0.0.0/0"]`, `run: "echo ${{ github.event.issue.title
+ * }}"`. Blanking them would erase the exact values every rule here reads. Quotes are still tracked
+ * so a `#` inside a quoted scalar is not mistaken for a comment start, which is also YAML's own
+ * rule: `#` only opens a comment at the start of a line or after whitespace.
+ *
+ * @returns {{code:string, mask:Uint8Array}}
+ */
+export function stripHash(src) {
+  const n = src.length
+  const out = new Array(n)
+  const mask = new Uint8Array(n)
+  let i = 0
+
+  const wipe = (from, to, kind) => {
+    for (let k = from; k < to && k < n; k++) { out[k] = blank(src[k]); mask[k] = kind }
+  }
+  const keep = (from, to, kind) => {
+    for (let k = from; k < to && k < n; k++) { out[k] = src[k]; mask[k] = kind }
+  }
+
+  while (i < n) {
+    const c = src[i]
+
+    // `#` opens a comment only at line start or after whitespace. `image: nginx#1` is a value.
+    if (c === '#' && (i === 0 || /\s/.test(src[i - 1]))) {
+      const start = i
+      while (i < n && src[i] !== '\n') i++
+      wipe(start, i, COMMENT)
+      continue
+    }
+
+    // HCL line comment. Same leading rule, so a `//` inside a URL stays part of the value.
+    if (c === '/' && src[i + 1] === '/' && (i === 0 || /\s/.test(src[i - 1]))) {
+      const start = i
+      while (i < n && src[i] !== '\n') i++
+      wipe(start, i, COMMENT)
+      continue
+    }
+
+    // HCL block comment.
+    if (c === '/' && src[i + 1] === '*') {
+      const start = i
+      i += 2
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++
+      i = Math.min(i + 2, n)
+      wipe(start, i, COMMENT)
+      continue
+    }
+
+    // Quoted scalar: preserved as text, marked STRING. Unterminated quotes bail at EOL so a lone
+    // apostrophe in a comment-free YAML value cannot swallow the rest of the file.
+    if (c === "'" || c === '"') {
+      const quote = c
+      const start = i
+      i++
+      while (i < n) {
+        if (src[i] === '\\' && quote === '"') { i += 2; continue }
+        if (src[i] === quote) { i++; break }
+        if (src[i] === '\n') break
+        i++
+      }
+      keep(start, i, STRING)
+      continue
+    }
+
+    out[i] = c
+    mask[i] = CODE
+    i++
+  }
+
+  return { code: out.join(''), mask }
+}
+
 /** Convenience: true if every char in [start,end) is CODE. */
 export function isCode(mask, start, end) {
   for (let i = start; i < end; i++) if (mask[i] !== CODE) return false

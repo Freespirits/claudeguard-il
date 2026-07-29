@@ -174,7 +174,15 @@ function score(caseObj, ev) {
     ? findings.filter(f => f.confidence === 'confirmed' && !expectConfirmed.has(f.id))
     : []
 
-  const disc = ev.discovery?.counts || { filesParsed: 0, filesDiscovered: 0 }
+  // `filesParsed` counts source files; `configParsed` counts files a dedicated parser read instead
+  // (workflows, Dockerfiles, Terraform, rules files, manifests, migrations). Both are files the
+  // engine actually examined, so both belong in a coverage figure — counting only the first
+  // understated coverage on exactly the cases whose whole content is configuration.
+  const dc = ev.discovery?.counts || {}
+  const disc = {
+    filesParsed: (dc.filesParsed || 0) + (dc.configParsed || 0),
+    filesDiscovered: dc.filesDiscovered || 0,
+  }
 
   return {
     variant: ev.variant,
@@ -204,7 +212,8 @@ function dump(cases) {
     console.log(`\n=== ${c.id} ===`)
     for (const variant of c.variants) {
       const ev = evaluate(c, variant)
-      console.log(`\n  [${variant}]  files ${ev.discovery?.counts.filesParsed}/${ev.discovery?.counts.filesDiscovered} parsed, stable=${ev.stable}, ${ev.ms.toFixed(0)}ms`)
+      const dc = ev.discovery?.counts || {}
+      console.log(`\n  [${variant}]  files ${(dc.filesParsed || 0) + (dc.configParsed || 0)}/${dc.filesDiscovered} parsed, stable=${ev.stable}, ${ev.ms.toFixed(0)}ms`)
       if (ev.secretScan) console.log(`  secret scan: engine=${ev.secretScan.engine} history=${ev.secretScan.scannedGitHistory} count=${ev.secretScan.count}`)
       if (!ev.result.findings.length) { console.log('    (no findings)'); continue }
       for (const f of ev.result.findings) {

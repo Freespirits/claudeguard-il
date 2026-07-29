@@ -1,8 +1,20 @@
 # Dependabot config.
-# The only npm manifest in this repo is sample-vulnerable-app/ — an intentional TEST FIXTURE
-# that is never installed or deployed. We keep its dependencies current (so the Security tab
-# stays clean) but disable automated version-update PRs for it, since it exists only to be
-# scanned by ClaudeGuardIL for CODE-level issues.
+#
+# ClaudeGuardIL itself has ZERO runtime dependencies — CI asserts it on every push. So every npm
+# manifest in this repository belongs to a TEST FIXTURE that is never installed, built or deployed:
+#
+#   sample-vulnerable-app/  — the known-bad app the engine is tested against
+#   bench/corpus/**         — the ground-truth benchmark pairs (vulnerable / fixed)
+#
+# Their dependencies are deliberately NOT kept current. A fixture with known-vulnerable packages is
+# what the dependency-scanning arm of the tool (CG-DEP-001) is exercised against, so updating them
+# would remove test coverage rather than add safety. Automated version-update PRs are therefore
+# disabled for both trees.
+#
+# Consequence to expect: GitHub's Security tab shows a large Dependabot ALERT count for this repo.
+# Those alerts are the fixtures, they are intentional, and none of them is reachable from anything
+# this tool ships. See SECURITY.md. Alert visibility is a repository setting and cannot be scoped by
+# path from this file.
 version: 2
 updates:
   - package-ecosystem: "npm"
@@ -11,3 +23,9 @@ updates:
       interval: "monthly"
     open-pull-requests-limit: 0   # no automated PRs for the fixture
     labels: ["sample-fixture"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels: ["ci"]

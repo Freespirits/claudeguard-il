@@ -19,6 +19,7 @@ Fixes: use plain `pull_request` (no secrets) for fork CI; if you truly need
 `pull_request_target`, **do not** check out or run PR code — only handle trusted metadata, and
 require label/approval gates.
 
+<a id="script-injection"></a>
 ## Stop script injection from event data
 ```yaml
 # ❌ issue title / branch name interpolated straight into shell
@@ -29,20 +30,39 @@ require label/approval gates.
   run: echo "Title: $TITLE"
 ```
 
+<a id="pin-actions"></a>
 ## Pin actions to a full SHA
 ```yaml
 # ❌ uses: actions/checkout@v4      (tag can be moved by a compromised maintainer)
 # ✅ uses: actions/checkout@<40-char-sha>   # v4.x.x
 ```
 
+<a id="least-privilege-token"></a>
 ## Least-privilege token
 ```yaml
 permissions:
   contents: read        # default to read-only; grant more per-job only when needed
 ```
 
+A workflow with no `permissions:` block inherits the repository default, which you cannot see from
+the workflow file — on older repositories and organisations that default is still write-all, so the
+`GITHUB_TOKEN` handed to every step can push commits and edit releases. Declaring the block removes
+the ambiguity, which is worth doing even where the default is already read-only.
+
+<a id="self-hosted"></a>
+## Self-hosted runners and untrusted triggers
+A self-hosted runner is a machine you own, and it is **not** destroyed between jobs. If a workflow
+running on one can be triggered by a fork — `pull_request` from a public repo,
+`pull_request_target`, or `workflow_run` — an attacker's PR executes code on your hardware and can
+leave something behind for the next job to pick up.
+
+Use GitHub-hosted runners for anything a fork can trigger. If you must self-host, require
+`environment:` approval, and run the runner in an ephemeral container that is recreated per job.
+
 ## Secrets & cloud
-- Never `echo` secrets or use `set -x` around them; mask anything derived.
+- Never `echo` secrets or use `set -x` around them; mask anything derived. Actions redacts exact
+  secret values in logs, but not a value you transformed — `base64`, `cut` and `jq` all defeat the
+  masking, so a secret interpolated into a shell script can still be printed in a readable form.
 - Use **OIDC** to assume a cloud role instead of storing long-lived AWS/GCP keys as secrets.
 - Scope `GITHUB_TOKEN`, and don't expose secrets to workflows triggered by fork PRs.
 

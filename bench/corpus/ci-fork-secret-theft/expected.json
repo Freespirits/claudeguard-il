@@ -1,0 +1,14 @@
+{
+  "notes": "INTENT: `pull_request_target` grants a workflow the BASE repository's secrets and write token, and checking out the pull request's head replaces the code with the fork's. Anything that runs afterwards is a stranger's code holding your credentials — `npm ci` alone suffices, because an install script in their package.json runs at that moment. Both halves are read directly from the workflow file, so nothing is inferred and this must grade as a confirmed P0. Interpolating `github.event.pull_request.title` into a run: script is separately a confirmed P1, because the expression is substituted before the shell parses it. The fixed variant switches to plain `pull_request` (which gets no secrets), declares a least-privilege permissions block, and passes the untrusted title through `env:` where it is data rather than code — so it must be completely silent. This pair guards the CI/CD detectors added in audit fix C, the domain that previously produced a clean report no matter what a workflow did.",
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-CI-001", "severity": "P0", "confidence": "confirmed", "subject": "workflow:.github/workflows/pr-check.yml", "at": ".github/workflows/pr-check.yml:10" },
+      { "id": "CG-CI-002", "severity": "P1", "confidence": "confirmed", "subject": "workflow:.github/workflows/pr-check.yml", "at": ".github/workflows/pr-check.yml:17" }
+    ],
+    "allowedAlternates": ["CG-CI-005"]
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

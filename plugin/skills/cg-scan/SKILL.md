@@ -78,8 +78,11 @@ The policy itself is written out in the `claudeguard` skill's `references/method
    accepted, and it has to remain visible.
 
 3. **Detect the stack and pick catalogs.** From `model.framework` and `model.artifacts`, plus a
-   Glob/Grep pass for anything the engine does not model (`AndroidManifest.xml`, `Info.plist`,
-   Electron `webPreferences`, `Dockerfile`, `*.tf`, `.github/workflows/*`). Read the matching
+   Glob/Grep pass for anything the engine does not model. That leftover list is short: manifests,
+   plists, Dockerfiles, compose files, Terraform, GitHub workflows and Firebase rules are all
+   parsed into fact blocks and graded by rules now; what the engine sees but does not grade
+   (Electron `webPreferences` internals, Kubernetes manifests) arrives as `undeterminable` rows in
+   `coverage.ungradedSurfaces` rather than silently. Read the matching
    catalogs in the `claudeguard` skill's `references/checks/`. Those catalogs describe what a
    vulnerability class **looks like**. They are not a work list and they are not a severity table —
    the grader's `coverage.<set>.undeterminable` rows are the work list.
@@ -114,6 +117,13 @@ The policy itself is written out in the `claudeguard` skill's `references/method
    | `ai-auditor` | `coverage.llmSites.undeterminable` |
    | `infra-auditor` | `coverage.sqlFunctions.undeterminable`, `coverage.tables.undeterminable`, `coverage.dynamicTableRefs` |
    | `mobile-auditor` | `coverage.mobileArtifacts.undeterminable` and `coverage.exportedComponents.undeterminable` — the grader now decides the definitive manifest facts (debuggable, cleartext, exported components, iOS ATS); the auditor takes the rest, such as secrets in resources and logic in the source the manifest points to |
+
+   The `ciWorkflows`, `iacFiles` and `firebaseRules` sets are decided by rules (`pass`/`fail`), so
+   they add no undeterminable rows of their own. `coverage.ungradedSurfaces` is the opposite —
+   every row in it is `undeterminable` by construction, because it holds what the engine saw and
+   no rule grades (see `references/methodology/grade-or-declare.md`). Route each row to the
+   matching auditor: Electron and Kubernetes subjects to `infra-auditor`, route-framework gaps to
+   `web-auditor`.
 
    An `undeterminable` row is not a shrug. It is a rule refusing to print a checkmark it cannot
    back: "the handler mentions `getUser`, but nothing proves the result gates anything." That is

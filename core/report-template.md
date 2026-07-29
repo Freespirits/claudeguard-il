@@ -212,6 +212,7 @@ Files discovered:            170     קבצים שנמצאו
   oversized / read errors:     0       גדולים מדי / שגיאת קריאה
 Directories not entered:       4  (build/vendor and dotfile dirs — listed with reasons)
 Routes found on disk:          2 · fully modeled: 0 · methods unread: 2
+Routes from framework calls:   3  (Express/Fastify/Hono/Koa/Nest) · framework gaps: 0
 Unresolved imports:            0 · dynamic table refs: 0
 Schema sources: migrations   → RLS state IS verifiable from the repo
 ```
@@ -220,6 +221,13 @@ List every `notableSkip` (a file we wanted to parse but could not) and every rou
 methods, each with its reason — this is the honest short list of what the engine could not fully
 model. If `discovery.reconciles` is false, say so loudly: the ledger did not add up, and the counts
 cannot be trusted until it does.
+
+Call-declared routes (`discovery.routes.fromFrameworkCalls`) are found by reading
+`app.get(...)`-style calls, not by listing files, so there is no filesystem count to check them
+against. That is what `discovery.routes.frameworkGaps` exists for: a server framework in
+`package.json` with **zero** routes enumerated is a coverage hole, not a fact. Print each gap with
+its reason — the grader also files it as an `undeterminable` row under `ungradedSurfaces`, so it
+cannot fall out of the analysis table.
 
 The single most consequential line for a Supabase app is `schema.rlsVerifiable`. When it is false,
 there are no migrations in the repo, so **every RLS pass or fail is really "unknown"** — print the
@@ -249,6 +257,14 @@ printing them is how the user can see it:
 | tables | 5 | 2 | 1 | 2 | 0 |
 | envVars | 14 | 9 | 1 | 0 | 4 |
 | supabaseClients | 3 | 2 | 1 | 0 | 0 |
+| ciWorkflows | 2 | 1 | 1 | 0 | 0 |
+| ungradedSurfaces | 1 | 0 | 0 | 1 | 0 |
+
+`ungradedSurfaces` is the grade-or-declare net (`methodology/grade-or-declare.md`): artifact
+classes the engine discovered and no rule grades — an Electron main file, a Kubernetes manifest, a
+framework whose routes could not be enumerated. Its rows are `undeterminable` by construction;
+render them like every other undeterminable row — seen, not settled, with the reason — never trim
+them as noise.
 
 Then list every `undeterminable` row with its reason. These are not filler — **this is the
 reviewer's work list**, the short honest list of what a human still has to open:

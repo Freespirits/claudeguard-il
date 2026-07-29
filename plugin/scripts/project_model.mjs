@@ -13,7 +13,7 @@
 // Usage: node project_model.mjs [path] [--json]
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
-import { stripSql, stripJs, CODE, COMMENT } from './lib/strip_comments.mjs'
+import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comments.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -64,7 +64,31 @@ const rel = p => relative(ROOT, p).split(sep).join('/')
 const discovery = {
   skippedDirs: [],   // directories not descended into, with why
   notableSkips: [],  // files we wanted to parse but could not, with why
-  counts: { filesDiscovered: 0, filesParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+  // `filesParsed` counts SOURCE files that went through the code parser. `configParsed` counts
+  // files a dedicated parser read instead — workflows, Dockerfiles, Terraform, Firebase rules,
+  // manifests, migrations. They are tracked apart because they arrive through the walk as
+  // "unsupported" (their extension is not code) and would otherwise be reported as files the
+  // engine ignored, which stopped being true once those parsers existed. Under-claiming coverage
+  // is safer than over-claiming it, but it is still wrong, and the discovery ledger is the one
+  // place in the tool whose entire job is to be accurate about what was and was not read.
+  counts: { filesDiscovered: 0, filesParsed: 0, configParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+}
+// Relative paths a non-code parser successfully read. Reconciled into the counts at the end.
+const configParsedPaths = new Set()
+
+/**
+ * Read a file for one of the dedicated (non-code) parsers, recording that it was read.
+ *
+ * Every such parser goes through here so the discovery ledger cannot drift from reality: adding a
+ * parser and forgetting to record it would leave its files counted as `unsupported`, i.e. reported
+ * as ignored when they were in fact examined. Returns null when the file cannot be read, and the
+ * caller skips it — the failure is already visible in `readErrors`.
+ */
+function readParsedConfig(p) {
+  let text
+  try { text = readFileSync(join(ROOT, p), 'utf8') } catch { return null }
+  configParsedPaths.add(p)
+  return text
 }
 const MAX_LEDGER_ROWS = 200 // cap the detail lists so a huge repo cannot balloon the model
 
@@ -341,7 +365,7 @@ for (const [r, f] of files) {
 const envFiles = allPaths.filter(p => /(^|\/)\.env(\.|$)/.test(p) && !/\.example$/.test(p))
 const envDeclared = new Map() // NAME -> {file,line,hasValue}
 for (const p of allPaths.filter(x => /(^|\/)\.env/.test(x))) {
-  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const text = readParsedConfig(p); if (text == null) continue
   text.split(/\r?\n/).forEach((ln, i) => {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(ln)
     if (m) envDeclared.set(m[1], { file: p, line: i + 1, hasValue: m[2].trim().length > 2, example: /\.example$/.test(p) })
@@ -435,6 +459,170 @@ for (const [r, f] of files) {
     ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id)/.test(code),
   })
 }
+// ---------- non-Next route inventory (Express / Fastify / Hono / Koa / NestJS) ----------
+//
+// AUDIT FIX C. The block above only recognises routes that are FILES: Next.js pages/app routes and
+// serverless function directories. Every other Node server declares its routes as CALLS —
+// `app.get('/admin', h)` — so an Express or Fastify app enumerated ZERO routes. LAW 2 was still
+// satisfied (0 === 0) and the report rendered a full green coverage row for `routes`, while the
+// entire HTTP surface was invisible. "We found nothing" meant "we looked nowhere", which is the
+// exact failure the ledger exists to prevent.
+//
+// Precision matters more than reach here: `api.get('/users')` in a React component is an axios
+// CALL, not a route DEFINITION, and inventing routes out of client fetches would be worse than
+// missing them. So a file is only searched when it imports a server framework, and only variables
+// actually assigned from that framework's constructors are treated as routers.
+const SERVER_FRAMEWORKS = {
+  express: { pkgs: ['express'], ctors: ['express', 'Router'] },
+  fastify: { pkgs: ['fastify'], ctors: ['fastify', 'Fastify'] },
+  hono: { pkgs: ['hono'], ctors: ['Hono'] },
+  koa: { pkgs: ['koa', '@koa/router', 'koa-router'], ctors: ['Koa', 'Router'] },
+  nest: { pkgs: ['@nestjs/common', '@nestjs/core'], ctors: [] },
+  hapi: { pkgs: ['@hapi/hapi'], ctors: ['server', 'Server'] },
+}
+const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete', 'all', 'options', 'head']
+
+/** Text of a call's argument list, from the `(` at `openIdx` to its balanced `)`. */
+function callArgs(text, openIdx, cap = 4000) {
+  let depth = 0
+  for (let i = openIdx; i < text.length && i - openIdx < cap; i++) {
+    const c = text[i]
+    if (c === '(') depth++
+    else if (c === ')') { depth--; if (depth === 0) return text.slice(openIdx + 1, i) }
+  }
+  return text.slice(openIdx + 1, Math.min(text.length, openIdx + cap))
+}
+
+const frameworkRoutesByPkg = new Map() // framework name -> route count, for the declare-gap check
+for (const [r, f] of files) {
+  const bare = bareImports.get(r) || new Set()
+  const fw = Object.entries(SERVER_FRAMEWORKS)
+    .find(([, def]) => def.pkgs.some(p => bare.has(p)))
+  if (!fw) continue
+  const [fwName, fwDef] = fw
+  const { code, mask } = stripJs(f.text)
+  const inCode = idx => mask[idx] === CODE
+
+  // Router-holding variables: `const app = express()`, `= new Hono()`, `= express.Router()`,
+  // `= fastify({...})`. Plus the framework binding itself, since `fastify.get(...)` is idiomatic.
+  const routerVars = new Set()
+  const ctorAlt = fwDef.ctors.length ? fwDef.ctors.join('|') : '\\0'
+  const ctorRe = new RegExp(
+    `(?:const|let|var)\\s+(\\w+)\\s*(?::[^=]+)?=\\s*(?:await\\s+)?(?:new\\s+)?(?:\\w+\\s*\\.\\s*)?(?:${ctorAlt})\\s*[(<]`, 'g')
+  let cm
+  while ((cm = ctorRe.exec(code))) routerVars.add(cm[1])
+  for (const p of fwDef.pkgs) {
+    // Default import binding: `import express from 'express'` / `import Fastify from 'fastify'`.
+    const impRe = new RegExp(`import\\s+(\\w+)\\s*(?:,\\s*\\{[^}]*\\})?\\s*from\\s*['"]${p.replace(/[/@]/g, '\\$&')}['"]`, 'g')
+    let im
+    while ((im = impRe.exec(f.text))) routerVars.add(im[1])
+  }
+  if (!routerVars.size && fwName !== 'nest') continue
+
+  // App-level auth middleware (`app.use(requireAuth)`) protects everything registered after it,
+  // exactly like Next's middleware.ts. Recorded so a correctly-guarded Express app is not reported
+  // as a wall of unauthenticated routes. It still only reaches `undeterminable` — LAW 1 applies to
+  // a token here as much as anywhere.
+  let appLevelAuth = false
+  {
+    const useRe = new RegExp(`\\b(?:${[...routerVars].join('|') || '\\0'})\\s*\\.\\s*use\\s*\\(`, 'g')
+    let um
+    while ((um = useRe.exec(code))) {
+      if (!inCode(um.index)) continue
+      if (AUTH_HINT.test(callArgs(code, code.indexOf('(', um.index), 600))) { appLevelAuth = true; break }
+    }
+  }
+
+  // Registering the same method+path twice in one file is a bug in the app, not two subjects. It
+  // must be collapsed HERE: two ledger rows with the same subject is a LAW 2 violation, and LAW 2
+  // is a throw — so without this, a duplicate `app.get('/x')` would crash the whole grade instead
+  // of producing a report.
+  const seenKeys = new Set()
+  const push = (method, urlPath, idx, handlerText) => {
+    const key = `${method.toUpperCase()} ${urlPath}`
+    if (seenKeys.has(key)) return
+    seenKeys.add(key)
+    const line = code.slice(0, idx).split(/\r?\n/).length
+    routes.push({
+      file: r,
+      kind: `${fwName}-route`,
+      // The join key that keeps subjects unique: one file legitimately declares many routes, and
+      // two rows with the same subject is a LAW 2 violation, not a duplicate to silently drop.
+      routeKey: `${method.toUpperCase()} ${urlPath}`,
+      urlPath,
+      line,
+      methods: [method.toUpperCase()],
+      mutating: method !== 'get' && method !== 'head' && method !== 'options',
+      hasAuthCheck: AUTH_HINT.test(handlerText) || appLevelAuth,
+      authVia: AUTH_HINT.test(handlerText) ? 'handler' : appLevelAuth ? 'app-level-middleware' : null,
+      hasRateLimit: RATE_HINT.test(handlerText) || RATE_HINT.test(code.slice(0, idx)),
+      hasValidation: VALIDATE_HINT.test(handlerText),
+      usesServiceRole: /SERVICE_ROLE|service_role/.test(handlerText),
+      readsIdParam: /(params|query)\s*[.[]\s*['"]?\w*id/i.test(handlerText) || /:\w*id\w*/i.test(urlPath),
+      // Must not match `res.json(...)` — that WRITES a response. A bare `.json(` matched it, so
+      // every handler that replies with JSON was asked to validate a body it never read, which is
+      // the noise-on-correct-code failure that makes a report stop being read.
+      readsBody: /\breq(uest)?\.body\b|\breq(uest)?\.json\s*\(|c\.req\.(json|parseBody|valid)\s*\(|ctx\.request\.body/.test(handlerText),
+      ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id|req\.user)/.test(handlerText),
+    })
+    frameworkRoutesByPkg.set(fwName, (frameworkRoutesByPkg.get(fwName) || 0) + 1)
+  }
+
+  // The route PATH lives inside a string literal, and stripJs blanks strings — so `app.get('/x')`
+  // reads as `app.get(   )` in the stripped copy and every path vanishes. So: match on RAW text and
+  // use the mask to reject a match that sits in a comment (a commented-out route must not be
+  // enumerated). The HANDLER is then read from the stripped copy at the same offsets, because
+  // stripJs preserves length and line breaks 1:1 — which matters, since running AUTH_HINT over raw
+  // text would let `const msg = "TODO: add requireAuth"` mark an unauthenticated route as guarded.
+  if (routerVars.size) {
+    const varAlt = [...routerVars].join('|')
+    const routeRe = new RegExp(
+      `\\b(?:${varAlt})\\s*\\.\\s*(${HTTP_METHODS.join('|')})\\s*\\(\\s*(['"\`])([^'"\`]+)\\2`, 'g')
+    let rm
+    while ((rm = routeRe.exec(f.text))) {
+      if (!inCode(rm.index)) continue
+      push(rm[1], rm[3], rm.index, callArgs(code, code.indexOf('(', rm.index)))
+    }
+    // `app.route('/x').get(h).post(h)` — the path is on route(), the methods chain off it.
+    const chainRe = new RegExp(`\\b(?:${varAlt})\\s*\\.\\s*route\\s*\\(\\s*(['"\`])([^'"\`]+)\\1\\s*\\)`, 'g')
+    while ((rm = chainRe.exec(f.text))) {
+      if (!inCode(rm.index)) continue
+      const tail = code.slice(rm.index, rm.index + 2000)
+      const methRe = new RegExp(`\\.\\s*(${HTTP_METHODS.join('|')})\\s*\\(`, 'g')
+      let mm
+      while ((mm = methRe.exec(tail))) push(mm[1], rm[2], rm.index + mm.index, callArgs(tail, mm.index + mm[0].length - 1))
+    }
+  }
+
+  // NestJS declares routes with decorators. The controller prefix and the method path combine.
+  if (fwName === 'nest') {
+    const prefix = (/@Controller\s*\(\s*['"]([^'"]*)['"]/.exec(f.text) || [, ''])[1]
+    const decRe = /@(Get|Post|Put|Patch|Delete|All|Options|Head)\s*\(\s*(?:['"]([^'"]*)['"])?\s*\)/g
+    let dm
+    while ((dm = decRe.exec(f.text))) {
+      if (!inCode(dm.index)) continue
+      const urlPath = ('/' + [prefix, dm[2] || ''].filter(Boolean).join('/')).replace(/\/+/g, '/')
+      // The decorated method body follows the decorator; take a bounded slice of it.
+      push(dm[1].toLowerCase(), urlPath, dm.index, code.slice(dm.index, dm.index + 1500))
+    }
+  }
+}
+
+// A server framework in package.json with ZERO routes enumerated is the loud version of the bug
+// above: either the app declares its routes somewhere this pass cannot see, or it genuinely has
+// none. We cannot tell which, so it becomes a declared coverage hole rather than a silent zero.
+const routeFrameworkGaps = []
+for (const [name, def] of Object.entries(SERVER_FRAMEWORKS)) {
+  if (!def.pkgs.some(has)) continue
+  if (!frameworkRoutesByPkg.get(name)) {
+    routeFrameworkGaps.push({
+      framework: name,
+      declaredIn: 'package.json',
+      reason: `${name} is a dependency but no route definitions were enumerated from it — its HTTP surface may be declared in a way this pass cannot follow (dynamic registration, a route file loader, or a generated router)`,
+    })
+  }
+}
+
 // middleware-based auth (a route may be protected centrally — avoids false "no auth")
 const middlewareFiles = [...files.keys()].filter(r => /(^|\/)middleware\.(t|j)s$/.test(r))
 const middlewareAuth = middlewareFiles.some(r => AUTH_HINT.test(files.get(r).text))
@@ -448,7 +636,7 @@ const sqlFiles = allPaths.filter(p => /\.sql$/i.test(p))
 const tables = new Map()
 const sqlFunctions = []
 for (const p of sqlFiles) {
-  let raw; try { raw = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const raw = readParsedConfig(p); if (raw == null) continue
 
   // CRITICAL: never match against raw SQL. A commented-out
   //   -- alter table public.orders enable row level security;
@@ -646,7 +834,7 @@ function tablesFromSupabaseTypes(text) {
 const typeFiles = allPaths.filter(p =>
   /(^|\/)(database|supabase)\.types\.ts$|(^|\/)types\/(supabase|database)\.ts$|(^|\/)supabase\/types\.ts$/i.test(p))
 for (const p of typeFiles) {
-  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const text = readParsedConfig(p); if (text == null) continue
   const names = tablesFromSupabaseTypes(text)
   if (!names.length) continue
   if (!schemaSources.includes('supabase-types')) schemaSources.push('supabase-types')
@@ -660,7 +848,7 @@ for (const p of typeFiles) {
 
 // Prisma / Drizzle projects manage schema in code, and have no Postgres RLS layer at all.
 for (const p of allPaths.filter(x => /schema\.prisma$/i.test(x))) {
-  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const text = readParsedConfig(p); if (text == null) continue
   let m; const re = /^\s*model\s+(\w+)\s*\{/gm
   while ((m = re.exec(text))) {
     if (!schemaSources.includes('prisma')) schemaSources.push('prisma')
@@ -873,7 +1061,7 @@ for (const [r, f] of files) {
 // this file, so only the grader is in a position to make it.
 const nextConfigFacts = []
 for (const p of allPaths.filter(x => /(^|\/)next\.config\.(m|c)?[jt]s$/.test(x))) {
-  let raw; try { raw = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const raw = readParsedConfig(p); if (raw == null) continue
   const { code } = stripJs(raw)
   const at = re => {
     const m = re.exec(code)
@@ -949,7 +1137,14 @@ const artifacts = {
   terraform: allPaths.filter(p => /\.tf$/.test(p)),
   workflows: allPaths.filter(p => /^\.github\/workflows\/.*\.ya?ml$/.test(p)),
   firebaseRules: allPaths.filter(p => /(firestore|database|storage)\.rules$|\.rules\.json$/.test(p)),
-  electronMain: [...files.keys()].filter(r => /BrowserWindow|webPreferences/.test(files.get(r).text)),
+  // Matched on STRIPPED code, not raw text. `BrowserWindow` appearing inside a string or a regex
+  // literal is a file that MENTIONS Electron — a detector, a doc example, a test fixture — not one
+  // that configures a window. Reading raw text here made this engine detect ITSELF as an Electron
+  // app, which then produced a confidently wrong coverage row.
+  electronMain: [...files.keys()].filter(r => {
+    const { code } = stripJs(files.get(r).text)
+    return /\bnew\s+BrowserWindow\b|\bwebPreferences\s*:/.test(code)
+  }),
   migrations: sqlFiles,
   envFiles,
   lockfiles: allPaths.filter(p => /(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|requirements\.txt)$/.test(p)),
@@ -973,7 +1168,7 @@ function lineOf(text, index) { return text.slice(0, index).split(/\r?\n/).length
 
 const androidManifests = []
 for (const p of artifacts.androidManifest) {
-  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const text = readParsedConfig(p); if (text == null) continue
   // Blank XML comments first. A commented-out permission that still matched would misreport the
   // manifest, which is the same class of bug that once made a commented-out `enable row level
   // security` read as enabled.
@@ -1013,7 +1208,7 @@ for (const p of artifacts.androidManifest) {
 
 const iosPlists = []
 for (const p of artifacts.infoPlist) {
-  let text; try { text = readFileSync(join(ROOT, p), 'utf8') } catch { continue }
+  const text = readParsedConfig(p); if (text == null) continue
   const code = text.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '))
   // In a plist, `<key>X</key><true/>` is the shape. Match the key and the value that follows it.
   const boolKey = name => {
@@ -1029,6 +1224,418 @@ for (const p of artifacts.infoPlist) {
     // Domain-scoped exceptions are the correct way to allow one legacy host.
     hasExceptionDomains: /<key>\s*NSExceptionDomains\s*<\/key>/i.test(code),
   })
+}
+
+// ---------- CI/CD workflows ----------
+//
+// AUDIT FIX C, and the same defect as mobile before it: `artifacts.workflows` was a list of PATHS.
+// Nothing graded them and no ledger set covered them, so a workflow that hands repo secrets to a
+// forked pull request rendered as a clean report. Discovering a file and never reading it is
+// indistinguishable, in the output, from the file not existing.
+//
+// These are FACTS — which trigger is declared, whether a ref is a SHA, where an expression is
+// interpolated. What any of it is worth lives in the grader.
+//
+// The `${{ }}` fields an attacker can write into. GitHub's own hardening guidance singles these
+// out: interpolating one into a `run:` shell is command injection with no exploit chain, because
+// the expression is substituted BEFORE the shell ever sees it. Deliberately an allowlist and not
+// a broad `github.event.*` match — `github.event.pull_request.number` is an integer nobody can
+// inject through, and flagging it would be the kind of noise that gets a whole report ignored.
+const INJECTABLE_CONTEXT = new RegExp([
+  'github\\.event\\.issue\\.(title|body)',
+  'github\\.event\\.pull_request\\.(title|body)',
+  'github\\.event\\.pull_request\\.head\\.(ref|label)',
+  'github\\.event\\.pull_request\\.head\\.repo\\.default_branch',
+  'github\\.event\\.(comment|review|review_comment)\\.body',
+  'github\\.event\\.discussion\\.(title|body)',
+  'github\\.event\\.(head_commit|commits\\[[^\\]]*\\])\\.(message|author\\.(name|email))',
+  'github\\.event\\.workflow_run\\.(head_branch|head_commit\\.message)',
+  'github\\.event\\.pages\\[[^\\]]*\\]\\.page_name',
+  'github\\.head_ref',
+].join('|'))
+
+// A ref an attacker controls the contents of. Checking one out under `pull_request_target` is the
+// single most dangerous pattern in GitHub Actions.
+const UNTRUSTED_REF = /github\.event\.pull_request\.(head\.(sha|ref)|merge_commit_sha)|github\.head_ref|github\.event\.workflow_run\.head_(sha|branch)/
+
+// Orgs whose action tags we do NOT report as unpinned. Not because a tag is immutable there — it
+// is not — but because the realistic supply-chain attack is a compromised third-party maintainer
+// (the tj-actions/changed-files incident is exactly this shape), and flagging `actions/checkout@v4`
+// in every repo on earth would bury the one line that matters under one that never does.
+const FIRST_PARTY_ACTION_ORGS = new Set(['actions', 'github', 'docker'])
+
+const ciWorkflows = []
+for (const p of artifacts.workflows) {
+  const raw = readParsedConfig(p); if (raw == null) continue
+  const { code } = stripHash(raw)
+  const lines = code.split(/\r?\n/)
+  const indentOf = ln => { const m = /^(\s*)/.exec(ln); return m[1].length }
+
+  // Triggers. All three YAML spellings: `on: push`, `on: [a, b]`, and a nested block. The key is
+  // often written `"on":` or `'on':` because YAML 1.1 reads a bare `on` as the boolean true, and
+  // missing those spellings would make a pull_request_target workflow look like it has no trigger
+  // at all — which is the difference between a P0 and silence.
+  const triggers = new Set()
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^['"]?on['"]?\s*:\s*(.*)$/.exec(lines[i])
+    if (!m) continue
+    const inline = m[1].trim()
+    if (inline && inline !== '|' && inline !== '>') {
+      for (const t of inline.replace(/[[\]]/g, '').split(',')) if (t.trim()) triggers.add(t.trim())
+    }
+    // Nested block. Only keys at the block's OWN indent are triggers — a deeper key is a trigger's
+    // option (`types:`, `branches:`), and collecting those would put `types` in the trigger list.
+    // The indent is read from the first child rather than assumed, so 2- and 4-space files both work.
+    let childIndent = null
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j].trim()) continue
+      const ind = indentOf(lines[j])
+      if (ind === 0) break
+      if (childIndent === null) childIndent = ind
+      if (ind !== childIndent) continue
+      const tm = /^\s*([a-z_]+)\s*:/.exec(lines[j])
+      if (tm) triggers.add(tm[1])
+    }
+    break
+  }
+
+  // Job boundaries, so a step can be attributed to the job it is actually in. Without this, a
+  // harmless `run:` in a LATER job counted as execution of an earlier job's untrusted checkout —
+  // which would upgrade that finding's evidence from strong to definitive, and a definitive P0 is
+  // what turns the badge red. A wrong confirmed is the one error this project cannot afford.
+  const jobs = []
+  {
+    const jobsLine = lines.findIndex(l => /^jobs\s*:/.test(l))
+    if (jobsLine !== -1) {
+      let jobIndent = null
+      for (let i = jobsLine + 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue
+        const ind = indentOf(lines[i])
+        if (ind === 0) break
+        if (jobIndent === null) jobIndent = ind
+        if (ind !== jobIndent || !/^\s*[\w-]+\s*:/.test(lines[i])) continue
+        if (jobs.length) jobs[jobs.length - 1].end = i
+        jobs.push({ start: i + 1, end: lines.length })
+      }
+    }
+  }
+  /** The 1-based line range of the job containing `line`, or the whole file if none is found. */
+  const jobRangeOf = line => jobs.find(j => line >= j.start && line <= j.end) || { start: 1, end: lines.length }
+
+  // `run:` blocks, with their body, so an interpolation can be attributed to a shell rather than to
+  // a `with:` input (where it is a string, not code).
+  const runBlocks = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)(?:-\s+)?run\s*:\s*(.*)$/.exec(lines[i])
+    if (!m) continue
+    const keyIndent = lines[i].indexOf('run:')
+    let body = m[2].replace(/^[|>][-+\d]*\s*$/, '')
+    let end = i
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() && lines[j].indexOf(lines[j].trim()) <= keyIndent) break
+      body += '\n' + lines[j]
+      end = j
+    }
+    runBlocks.push({ startLine: i + 1, body })
+    i = end
+  }
+
+  const scriptInjections = []
+  for (const b of runBlocks) {
+    const re = /\$\{\{\s*([^}]+?)\s*\}\}/g
+    let m
+    while ((m = re.exec(b.body))) {
+      if (INJECTABLE_CONTEXT.test(m[1])) {
+        scriptInjections.push({
+          line: b.startLine + b.body.slice(0, m.index).split('\n').length - 1,
+          expr: m[1].trim(),
+        })
+      }
+    }
+  }
+  const secretsInRunScript = runBlocks
+    .filter(b => /\$\{\{\s*secrets\./.test(b.body))
+    .map(b => ({ line: b.startLine }))
+
+  // Actions used, and whether each is pinned to a full commit SHA.
+  const usesSteps = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*(?:-\s+)?uses\s*:\s*['"]?([^'"\s]+)['"]?/.exec(lines[i])
+    if (!m) continue
+    const spec = m[1]
+    if (spec.startsWith('./') || spec.startsWith('docker://')) continue // local / image, not a tag
+    const at = spec.lastIndexOf('@')
+    const ref = at === -1 ? null : spec.slice(at + 1)
+    const name = at === -1 ? spec : spec.slice(0, at)
+    usesSteps.push({
+      line: i + 1, action: name, ref,
+      pinnedToSha: !!ref && /^[0-9a-f]{40}$/i.test(ref),
+      firstParty: FIRST_PARTY_ACTION_ORGS.has(name.split('/')[0]),
+    })
+  }
+
+  // Checkout of an attacker-controlled ref, and whether anything runs afterwards. A checkout alone
+  // writes files; a `run:` after it is what executes them — and `npm ci` alone is enough, because
+  // an install script in the PR's package.json runs at that moment.
+  let untrustedCheckout = null
+  for (let i = 0; i < lines.length; i++) {
+    if (!/uses\s*:\s*['"]?actions\/checkout/.test(lines[i])) continue
+    // Read to the end of THIS step, not a fixed number of lines. A `ref:` belonging to the next
+    // step would otherwise be attributed to the checkout and manufacture a P0 — the same
+    // window-bleed defect the SQL parser was rewritten to eliminate, in a different format.
+    const stepIndent = lines[i].indexOf('-') >= 0 && /^\s*-\s/.test(lines[i])
+      ? lines[i].indexOf('-') : lines[i].search(/\S/)
+    let ref = null
+    for (let j = i + 1; j < lines.length; j++) {
+      if (!lines[j].trim()) continue
+      const ind = lines[j].search(/\S/)
+      if (ind <= stepIndent) break // next step, or the end of the steps list
+      const rm = /\bref\s*:\s*(.+)/.exec(lines[j])
+      if (rm) { ref = rm[1].trim(); break }
+    }
+    if (ref && UNTRUSTED_REF.test(ref)) { untrustedCheckout = { line: i + 1, ref }; break }
+  }
+  // Scoped to the job the checkout is in — a `run:` in a different job never touches this job's
+  // working copy, so counting it would manufacture the stronger claim.
+  const executesAfterCheckout = !!untrustedCheckout && (() => {
+    const { end } = jobRangeOf(untrustedCheckout.line)
+    const after = x => x > untrustedCheckout.line && x <= end
+    return runBlocks.some(b => after(b.startLine)) ||
+      usesSteps.some(u => after(u.line) && !/^actions\/(checkout|setup-|cache)/.test(u.action))
+  })()
+
+  const selfHostedLine = lines.findIndex(l => /runs-on\s*:.*self-hosted/.test(l))
+
+  ciWorkflows.push({
+    file: p,
+    triggers: [...triggers],
+    // A workflow with no `permissions:` block inherits a repo/org default that is NOT readable from
+    // the repo — it may be read-all or write-all. That ambiguity is the grader's to express.
+    declaresPermissions: lines.some(l => /^permissions\s*:/.test(l)),
+    declaresJobPermissions: lines.some(l => /^\s+permissions\s*:/.test(l)),
+    untrustedCheckout,
+    executesAfterCheckout,
+    scriptInjections,
+    secretsInRunScript,
+    unpinnedActions: usesSteps.filter(u => !u.pinnedToSha),
+    actionsTotal: usesSteps.length,
+    selfHosted: selfHostedLine === -1 ? null : { line: selfHostedLine + 1 },
+  })
+}
+
+// ---------- infrastructure as code ----------
+//
+// Same defect class, same fix. A Dockerfile with a baked credential, a compose file mounting the
+// Docker socket, or a Terraform security group open to the world were all discovered and none was
+// read.
+//
+// A value assigned in a committed file is a VALUE match, which is what LAW 3 requires before
+// severity may go high — but only if it is a real value. Placeholders and variable references are
+// the whole content of a well-written template, so mistaking one for a secret would fire on exactly
+// the files that are done right.
+const PLACEHOLDER_VALUE = /^(?:changeme|change_me|your[-_ ]?\w*|xxx+|<[^>]*>|\.\.\.|todo|example|placeholder|secret|password|test|dummy|\$\{[^}]*\}|\$\w+|""|'')$/i
+function looksLikeRealSecretValue(v) {
+  const s = String(v).trim().replace(/^['"]|['"]$/g, '')
+  if (s.length < 12) return false
+  if (PLACEHOLDER_VALUE.test(s)) return false
+  if (/^\$|\{\{|\$\{/.test(s)) return false // interpolated from a real secret store
+  return true
+}
+
+const iac = { dockerfiles: [], compose: [], terraform: [] }
+
+for (const p of artifacts.dockerfiles) {
+  const raw = readParsedConfig(p); if (raw == null) continue
+  const { code } = stripHash(raw)
+  const lines = code.split(/\r?\n/)
+  const bakedSecrets = []
+  let setsUser = null, baseImage = null, remoteScript = null
+  lines.forEach((ln, i) => {
+    let m
+    if ((m = /^\s*FROM\s+(\S+)/i.exec(ln)) && !baseImage) {
+      const ref = m[1]
+      baseImage = {
+        line: i + 1, ref,
+        // A digest is immutable; a tag is not, and `latest` is not even stable across a rebuild.
+        pinned: /@sha256:[0-9a-f]{64}/i.test(ref),
+        latest: /:latest$/i.test(ref) || !/[:@]/.test(ref.replace(/^[^/]*\//, '')),
+      }
+    }
+    // A numeric-or-named USER that is not root. `USER root` is not a mitigation.
+    if ((m = /^\s*USER\s+(\S+)/i.exec(ln)) && !/^(root|0)$/i.test(m[1])) setsUser = { line: i + 1, user: m[1] }
+    if ((m = /^\s*(ENV|ARG)\s+([A-Z0-9_]+)\s*[= ]\s*(.+)$/i.exec(ln))) {
+      const name = m[2], value = m[3].trim()
+      const cls = classifySecretName(name)
+      if ((cls === 'high' || cls === 'weak') && looksLikeRealSecretValue(value)) {
+        bakedSecrets.push({ line: i + 1, name, secretClass: cls, directive: m[1].toUpperCase() })
+      }
+    }
+    if (/^\s*RUN\b/i.test(ln) && /(curl|wget)[^|]*\|\s*(sudo\s+)?(ba)?sh/i.test(ln) && !remoteScript) {
+      remoteScript = { line: i + 1 }
+    }
+  })
+  iac.dockerfiles.push({ file: p, baseImage, setsUser, bakedSecrets, remoteScript })
+}
+
+for (const p of artifacts.compose) {
+  const raw = readParsedConfig(p); if (raw == null) continue
+  const { code } = stripHash(raw)
+  const lines = code.split(/\r?\n/)
+  const at = re => { const i = lines.findIndex(l => re.test(l)); return i === -1 ? null : { line: i + 1 } }
+  // A published port binds 0.0.0.0 by default. For a database that means the internet, on a host
+  // with no firewall — which is how an unauthenticated Redis or Mongo ends up in a ransom note.
+  const DB_PORTS = { 5432: 'postgres', 3306: 'mysql', 27017: 'mongodb', 6379: 'redis', 9200: 'elasticsearch', 5984: 'couchdb', 11211: 'memcached', 1433: 'mssql' }
+  const exposedDbPorts = []
+  const bakedSecrets = []
+  lines.forEach((ln, i) => {
+    let m
+    if ((m = /^\s*-\s*['"]?(?:(\d{1,3}(?:\.\d{1,3}){3}):)?(\d{2,5}):(\d{2,5})['"]?\s*$/.exec(ln))) {
+      const host = m[1] || '0.0.0.0'
+      const container = Number(m[3])
+      if (DB_PORTS[container] && host !== '127.0.0.1' && host !== 'localhost') {
+        exposedDbPorts.push({ line: i + 1, port: container, service: DB_PORTS[container], bind: host })
+      }
+    }
+    if ((m = /^\s*-?\s*([A-Z0-9_]+)\s*[:=]\s*(.+)$/.exec(ln))) {
+      const cls = classifySecretName(m[1])
+      if ((cls === 'high' || cls === 'weak') && looksLikeRealSecretValue(m[2])) {
+        bakedSecrets.push({ line: i + 1, name: m[1], secretClass: cls })
+      }
+    }
+  })
+  iac.compose.push({
+    file: p,
+    privileged: at(/privileged\s*:\s*true/),
+    dockerSocket: at(/\/var\/run\/docker\.sock/),
+    hostNetwork: at(/network_mode\s*:\s*['"]?host/),
+    exposedDbPorts,
+    bakedSecrets,
+  })
+}
+
+for (const p of artifacts.terraform) {
+  const raw = readParsedConfig(p); if (raw == null) continue
+  const { code } = stripHash(raw)
+  const lineAt = idx => code.slice(0, idx).split(/\r?\n/).length
+
+  // The innermost `{ ... }` block containing an offset. Used instead of a fixed look-ahead window
+  // for the same reason the SQL parser reads whole statements: a window bleeds one resource's
+  // attributes into its neighbour, and that produced a confident false P0 in the audit.
+  //
+  // Returns the block body AND its header — the text before the opening brace. The header is what
+  // names the block (`egress {`), and it lives OUTSIDE the braces, so a body-only slice cannot tell
+  // an ingress rule from an egress one.
+  const enclosingBlock = idx => {
+    let depth = 0, start = -1
+    for (let i = idx; i >= 0; i--) {
+      if (code[i] === '}') depth++
+      else if (code[i] === '{') { if (depth === 0) { start = i; break } depth-- }
+    }
+    if (start === -1) return { body: code.slice(Math.max(0, idx - 200), idx + 200), header: '' }
+    const header = code.slice(Math.max(0, start - 80), start)
+    let d = 0
+    for (let i = start; i < code.length; i++) {
+      if (code[i] === '{') d++
+      else if (code[i] === '}') { d--; if (d === 0) return { body: code.slice(start, i + 1), header } }
+    }
+    return { body: code.slice(start), header }
+  }
+
+  const openIngress = []
+  {
+    const re = /['"]0\.0\.0\.0\/0['"]/g
+    let m
+    while ((m = re.exec(code))) {
+      const { body, header } = enclosingBlock(m.index)
+      // Outbound traffic to the world is normal and near-universal; inbound is the exposure.
+      // Written two ways in HCL: a nested `egress { … }` block, whose name is in the HEADER, and
+      // `aws_security_group_rule` with `type = "egress"`, which is inside the body.
+      if (/\begress\s*$|\begress\s*\{/.test(header.trimEnd()) || /\btype\s*=\s*"egress"/.test(body)) continue
+      const from = Number((/from_port\s*=\s*(\d+)/.exec(body) || [, NaN])[1])
+      const to = Number((/to_port\s*=\s*(\d+)/.exec(body) || [, NaN])[1])
+      // Public HTTP/HTTPS is what a web server is FOR. Only a wider range is a finding.
+      const webOnly = Number.isFinite(from) && Number.isFinite(to) &&
+        ((from === 80 && to === 80) || (from === 443 && to === 443) || (from === 80 && to === 443))
+      if (webOnly) continue
+      openIngress.push({
+        line: lineAt(m.index),
+        portRange: Number.isFinite(from) ? `${from}-${to}` : 'unspecified',
+      })
+    }
+  }
+  const at = re => { const m = re.exec(code); return m ? { line: lineAt(m.index), match: m[0].slice(0, 60) } : null }
+  const literalSecrets = []
+  {
+    const re = /^\s*([a-z0-9_]*(?:password|secret|token|private_key|access_key)[a-z0-9_]*)\s*=\s*(.+)$/gim
+    let m
+    while ((m = re.exec(code))) {
+      const value = m[2].trim()
+      if (!/^['"]/.test(value)) continue // a variable/reference, which is the correct pattern
+      if (looksLikeRealSecretValue(value)) literalSecrets.push({ line: lineAt(m.index), name: m[1] })
+    }
+  }
+  iac.terraform.push({
+    file: p,
+    openIngress,
+    publicAcl: at(/acl\s*=\s*['"]public-read(-write)?['"]/),
+    publiclyAccessible: at(/publicly_accessible\s*=\s*true/),
+    literalSecrets,
+  })
+}
+
+// Kubernetes manifests. DETECTED but not parsed — identified by content rather than by path,
+// because `deploy/app.yaml` and `k8s/prod/web.yml` are equally common and neither name is reliable.
+// They are deliberately NOT recorded as parsed: the engine has no rules for them, and the point of
+// finding them is to DECLARE the gap in the coverage ledger rather than to let a repository whose
+// entire deployment lives in Kubernetes read as fully examined.
+const k8sManifests = []
+for (const p of allPaths) {
+  if (!/\.ya?ml$/i.test(p)) continue
+  if (artifacts.workflows.includes(p) || artifacts.compose.includes(p)) continue
+  let head
+  try { head = readFileSync(join(ROOT, p), 'utf8').slice(0, 2000) } catch { continue }
+  if (/^apiVersion\s*:/m.test(head) && /^kind\s*:/m.test(head)) k8sManifests.push(p)
+}
+
+// State files hold every attribute of every resource IN PLAINTEXT, including generated passwords
+// and private keys. Committing one is a credential leak that no secret scanner rule is shaped to
+// catch, because the value has no recognisable prefix.
+const terraformState = allPaths.filter(p => /\.tfstate(\.backup)?$/.test(p))
+
+// ---------- Firebase security rules ----------
+//
+// The Supabase half of this audience gets RLS grading; the Firebase half got nothing. `allow read,
+// write: if true` is the exact Firebase equivalent of RLS disabled — the whole database readable
+// and writable by anyone with the config object that ships in every client bundle by design.
+const firebaseRules = []
+for (const p of artifacts.firebaseRules) {
+  const raw = readParsedConfig(p); if (raw == null) continue
+  if (/\.json$/i.test(p)) {
+    // Realtime Database rules are JSON: `".read": true` grants the whole subtree.
+    const open = []
+    const re = /"\.(read|write)"\s*:\s*(true|"auth != null"|"true")/g
+    let m
+    while ((m = re.exec(raw))) {
+      open.push({ line: raw.slice(0, m.index).split(/\r?\n/).length, op: m[1], value: m[2] })
+    }
+    firebaseRules.push({ file: p, dialect: 'rtdb-json', openRules: open.filter(o => o.value !== '"auth != null"'), authOnlyRules: open.filter(o => o.value === '"auth != null"') })
+    continue
+  }
+  // Firestore / Storage rules language. Comments use `//`, which stripHash blanks.
+  const { code } = stripHash(raw)
+  const openRules = [], authOnlyRules = []
+  const re = /allow\s+([a-z, ]+?)\s*(?::\s*if\s+([^;{]+))?;/gi
+  let m
+  while ((m = re.exec(code))) {
+    const ops = m[1].split(',').map(s => s.trim()).filter(Boolean)
+    const cond = (m[2] || 'true').trim()
+    const line = code.slice(0, m.index).split(/\r?\n/).length
+    if (/^true$/i.test(cond)) openRules.push({ line, ops, condition: cond })
+    // `if request.auth != null` means ANY signed-in user, including one who just self-registered.
+    // Not open to the world, but not owner-scoped either — the cross-tenant case.
+    else if (/^request\.auth\s*!=\s*null$/i.test(cond)) authOnlyRules.push({ line, ops, condition: cond })
+  }
+  firebaseRules.push({ file: p, dialect: /storage/i.test(p) ? 'storage' : 'firestore', openRules, authOnlyRules })
 }
 
 // ---------- finish the discovery ledger ----------
@@ -1048,11 +1655,17 @@ let importEdges = 0
 for (const set of imports.values()) importEdges += set.size
 
 discovery.routes = {
-  // Every route-kind file becomes a modeled route, so found === modeled by construction; the real
-  // signal is how many we could only PARTIALLY model.
+  // Every route-kind FILE becomes a modeled route, so found === modeled by construction for the
+  // file-routed frameworks; the real signal is how many we could only PARTIALLY model.
   foundByFilesystem: routeLikeFiles.length,
   modeled: routes.length,
   withUnknownMethods: routes.filter(r => r.methods.length === 1 && r.methods[0] === 'UNKNOWN').length,
+  // Call-declared routes (Express/Fastify/Hono/Koa/Nest) are counted separately because they are
+  // found by reading calls, not by listing files — so there is no filesystem number to compare
+  // them against, and a zero here on a repo that depends on such a framework is a coverage hole
+  // rather than a fact. That case is what `frameworkGaps` states out loud.
+  fromFrameworkCalls: routes.filter(r => r.routeKey).length,
+  frameworkGaps: routeFrameworkGaps,
 }
 discovery.imports = {
   edgesResolvedToFiles: importEdges,
@@ -1073,10 +1686,16 @@ discovery.schema = {
 // count a branch fails loudly instead of silently under-reporting.
 {
   const c = discovery.counts
-  const accounted = c.filesParsed + c.unsupported + c.oversized + c.readErrors
+  // Move every file a dedicated parser actually read out of `unsupported`. Only paths that were
+  // counted there in the first place move — a next.config.js is source and is already in
+  // filesParsed, so counting it again would break the equation in the other direction.
+  for (const p of configParsedPaths) {
+    if (!files.has(p)) { c.configParsed++; c.unsupported-- }
+  }
+  const accounted = c.filesParsed + c.configParsed + c.unsupported + c.oversized + c.readErrors
   discovery.reconciles = accounted === c.filesDiscovered
   if (!discovery.reconciles) {
-    discovery.discrepancy = `filesDiscovered=${c.filesDiscovered} but parsed+unsupported+oversized+readErrors=${accounted}`
+    discovery.discrepancy = `filesDiscovered=${c.filesDiscovered} but parsed+configParsed+unsupported+oversized+readErrors=${accounted}`
   }
 }
 
@@ -1129,6 +1748,11 @@ const model = {
   nextConfig: nextConfigFacts,
   llmSites,
   mobile: { android: androidManifests, ios: iosPlists },
+  // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
+  // graded subject set, so silence about them is no longer indistinguishable from safety.
+  ci: ciWorkflows,
+  iac: { ...iac, stateFiles: terraformState, k8sManifests },
+  firebaseRules,
   limits: [
     'Heuristic parsing (regex + import resolution), not a type-aware AST. May miss dynamic requires, re-exports through barrels, and monorepo aliases.',
     'Client/server classification is decisive for public env prefixes and "use client" chains; other cases are reported as weaker signals.',

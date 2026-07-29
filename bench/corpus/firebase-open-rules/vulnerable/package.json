@@ -1,0 +1,6 @@
+{
+  "name": "fb-vuln",
+  "dependencies": {
+    "firebase": "10.13.0"
+  }
+}

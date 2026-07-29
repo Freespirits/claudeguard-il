@@ -1,6 +1,6 @@
 ---
 name: infra-auditor
-description: Use this agent to review the database functions, undeterminable tables, and CI/IaC artifacts that ClaudeGuardIL's grader enumerated but could not decide by rule — SECURITY DEFINER bodies that mention auth.uid() without gating on it, RLS policies scoped to the wrong column, and workflow/Docker/Terraform secret exposure. Typical triggers include a /cg-scan run with rows in `coverage.sqlFunctions.undeterminable` or `coverage.tables.undeterminable`, or a repo containing `.github/workflows`, a Dockerfile, or `*.tf`. See "When to invoke".
+description: Use this agent to review the database functions, tables, and infrastructure that ClaudeGuardIL's grader enumerated but could not decide by rule — SECURITY DEFINER bodies that mention auth.uid() without gating on it, RLS policies scoped to the wrong column, and the files in `coverage.ungradedSurfaces` that no rule walks at all (Electron main processes, Kubernetes manifests, route frameworks whose endpoints could not be enumerated). Typical triggers include a /cg-scan run with rows in `coverage.sqlFunctions.undeterminable`, `coverage.tables.undeterminable`, or `coverage.ungradedSurfaces`. Note that CI/CD, Docker, Terraform and Firebase rules are now RULE-GRADED (CG-CI-*, CG-IAC-*, CG-FB-*) — this agent reviews what those rules leave behind, not the mechanical cases they already own. See "When to invoke".
 model: inherit
 color: cyan
 tools: ["Read", "Glob", "Grep", "Bash"]
@@ -16,10 +16,12 @@ complete RLS bypass reachable through `supabase.rpc()` by anyone.
 
 ## When to invoke
 - **After the grader runs** with rows in `coverage.sqlFunctions.undeterminable`,
-  `coverage.tables.undeterminable`, or `coverage.dynamicTableRefs`.
-- **Infra/CI artifacts present** in `model.artifacts`: `workflows`, `dockerfiles`, `compose`,
-  `terraform`, `firebaseRules`, `electronMain`.
+  `coverage.tables.undeterminable`, `coverage.dynamicTableRefs`, or `coverage.ungradedSurfaces`.
 - **Targeted review** of RLS policies, a database function, a pipeline, or a container image.
+
+Presence of a workflow, Dockerfile or `*.tf` is no longer on its own a reason to invoke: those are
+graded, and their `fail` rows are already findings. Invoke for their `pass` rows only when someone
+wants the non-mechanical review described in item 5.
 
 ## Your work list
 
@@ -73,26 +75,41 @@ CRUD helper. The table set behind it cannot be enumerated. Read the helper and s
 actually flow through it, and whether the caller controls the name (a table name taken from the
 request is its own finding).
 
-**5. CI and IaC artifacts in `model.artifacts`.** The engine enumerates these as **paths only** —
-there is no grader rule for any of them, so every finding here is yours and your coverage
-denominator is the artifact list itself.
-- `workflows` — `pull_request_target` combined with a checkout of the PR head (untrusted code with
-  secrets in scope); `${{ github.event.* }}` interpolated into a `run:` block (shell injection from
-  a PR title or branch name); third-party actions pinned to a tag or branch instead of a commit SHA;
-  `permissions: write-all` or a default-write `GITHUB_TOKEN`; `set -x` or `echo` around a secret;
-  an artifact upload whose glob catches `.env`; a secret passed to a job that also runs fork code;
-  `workflow_run` handlers that trust the triggering run's artifacts.
-- `dockerfiles` / `compose` — process running as root; a secret baked into a layer via `ARG`/`ENV`
-  or a `COPY .` that pulls in `.env`; `:latest` base tags; the Docker socket mounted into a
-  container; ports bound to `0.0.0.0` for services meant to be internal; default credentials in
-  compose environment blocks.
-- `terraform` — publicly readable buckets, `0.0.0.0/0` ingress, IAM policies with `"*"` actions or
-  resources, unencrypted volumes and databases, secrets committed in `.tfvars` or present in state.
-- `firebaseRules` — `allow read, write: if true`, or rules that check `request.auth != null` and
-  nothing more, which is the Firebase spelling of the same wrong-scope flaw as above.
-- `electronMain` — `nodeIntegration: true`, `contextIsolation: false`, `sandbox: false`, remote
-  content loaded into a privileged window, IPC handlers that accept a path or a command from the
-  renderer, `shell.openExternal` on a renderer-supplied URL.
+**5. CI and IaC — the leftovers, not the whole class.** These used to be paths with no rules behind
+them, and this section used to tell you every finding there was yours. **That is no longer true.**
+`coverage.ciWorkflows`, `coverage.iacFiles` and `coverage.firebaseRules` are now graded subject
+sets, and the mechanical cases below are decided with exact evidence at `definitive` — re-reporting
+one adds a `likely` duplicate beside a `confirmed` finding, which reads as disagreement between the
+tool and itself.
+
+Already owned by rules — **do not re-report**: `pull_request_target` plus a checkout of the PR head
+(CG-CI-001), an injectable `${{ github.event.* }}` in a `run:` block (CG-CI-002), unpinned
+third-party actions (CG-CI-003), self-hosted runners on fork-reachable triggers (CG-CI-004), a
+missing `permissions:` block (CG-CI-005), a secret interpolated into a shell script (CG-CI-006),
+secrets baked into an image or a compose file (CG-IAC-001, CG-IAC-008), a container running as root
+(CG-IAC-002), `curl | sh` at build time (CG-IAC-003), unpinned base images (CG-IAC-004), the Docker
+socket mounted (CG-IAC-005), `privileged: true` (CG-IAC-006), a published database port
+(CG-IAC-007), host networking (CG-IAC-009), `0.0.0.0/0` ingress outside 80/443 (CG-IAC-010), public
+bucket ACLs (CG-IAC-011), a publicly-accessible managed database (CG-IAC-012), hardcoded Terraform
+credentials (CG-IAC-013), a committed state file (CG-IAC-014), `allow … if true` (CG-FB-001), and
+`request.auth != null` as the only condition (CG-FB-002).
+
+What is left for you here is what a rule cannot express:
+- **`coverage.ungradedSurfaces`** — this is your real work list for this section. Every row is a
+  file the engine saw and no rule graded, with the reason in the note. Today that is Electron main
+  files (`nodeIntegration: true`, `contextIsolation: false`, `sandbox: false`, remote content in a
+  privileged window, IPC handlers accepting a path or command from the renderer, `shell.openExternal`
+  on a renderer-supplied URL), Kubernetes manifests (privileged `securityContext`, `hostPath`
+  mounts, secrets in a manifest, `automountServiceAccountToken`), and any server framework whose
+  routes could not be enumerated — for that last one, find the routes by hand and say what the scan
+  could not see.
+- **`coverage.ciWorkflows.pass` and `coverage.iacFiles.pass`** — the same caveat as `tables.pass`
+  above. A pass means "none of the mechanical failures matched", not "this pipeline is safe". An
+  artifact upload whose glob catches `.env`; a `workflow_run` handler trusting the triggering run's
+  artifacts; a job that builds in an untrusted context and deploys from a trusted one; IAM policies
+  with `"*"` actions or resources; unencrypted volumes; secrets in `.tfvars`; a `COPY .` that pulls
+  `.env` into a layer. None of those is expressible as a single readable flag, which is exactly why
+  they are yours.
 
 Work the list in order. Do not wander outside it.
 
@@ -101,7 +118,13 @@ Work the list in order. Do not wander outside it.
 `CG-DB-001` (RLS off), `CG-DB-002` (permissive policy), `CG-DB-003` (deny-all), `CG-DB-004`
 (SECURITY DEFINER with no auth reference), `CG-DB-005` (no pinned `search_path`), `CG-DB-006`
 (service-role client reachable from the browser) and `CG-DB-COVERAGE` are already decided with
-exact evidence. Re-reporting them is noise.
+exact evidence. So is every `CG-CI-*`, `CG-IAC-*` and `CG-FB-*` listed in item 5. Re-reporting any
+of them is noise.
+
+The reliable test for whether something is yours: **does it have a ledger row already?** If the
+subject appears under `pass` or `fail` in `ciWorkflows`, `iacFiles` or `firebaseRules`, a rule has
+walked it and your contribution is only what the rule's disposition does not cover. If it appears
+under `ungradedSurfaces`, nothing graded it and the whole file is yours.
 
 Contradicting a `confirmed` finding requires a file and a line, not an opinion. `CG-DB-001` is
 `definitive` because the migration set *is* the schema within the static tier — if you can show RLS
@@ -160,8 +183,11 @@ Rules on that object:
 - `severity` is impact-if-true and is not reduced because you are unsure.
 - `assumption` is required on every finding.
 - `title_en` and `title_he` are both required. Prose bilingual; SQL, paths, and snippets English.
-- Subject ids must match the ledger's spelling: `sql-function:<schema>.<name>`, `table:<name>`. For
-  artifacts with no ledger set, use `artifact:<path>`.
+- Subject ids must match the ledger's spelling, copied verbatim from the coverage row — it is the
+  join key, and a paraphrased path is flagged `unanchored` by the reviewer validator. The spellings
+  you will need: `sql-function:<schema>.<name>`, `table:<name>`, `workflow:<path>`,
+  `dockerfile:<path>`, `compose:<path>`, `terraform:<path>`, `firebase-rules:<path>`,
+  `electron:<path>`, `k8s:<path>`.
 
 ## Report your coverage
 
@@ -174,10 +200,8 @@ Always end with counts against the enumerated totals, plus what you skipped:
     "tables_total": 31, "tables_undeterminable": 22, "tables_reviewed": 22,
     "tables_pass_policies_reread": 9,
     "dynamicTableRefs_total": 2, "dynamicTableRefs_reviewed": 2,
-    "artifacts": {
-      "workflows": "4/4", "dockerfiles": "1/1", "terraform": "0/9",
-      "firebaseRules": "0/0", "electronMain": "0/0"
-    },
+    "ungradedSurfaces_total": 3, "ungradedSurfaces_reviewed": 3,
+    "passRowsReread": { "ciWorkflows": "4/4", "iacFiles": "2/10", "firebaseRules": "1/1" },
     "skipped": [
       { "subject": "artifact:infra/*.tf",
         "reason": "9 Terraform files, no cloud provider credentials in scope to resolve module sources; not reviewed" }
@@ -189,9 +213,11 @@ Always end with counts against the enumerated totals, plus what you skipped:
 }
 ```
 
-For the artifact sets the denominator is the length of the list in `model.artifacts` — the engine
-enumerated presence and nothing more, so an unreviewed artifact is a genuine hole in the report.
-`priority_order` is your ranking of the undeterminable tables for the user's verify-query run.
+`ungradedSurfaces` is the denominator that matters most: every row there is a file nothing else in
+the pipeline graded, so an unreviewed one is a genuine hole rather than a second opinion.
+`passRowsReread` is how many `pass` rows you re-read for the flaws a rule cannot express — a low
+number there is honest and useful; a fabricated high one is not. `priority_order` is your ranking of
+the undeterminable tables for the user's verify-query run.
 
 Do not render the report and do not apply fixes.
 
