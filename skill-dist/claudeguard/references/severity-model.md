@@ -150,6 +150,8 @@ title_he:     כותרת קצרה
 severity:     P0 | P1 | P2 | P3 | P4  # impact if true; never reduced for uncertainty
 confidence:   confirmed | likely | needs-review   # DERIVED from evidence.strength — never written
 provenance:   rule | reviewer         # a deterministic rule, or a reviewer walking the inventory
+source:       null | gitleaks | semgrep | snyk | npm …   # which external tool established it;
+                                      # null when one of our own rules did
 tier:         static | passive-live | active-dast # how the underlying fact was obtained
 evidence:
   strength:   definitive | strong | weak | judgement
@@ -166,7 +168,45 @@ guard:        guard-recipes/<name>.md#<anchor>    # the fix to paste
 cwe:          CWE-<id>                # when applicable, else null
 owasp:        "A01:2021" | "LLM01" | "M1"         # web / LLM / mobile top-ten tag, else null
 autofixable:  true | false
+corroboration: []                     # other tools that independently reported the SAME weakness
+                                      # at the same file:line, each with its own severity. Usually
+                                      # empty; non-empty is a reason to look sooner.
 ```
+
+### `source` and `corroboration` — one defect, one finding
+
+Several tools now look at the same repository, and they overlap: Snyk's SAST covers ground semgrep
+covers, and both touch files this grader already has rules for. Printed straight through, one
+missing `USER` directive arrives three times with three severities, and the reader cannot tell that
+from three separate problems. **Volume is what destroys trust — not any single finding.**
+
+So the grader reconciles them. Findings that name the **same weakness class at the same
+`file:line`** are one defect, and it prints once:
+
+- **Only across sources.** Two findings from the *same* producer at one line are that producer's
+  enumeration, and it meant both (a compose file really can mount the Docker socket *and* run
+  privileged). Reconciliation is about the same fact seen twice.
+- **A native rule outranks any external tool.** This grader is the single severity authority and its
+  own rules read the file directly, so a commercial scanner's opinion about the same `file:line`
+  does not overwrite a grade we derived ourselves. Among external tools, the strongest evidence
+  wins.
+- **A weakness class we cannot name is never merged.** Two genuinely different defects can share a
+  line; collapsing those would hide one, and a hidden finding is worse than a visible duplicate.
+
+The absorbed findings are not deleted — they move to the survivor's `corroboration`, carrying their
+own severity and reason, and their coverage row is rewritten to point at the survivor so the
+"every `fail` row has a finding" cross-check still holds.
+
+### The external-analysis ceiling
+
+`source` also carries a cap. **Snyk and semgrep may never produce a `confirmed` finding**, and the
+grader throws if one does. Both report an *analysis* — a judgement about code this grader did not
+read for itself — and `confirmed` is what drives the headline verdict and the auto-fix gate. Snyk's
+reachability and dataflow are excellent and still are not a proof.
+
+gitleaks is deliberately **not** capped: it reports a credential's **value** at a `file:line`, which
+is precisely the evidence LAW 3 allows to close a P0, and which the user can check by opening the
+file.
 
 ### What changed, and why
 

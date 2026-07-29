@@ -397,6 +397,13 @@ advisories buries the two findings that are actually about this codebase.
 reachable from application code, and say which. If you cannot establish reachability, that is
 `undeterminable` with the package named — not a P0.
 
+`npm audit` and friends can never establish it, which is why every `CG-DEP-001` is capped at
+`needs-review` with the assumption stated. Snyk's reachability analysis can, and where it is
+available (`methodology/snyk-adapter.md`) this entry is settled with data instead of a caveat:
+`reachable` earns **`strong`** evidence and `likely`, and `not-reachable` stops being a finding at
+all — it becomes a coverage row reading *"present but unreached"*, with its limit named, because a
+`pass` is an instruction to stop looking and a dynamic `require` could still get there.
+
 ---
 
 ## The general rule

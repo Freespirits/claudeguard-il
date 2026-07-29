@@ -275,6 +275,49 @@ export function sastKind(cwes = [], ruleId = '', text = '') {
 
 const norm = p => String(p == null ? '' : p).split(/[\\/]/).join('/')
 
+/**
+ * Snyk reports ABSOLUTE paths — a real recorded subject was
+ * `snyk:iac-misconfig:C:/Users/hoya2/.../main.tf:1:SNYK-CC-TF-56`. Two things are wrong with that,
+ * and the second is the one that bites.
+ *
+ * A report carrying the author's home directory gets SHARED — screenshots, pasted into a group,
+ * handed to a client. That is what this tool is for, so it must not leak a username or a local
+ * layout on the way.
+ *
+ * And a subject id containing a machine-specific path is not STABLE. Subjects are what the user
+ * allowlists and what the benchmark's determinism check compares, so an absolute path means an
+ * allowlist entry silently stops matching the moment the same scan runs on another machine or in
+ * CI, and the finding comes back. Every other finding in ClaudeGuardIL is repo-relative; these are
+ * too.
+ *
+ * Applied once, here, rather than threaded through every normalizer: the normalizers' job is to
+ * understand a tool's shape, and where a path is rooted is a different concern.
+ */
+export function relativizeObservations(observations, root) {
+  const base = norm(resolve(String(root || '.'))).replace(/\/+$/, '')
+  const lowerBase = base.toLowerCase()
+  const strip = p => {
+    const n = norm(p)
+    if (!base || !n) return n
+    if (n.toLowerCase() === lowerBase) return '.'
+    // Case-insensitive compare: on Windows the drive letter's case is not meaningful, and snyk and
+    // node do not always agree on it.
+    return n.toLowerCase().startsWith(lowerBase + '/') ? n.slice(base.length + 1) : n
+  }
+  return (observations || []).map(o => {
+    const was = o.at?.file
+    if (!was) return o
+    const now = strip(was)
+    return {
+      ...o,
+      at: { ...o.at, file: now },
+      // The subject embeds the path verbatim, so rewriting one without the other would leave the
+      // finding and its id disagreeing about which file it is.
+      subject: typeof o.subject === 'string' ? o.subject.split(was).join(now) : o.subject,
+    }
+  })
+}
+
 /** Every observation is built here, so the shape cannot drift between the four scan types. */
 function observation(o) {
   return {
@@ -752,10 +795,43 @@ if (isMain) {
     } catch { return false }
   }
 
+  // On Windows an npm-installed CLI is a `snyk.cmd` shim, not an executable. Node refuses to spawn
+  // `.cmd`/`.bat` without a shell — the fix for CVE-2024-27980 — so `execFileSync('snyk', …)` threw
+  // ENOENT for every scan, `e.stdout` was empty, and each one reported "produced no output at all".
+  // The adapter failed closed, which is correct, but it was INERT on Windows: authenticated, no
+  // errors, four coverage rows, and it could never have produced a single finding. Dogfooding it is
+  // the only reason this was found.
+  //
+  // `shell: true` would fix it and open a command-injection seam — our argv carries a user-supplied
+  // `--image` value and the repo path, and Node deprecated arg-passing under `shell` for exactly
+  // that reason. So resolve the CLI's own JS entry point and run it with the node we are already
+  // running under: no shell, nothing concatenated, no seam.
+  const snykInvocation = (() => {
+    if (process.platform !== 'win32') return { cmd: 'snyk', prefix: [] }
+    const dirs = []
+    try {
+      for (const line of execSync('where snyk', { encoding: 'utf8' }).split(/\r?\n/)) {
+        const t = line.trim()
+        if (t) dirs.push(t.replace(/[\\/][^\\/]+$/, ''))
+      }
+    } catch { /* not on PATH; the availability check reports that separately */ }
+    try { dirs.push(execSync('npm root -g', { encoding: 'utf8' }).trim().replace(/[\\/]node_modules$/i, '')) } catch { /* npm absent */ }
+    for (const d of dirs) {
+      for (const rel of ['node_modules/snyk/bin/snyk', 'node_modules/snyk/dist/cli/index.js']) {
+        const p = resolve(d, rel)
+        if (existsSync(p)) return { cmd: process.execPath, prefix: [p] }
+      }
+    }
+    return null
+  })()
+
   const runSnyk = args => {
+    if (!snykInvocation) {
+      return { out: null, failed: true, stderr: 'snyk is on PATH as a .cmd shim but its JS entry point could not be located, so it could not be run without a shell' }
+    }
     try {
       return {
-        out: execFileSync('snyk', args, {
+        out: execFileSync(snykInvocation.cmd, [...snykInvocation.prefix, ...args], {
           cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
           maxBuffer: 128 * 1024 * 1024,
           // The CLI is interactive about folder trust unless it already knows the answer. A prompt
@@ -903,7 +979,9 @@ if (isMain) {
     }
   }
 
-  const observations = Object.values(scans).flatMap(s => s.observations || [])
+  // Rooted last, so every scan type gets it and no normalizer has to care where the repo lives.
+  const observations = relativizeObservations(
+    Object.values(scans).flatMap(s => s.observations || []), root)
 
   console.log(JSON.stringify({
     root,

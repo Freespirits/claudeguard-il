@@ -1,0 +1,14 @@
+[
+  {
+    "ok": false,
+    "code": 1022,
+    "error": "Failed to parse YAML file",
+    "path": "E:\\Tester\\.claude\\worktrees\\agent-a1d3ce0e8eec9732a\\bench\\corpus\\ci-fork-secret-theft\\fixed\\.github\\workflows\\pr-check.yml"
+  },
+  {
+    "ok": false,
+    "code": 1022,
+    "error": "Failed to parse YAML file",
+    "path": "E:\\Tester\\.claude\\worktrees\\agent-a1d3ce0e8eec9732a\\bench\\corpus\\ci-fork-secret-theft\\vulnerable\\.github\\workflows\\pr-check.yml"
+  }
+]

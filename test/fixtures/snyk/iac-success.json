@@ -1,0 +1,236 @@
+{
+  "meta": {
+    "isPrivate": true,
+    "isLicensesEnabled": false,
+    "ignoreSettings": {
+      "adminOnly": false,
+      "reasonRequired": false,
+      "disregardFilesystemIgnores": false,
+      "autoApproveIgnores": false,
+      "approvalWorkflowEnabled": false
+    },
+    "org": "freespirits",
+    "orgPublicId": "ab3588eb-869d-4848-9f0e-f9ad478f5e7d",
+    "policy": ""
+  },
+  "filesystemPolicy": false,
+  "vulnerabilities": [],
+  "dependencyCount": 0,
+  "licensesPolicy": null,
+  "ignoreSettings": null,
+  "targetFile": "main.tf",
+  "projectName": "iactest",
+  "org": "freespirits",
+  "policy": "",
+  "isPrivate": true,
+  "targetFilePath": "C:\\Users\\hoya2\\AppData\\Local\\Temp\\claude\\E--Tester\\7a2af226-7318-4e1b-9092-0e1dd07f401e\\scratchpad\\iactest\\main.tf",
+  "packageManager": "terraformconfig",
+  "path": "C:\\Users\\hoya2\\AppData\\Local\\Temp\\claude\\E--Tester\\7a2af226-7318-4e1b-9092-0e1dd07f401e\\scratchpad\\iactest",
+  "projectType": "terraformconfig",
+  "ok": false,
+  "infrastructureAsCodeIssues": [
+    {
+      "id": "SNYK-CC-TF-56",
+      "title": "Security group description is missing",
+      "severity": "low",
+      "isIgnored": false,
+      "subType": "VPC",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-56",
+      "isGeneratedByCustomRule": false,
+      "issue": "The description field is missing in the security group",
+      "impact": "Increases the security management overhead",
+      "resolve": "Set `description` attribute to meaningful statement",
+      "remediation": {
+        "terraform": "Set `description` attribute to meaningful statement"
+      },
+      "lineNumber": 1,
+      "iacDescription": {
+        "issue": "The description field is missing in the security group",
+        "impact": "Increases the security management overhead",
+        "resolve": "Set `description` attribute to meaningful statement"
+      },
+      "publicId": "SNYK-CC-TF-56",
+      "msg": "resource.aws_security_group[open].description",
+      "references": [
+        "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-security-groups.html"
+      ],
+      "path": [
+        "resource",
+        "aws_security_group[open]",
+        "description"
+      ],
+      "compliance": []
+    },
+    {
+      "id": "SNYK-CC-TF-124",
+      "title": "S3 bucket versioning disabled",
+      "severity": "low",
+      "isIgnored": false,
+      "subType": "S3",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-124",
+      "isGeneratedByCustomRule": false,
+      "issue": "S3 bucket versioning is disabled",
+      "impact": "Changes or deletion of objects will not be reversible",
+      "resolve": "For AWS provider < v4.0.0, set `versioning.enabled` attribute to `true`. For AWS provider >= v4.0.0, add aws_s3_bucket_versioning resource.",
+      "remediation": {
+        "cloudformation": "Set `Properties.VersioningConfiguration.Status` attribute to `Enabled`",
+        "terraform": "For AWS provider < v4.0.0, set `versioning.enabled` attribute to `true`. For AWS provider >= v4.0.0, add aws_s3_bucket_versioning resource."
+      },
+      "lineNumber": 9,
+      "iacDescription": {
+        "issue": "S3 bucket versioning is disabled",
+        "impact": "Changes or deletion of objects will not be reversible",
+        "resolve": "For AWS provider < v4.0.0, set `versioning.enabled` attribute to `true`. For AWS provider >= v4.0.0, add aws_s3_bucket_versioning resource."
+      },
+      "publicId": "SNYK-CC-TF-124",
+      "msg": "resource.aws_s3_bucket[b].versioning.enabled",
+      "references": [
+        "https://docs.aws.amazon.com/AmazonS3/latest/dev/Versioning.html"
+      ],
+      "path": [
+        "resource",
+        "aws_s3_bucket[b]",
+        "versioning",
+        "enabled"
+      ],
+      "compliance": []
+    },
+    {
+      "id": "SNYK-CC-TF-127",
+      "title": "S3 bucket MFA delete control disabled",
+      "severity": "low",
+      "isIgnored": false,
+      "subType": "S3",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-127",
+      "isGeneratedByCustomRule": false,
+      "issue": "S3 bucket will not enforce MFA login on delete requests",
+      "impact": "Object could be deleted without stronger MFA authorization",
+      "resolve": "Follow instructions in `https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html` to manually configure the MFA setting. For AWS provider < v4.0.0 set `versioning.mfa_delete` attribute to `true` in aws_s3_bucket resource. For AWS provider >= v4.0.0 set 'versioning_configuration.mfa_delete` attribute to `Enabled`. The terraform change is required to reflect the setting in the state file",
+      "remediation": {
+        "terraform": "Follow instructions in `https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html` to manually configure the MFA setting. For AWS provider < v4.0.0 set `versioning.mfa_delete` attribute to `true` in aws_s3_bucket resource. For AWS provider >= v4.0.0 set 'versioning_configuration.mfa_delete` attribute to `Enabled`. The terraform change is required to reflect the setting in the state file"
+      },
+      "lineNumber": 9,
+      "iacDescription": {
+        "issue": "S3 bucket will not enforce MFA login on delete requests",
+        "impact": "Object could be deleted without stronger MFA authorization",
+        "resolve": "Follow instructions in `https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html` to manually configure the MFA setting. For AWS provider < v4.0.0 set `versioning.mfa_delete` attribute to `true` in aws_s3_bucket resource. For AWS provider >= v4.0.0 set 'versioning_configuration.mfa_delete` attribute to `Enabled`. The terraform change is required to reflect the setting in the state file"
+      },
+      "publicId": "SNYK-CC-TF-127",
+      "msg": "resource.aws_s3_bucket[b].versioning.mfa_delete",
+      "references": [
+        "https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/dev/Versioning.html",
+        "https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMFADelete.html"
+      ],
+      "path": [
+        "resource",
+        "aws_s3_bucket[b]",
+        "versioning",
+        "mfa_delete"
+      ],
+      "compliance": []
+    },
+    {
+      "id": "SNYK-CC-TF-45",
+      "title": "S3 server access logging is disabled",
+      "severity": "low",
+      "isIgnored": false,
+      "subType": "S3",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-45",
+      "isGeneratedByCustomRule": false,
+      "issue": "The s3 access logs will not be collected",
+      "impact": "There will be no audit trail of access to s3 objects",
+      "resolve": "For AWS provider < v4.0.0, add `logging` block attribute. For AWS provider >= v4.0.0, add aws_s3_bucket_logging resource.",
+      "remediation": {
+        "cloudformation": "Set `Properties.LoggingConfiguration` attribute",
+        "terraform": "For AWS provider < v4.0.0, add `logging` block attribute. For AWS provider >= v4.0.0, add aws_s3_bucket_logging resource."
+      },
+      "lineNumber": 9,
+      "iacDescription": {
+        "issue": "The s3 access logs will not be collected",
+        "impact": "There will be no audit trail of access to s3 objects",
+        "resolve": "For AWS provider < v4.0.0, add `logging` block attribute. For AWS provider >= v4.0.0, add aws_s3_bucket_logging resource."
+      },
+      "publicId": "SNYK-CC-TF-45",
+      "msg": "input.resource.aws_s3_bucket[b].logging",
+      "references": [
+        "https://docs.aws.amazon.com/AmazonS3/latest/dev/ServerLogs.html"
+      ],
+      "path": [
+        "input",
+        "resource",
+        "aws_s3_bucket[b]",
+        "logging"
+      ],
+      "compliance": []
+    },
+    {
+      "id": "SNYK-CC-TF-1",
+      "title": "Security Group allows open ingress",
+      "severity": "medium",
+      "isIgnored": false,
+      "subType": "VPC",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-1",
+      "isGeneratedByCustomRule": false,
+      "issue": "That inbound traffic is allowed to a resource from any source instead of a restricted range",
+      "impact": "That potentially everyone can access your resource",
+      "resolve": "Set `cidr_block` attribute with a more restrictive IP, for example `192.16.0.0/24`",
+      "remediation": {
+        "cloudformation": "Set `Properties.SecurityGroupIngress.CidrIp` attribute with a more restrictive IP, for example `192.16.0.0/24`",
+        "terraform": "Set `cidr_block` attribute with a more restrictive IP, for example `192.16.0.0/24`"
+      },
+      "lineNumber": 2,
+      "iacDescription": {
+        "issue": "That inbound traffic is allowed to a resource from any source instead of a restricted range",
+        "impact": "That potentially everyone can access your resource",
+        "resolve": "Set `cidr_block` attribute with a more restrictive IP, for example `192.16.0.0/24`"
+      },
+      "publicId": "SNYK-CC-TF-1",
+      "msg": "input.resource.aws_security_group[open].ingress",
+      "references": [
+        "https://docs.aws.amazon.com/vpc/latest/userguide/VPC_SecurityGroups.html"
+      ],
+      "path": [
+        "input",
+        "resource",
+        "aws_security_group[open]",
+        "ingress"
+      ],
+      "compliance": []
+    },
+    {
+      "id": "SNYK-CC-TF-18",
+      "title": "S3 Bucket is publicly readable",
+      "severity": "medium",
+      "isIgnored": false,
+      "subType": "S3",
+      "documentation": "https://security.snyk.io/rules/cloud/SNYK-CC-TF-18",
+      "isGeneratedByCustomRule": false,
+      "issue": "That this S3 bucket is publicly readable without any authentication or authorization. ",
+      "impact": "That you may be leaking sensitive information to members of the public without realizing.",
+      "resolve": "Set `acl` attribute to `private`, or remove the attribute",
+      "remediation": {
+        "cloudformation": "Set `AccessControl` attribute to `private`, or remove the attribute",
+        "terraform": "Set `acl` attribute to `private`, or remove the attribute"
+      },
+      "lineNumber": 11,
+      "iacDescription": {
+        "issue": "That this S3 bucket is publicly readable without any authentication or authorization. ",
+        "impact": "That you may be leaking sensitive information to members of the public without realizing.",
+        "resolve": "Set `acl` attribute to `private`, or remove the attribute"
+      },
+      "publicId": "SNYK-CC-TF-18",
+      "msg": "input.resource.aws_s3_bucket[b].acl",
+      "references": [
+        "https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl"
+      ],
+      "path": [
+        "input",
+        "resource",
+        "aws_s3_bucket[b]",
+        "acl"
+      ],
+      "compliance": []
+    }
+  ]
+}
