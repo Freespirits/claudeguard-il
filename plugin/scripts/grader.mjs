@@ -1922,11 +1922,35 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
       continue
     }
 
-    // Structural pass: every allow rule in the file carries a condition that is neither `true` nor
-    // the bare signed-in check. What those conditions actually compare is not verified here — the
-    // auditors read them — so this is a pass on the two catastrophic shapes, not on the rules.
+    if ((r.timeLockedRules || []).length) {
+      const o = r.timeLockedRules[0]
+      const ops = (o.ops || []).join(', ') || 'read, write'
+      findings.push(finding({
+        id: 'CG-FB-003', subject,
+        title_en: `Firebase rules grant ${ops} to anyone until a date ("test mode")`,
+        title_he: `כללי Firebase מתירים ${ops} לכל אחד עד לתאריך ("מצב בדיקה")`,
+        // P0 impact-if-true (total unauthenticated access), but `strong`→`likely`, not `definitive`:
+        // the pattern is unmistakable, yet the grader is clock-free by construction and cannot evaluate
+        // whether the expiry date is in the future (wide open now) or the past (deny-all now). It is
+        // reported as a prominent unproven P0, and its assumption names the one thing to check.
+        severity: 'P0', evidence: 'strong',
+        why: 'The condition gates access on `request.time` against a fixed date and checks no identity — the Firebase "start in test mode" default. Until that date, every request from anyone is allowed; access is scoped by a wall clock, not by who is asking.',
+        at: firstAt(r.file, o.line, `allow ${ops}: if ${o.condition}`),
+        exploit: 'The Firebase config object ships in your client bundle by design. Before the expiry date, anyone reads it out of DevTools and queries the database directly with the SDK — no account needed.',
+        impact: 'Total unauthenticated read/write until the date, then a hard denial of ALL access. Either way the rule is wrong: access must be scoped by identity, not by a wall-clock date.',
+        guard: 'guard-recipes/firebase-rules.md#owner-scoped',
+        cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: 'That the expiry date has not already passed. If it has, these rules now deny everyone and the app is broken rather than exposed — the fix is the same: replace the time check with an identity check.',
+      }))
+      ledger.record('firebaseRules', subject, 'fail', `${r.timeLockedRules.length} time-locked "test mode" rule(s)`)
+      continue
+    }
+
+    // Structural pass: every allow rule in the file carries a condition that is neither `true`, the
+    // bare signed-in check, nor a time-lock. What those conditions actually compare is not verified
+    // here — the auditors read them — so this is a pass on the catastrophic shapes, not on the rules.
     ledger.record('firebaseRules', subject, 'pass',
-      `${r.dialect} rules: no unconditional or signed-in-only grant`)
+      `${r.dialect} rules: no unconditional, signed-in-only, or time-locked grant`)
   }
 }
 

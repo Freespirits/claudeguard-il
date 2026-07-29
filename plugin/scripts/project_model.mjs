@@ -2297,7 +2297,7 @@ for (const p of artifacts.firebaseRules) {
   }
   // Firestore / Storage rules language. Comments use `//`, which stripHash blanks.
   const { code } = stripHash(raw)
-  const openRules = [], authOnlyRules = []
+  const openRules = [], authOnlyRules = [], timeLockedRules = []
   const re = /allow\s+([a-z, ]+?)\s*(?::\s*if\s+([^;{]+))?;/gi
   let m
   while ((m = re.exec(code))) {
@@ -2308,8 +2308,15 @@ for (const p of artifacts.firebaseRules) {
     // `if request.auth != null` means ANY signed-in user, including one who just self-registered.
     // Not open to the world, but not owner-scoped either — the cross-tenant case.
     else if (/^request\.auth\s*!=\s*null$/i.test(cond)) authOnlyRules.push({ line, ops, condition: cond })
+    // The Firebase console "start in test mode" default: `allow ...: if request.time < timestamp.date(Y,M,D)`.
+    // Access is gated on the wall clock, not on identity — until the date, every request from anyone is
+    // allowed. It fell through to a structural PASS before, because it is neither `true` nor the bare
+    // signed-in check, so a database left in test mode graded green. The guard is "no `auth` in the
+    // condition": an `... && request.auth != null` expiry has SOME identity component and is a different
+    // (weaker) shape, so it is deliberately not matched here.
+    else if (/\brequest\.time\b/i.test(cond) && !/\brequest\.auth\b/i.test(cond)) timeLockedRules.push({ line, ops, condition: cond })
   }
-  firebaseRules.push({ file: p, dialect: /storage/i.test(p) ? 'storage' : 'firestore', openRules, authOnlyRules })
+  firebaseRules.push({ file: p, dialect: /storage/i.test(p) ? 'storage' : 'firestore', openRules, authOnlyRules, timeLockedRules })
 }
 
 // ---------- finish the discovery ledger ----------

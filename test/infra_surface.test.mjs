@@ -559,7 +559,35 @@ test('owner-scoped Firebase rules pass', () => {
   }))
   assert.equal(find(r, 'CG-FB-001'), undefined)
   assert.equal(find(r, 'CG-FB-002'), undefined)
+  assert.equal(find(r, 'CG-FB-003'), undefined)
   assert.equal(r.coverage.firebaseRules.counts.pass, 1)
+})
+
+test('the "test mode" time-lock is a P0, not a structural pass (CG-FB-003)', () => {
+  // The Firebase console default: `allow ...: if request.time < timestamp.date(...)`. It used to fall
+  // through to a PASS because it is neither `true` nor the bare signed-in check — so a database left
+  // in test mode graded green. Until the date it is wide open to anyone. `likely`, not `confirmed`,
+  // because the grader is clock-free and cannot know whether the date has passed.
+  const r = grade(modelOf({
+    'package.json': '{}',
+    'firestore.rules': "rules_version = '2';\nservice cloud.firestore {\n  match /{document=**} {\n    allow read, write: if request.time < timestamp.date(2025, 6, 1);\n  }\n}\n",
+  }))
+  const f = find(r, 'CG-FB-003')
+  assert.ok(f, 'test-mode rules must be caught, not passed')
+  assert.equal(f.severity, 'P0')
+  assert.equal(f.confidence, 'likely', 'clock-free: we cannot prove the date is still in the future')
+  assert.equal(r.coverage.firebaseRules.counts.pass, 0, 'it must NOT be a structural pass')
+  assert.equal(r.coverage.firebaseRules.counts.fail, 1)
+  // An unproven P0 open → not a false green, and not a false red either.
+  assert.equal(r.verdict.level, 'unknown')
+})
+
+test('a time-lock that ALSO checks identity is not caught by CG-FB-003 (it has an auth component)', () => {
+  const r = grade(modelOf({
+    'package.json': '{}',
+    'firestore.rules': "rules_version = '2';\nservice cloud.firestore {\n  match /u/{uid} {\n    allow read: if request.auth != null && request.time < timestamp.date(2025, 6, 1);\n  }\n}\n",
+  }))
+  assert.equal(find(r, 'CG-FB-003'), undefined, 'the auth component takes it out of the pure time-lock shape')
 })
 
 test('a commented-out open rule does not fire, and does not hide a real one', () => {
