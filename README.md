@@ -6,23 +6,40 @@
 
 ### קלוד — הקהילה הישראלית · Claude — the Israeli Community
 
+**v0.3.0** · zero runtime dependencies · 616 tests · bilingual HE/EN
+
 </div>
 
-**Security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
-report of real vulnerabilities with evidence, and paste-ready hardening code — for web, AI/LLM,
-Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
+**A security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
+report of real vulnerabilities — with evidence (`file:line`), an attack scenario, and paste-ready
+hardening code — for web, AI/LLM, Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
+It computes what can be computed about a codebase, then grades those observations into a report a
+non-expert can act on.
 
 > **Community project — NOT an official Anthropic product.**
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic. Built for the
-> [Claude Israeli community](https://www.facebook.com/groups/cladue).
+> [Claude Israeli community](https://www.facebook.com/groups/cladue). MIT licensed.
 
-**What the numbers mean, before anyone quotes them.** The benchmark gate stands at **0 regressions
-across 18 pinned detections in 7 vulnerable scenarios, and 0 unexpected confirmed findings across 8
-clean variants** — a corpus this project wrote. That is regression protection and a cry-wolf gate,
-both real. **Real-world detection rate: not yet measured.** An earlier framing led with "recall 100%
-/ precision 100%", which reads as a detection claim and is a tautology in a golden-file benchmark;
-retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md), with what would change it in
-[`ROADMAP.md`](ROADMAP.md).
+---
+
+## What the numbers mean, before anyone quotes them
+
+This project measures itself two ways, and keeps them strictly apart — because conflating them is
+exactly the overclaim it exists to prevent.
+
+- **The regression gate** (`bench/run.mjs`, a corpus this project wrote) stands at **0 regressions
+  across 19 pinned detections, and 0 unexpected confirmed findings across 9 clean variants**,
+  deterministic. That is genuine regression protection and a cry-wolf gate — but its recall is 100%
+  *by construction*, so it is **not** a detection rate. The earlier "recall 100% / precision 100%"
+  framing read as one and is retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md).
+- **The wild benchmark** (`bench/wild.mjs`) is the honest answer: **11 real repos at pinned commit
+  SHAs, labelled by a reviewer blind to this tool**, in a neutral CWE vocabulary. First measured
+  numbers: **10/16 detected on covered categories (63%), 83% on the target profile
+  (Next.js/Supabase/Firebase/AI), 0 candidate false positives.** It also caught four real cry-wolf
+  bugs on reference code, all fixed. This is a measurement, not a gate — and every repo added
+  tightens it.
+
+**A clean scan is not proof of safety. It is proof that nothing was proved.**
 
 ---
 
@@ -32,6 +49,38 @@ retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md), with what would change it 
 ומקבלים דוח דו-לשוני (עברית ואנגלית) עם ממצאים מדורגים (P0–P4), ראיות (`file:line`), תרחיש תקיפה,
 והתיקון המומלץ. שלוש רמות בדיקה: סטטית (ברירת מחדל, בטוחה), live פסיבית, ובדיקות אקטיביות (בדיקת
 עשן, לא סורק) — שתי האחרונות דורשות בעלות על היעד ואישור מפורש.
+
+**שני צירים, לא אחד.** מלבד ממצאי אבטחה (פריצה), הכלי מדרג כעת גם ממצאי **תאימות** (חשיפה משפטית) —
+נגישות לפי ת"י 5568 / WCAG 2.0 AA, ופרטיות לפי תקנות הגנת הפרטיות (אבטחת מידע). ממצא תאימות לעולם
+אינו משפיע על ציון האבטחה.
+
+---
+
+## Two pillars — a lawsuit is not a breach
+
+A vibecoded app gets its owner in trouble two ways, and only one of them is a hacker. The other is a
+**regulator or a plaintiff** — often the more immediate risk. So every finding carries a
+`pillar: 'security' | 'compliance'`, and the two are held rigorously apart.
+
+| Pillar | What it is | Severity means | Touches the security badge? |
+|---|---|---|---|
+| **security** | a breach path (exposed key, open RLS, IDOR, prompt injection) | impact **if the finding is real** (P0–P4) | yes — the headline verdict |
+| **compliance** | a legal exposure (accessibility, privacy) | **legal-exposure-if-unfixed**, in the statute's terms | **never** — its own axis, no compliance P0 |
+
+The security badge is computed over security findings **only**; the benchmark's decision-rate ratchet
+and false-positive gate are scoped to security — so a new compliance domain can never lower the
+security bar or redden the security badge.
+
+- **Compliance · Domain 1 — Accessibility (ת"י 5568 חלק 1 / WCAG 2.0 AA). Shipped.** A pure JSX/HTML
+  scan grades **CG-A11Y-001..007** (img alt, `html lang`, form labels, icon-button names, video
+  captions, positive `tabIndex`, keyboard-operable clickables). Every false-positive trap is engine
+  data — an empty `alt=""` is valid, a `{...spread}` abstains, decorative `aria-hidden` opts out —
+  and the legally-mandatory accessibility statement is a *declared* row, never a cry-wolf P1 on a
+  fresh scaffold.
+- **Compliance · Domain 2 — Privacy / data security (תקנות הגנת הפרטיות 2017). Documented.** A thin
+  graded slice (cleartext transit, session-cookie flags) plus declared obligation rows tied to each
+  תקנה — grade-or-declare taken to its limit, because most of the regulation is paperwork invisible
+  to a repo.
 
 ---
 
@@ -46,9 +95,10 @@ Scans your whole repo, runs scanners, and can generate & apply fixes.
 ```
 Then, in your project:
 ```
-/cg-scan            # static audit (Tier 0) — safe, read-only, the default
+/cg-scan            # static audit (Tier 0) — safe, read-only, the default.
+                    #   Grades security AND compliance (accessibility) in one pass.
 /cg-intent          # build/correct claudeguard.intent.yml in a few plain questions — turns the
-                    #   business-logic audit from a guess into a review
+                    #   business-logic audit from a guess (assumed) into a review (confirmed)
 /cg-harden          # generate paste-ready guards for the findings
 /cg-fix             # apply guards (dry-run diff first, you confirm)
 /cg-live  <url>     # Tier 1 passive live checks (target you own)
@@ -86,18 +136,35 @@ security"*. Same knowledge and bilingual report; no repo scanning, subagents, or
 > [`ERRATA.md`](ERRATA.md). See [`ROADMAP.md`](ROADMAP.md) for what real dynamic testing would
 > require and why it is gated behind work that is deliberately unfinished.
 
-Copy `core/authorization/SCOPE.example.yml` to `claudeguard.scope.yml` and fill it in to enable
-Tiers 1–2. **Only test systems you own or are authorized in writing to test.**
+> **The gate came before the arsenal, on purpose.** `plugin/scripts/dynamic_gate.mjs` — three tiers,
+> per-tool allowlists, deny-by-default, a kill switch, an append-only audit log, and 66 adversarial
+> tests including every host-matching bypass we could invent — is finished and wired to nothing,
+> because no offensive adapter exists yet. *"A scanner that can be argued into attacking the wrong
+> host is worse than no scanner."* Copy `core/authorization/SCOPE.example.yml` to
+> `claudeguard.scope.yml` to enable Tiers 1–2. **Only test systems you own or are authorized in
+> writing to test.**
 
 ---
 
 ## What it looks for
 
-Secrets in the client/repo · Supabase RLS & `service_role` exposure · Firebase rules ·
-auth/authorization & IDOR · input validation & mass assignment · SQL/XSS/SSRF injection ·
-security headers/CORS/cookies · rate limiting · **LLM risks** (key exposure, prompt injection,
-agent-tool abuse, cost DoS) · Android/iOS manifest & storage · Electron isolation & IPC ·
-Docker/K8s/Terraform · GitHub Actions & dependency/supply-chain. Full catalog in `core/checks/`.
+**Security.** Secrets in the client/repo · Supabase RLS & `service_role` exposure · Firebase rules ·
+auth/authorization & IDOR · input validation & mass assignment · SQL/XSS/SSRF injection (delegated to
+semgrep/Snyk, [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md)) · security
+headers/CORS/cookies · rate limiting · **LLM risks** (key exposure, prompt injection, agent-tool
+abuse, cost DoS) · Android/iOS manifest & storage · Electron isolation & IPC · Docker/K8s/Terraform ·
+GitHub Actions & dependency/supply-chain.
+
+**Vibecoder hygiene** — four cheap, high-signal greps, each capped at `likely` because a regex sees
+the sink but not whether it matters: **CG-HYG-001** placeholder credential shipped in source
+(`admin123`, `sk-xxxx`), **-002** base64 used *as* encryption on a secret, **-003** an auth token in
+`localStorage`, **-004** a TODO left inside auth code. Measured at **0 findings on four clean
+reference repos and 0 on this repo's own source.**
+
+**Compliance** — accessibility (ת"י 5568 / WCAG 2.0 AA) and privacy (data-security regs); see the
+two-pillar section above. Full catalog in `core/checks/`.
+
+---
 
 ## Built for non-experts (plain Hebrew)
 
@@ -107,23 +174,25 @@ what is actually exposed, why it matters, and the one thing to do. There is also
 beginner's guide, [`core/plain-language/concepts.he.md`](core/plain-language/concepts.he.md), that
 teaches the underlying ideas once in plain Hebrew — the browser-vs-server model, `service_role` vs
 the anon key, RLS, IDOR, prompt injection, denial-of-wallet — independent of any scan. The
-per-finding text lives in [`core/plain-language/findings.md`](core/plain-language/findings.md),
-keyed by finding id, and ships to both the plugin and the claude.ai skill.
+per-finding text lives in [`core/plain-language/findings.md`](core/plain-language/findings.md), keyed
+by finding id, and ships to both the plugin and the claude.ai skill.
+
+---
 
 ## How it works
 
-Most AI security review reads files one at a time and forms an impression. That misses things for
-a boring reason: a model looking at `orders/route.ts` cannot know whether the `orders` table has
-RLS, because the answer is in a different file — or in no file at all. ClaudeGuardIL puts a
-deterministic layer underneath the model so it reasons over computed facts instead.
+Most AI security review reads files one at a time and forms an impression. That misses things for a
+boring reason: a model looking at `orders/route.ts` cannot know whether the `orders` table has RLS,
+because the answer is in a different file — or in no file at all. ClaudeGuardIL puts a deterministic
+layer underneath the model so it reasons over computed facts instead.
 
 **Engine → Facts → Grader → Findings → Reviewers → Report.**
 
 - The **engine** (`plugin/scripts/project_model.mjs`) builds the import graph, classifies the
-  client/server boundary, traces env-var flow, and inventories every route, table, LLM call site
-  and Supabase client. It emits **Facts** and has no opinion about how dangerous anything is.
-- The **grader** (`plugin/scripts/grader.mjs`) is the single authority on severity. Every rule
-  walks an enumerable set and decides each member, so nothing the engine discovered is left ungraded.
+  client/server boundary, traces env-var flow, and inventories every route, table, LLM call site and
+  Supabase client. It emits **Facts** and has no opinion about how dangerous anything is.
+- The **grader** (`plugin/scripts/grader.mjs`) is the single authority on severity. Every rule walks
+  an enumerable set and decides each member, so nothing the engine discovered is left ungraded.
 - **Reviewers** (the subagents) then work the list of things the rules could not decide — business
   logic, workflow flaws, authorization that is present but wrong. Their findings are marked as
   judgement and can never be reported as proven.
@@ -137,59 +206,70 @@ What that buys you, stated so you can check it rather than take our word for it:
 | **Reproducible** — the same repo always yields the same severities | Severity is deterministic code, and confidence is a pure function of evidence. Run it twice. |
 | **Explicit about what it could not check** — a quiet report is not a safe one | Anything unverifiable is listed as `undeterminable` with the reason, not silently dropped. |
 
-**The honest caveat, stated plainly:** the engine is regex plus lightweight parsing, not a
-type-aware AST. So it can prove it accounted for every subject it *discovered* — not that it
-discovered every subject. Dynamic imports, metaprogramming, and unusual framework constructs can
-escape enumeration. That gap is precisely what the **discovery-coverage** axis exists to surface: a
-report tells you what it parsed, what it skipped, and where it could only partially model something,
-so a partial scan can never quietly pass for a complete one. A clean report is not proof of safety —
-it is a record of what was checked.
+**The honest caveat, stated plainly:** the engine is regex plus lightweight parsing, not a type-aware
+AST. So it can prove it accounted for every subject it *discovered* — not that it discovered every
+subject. Dynamic imports, metaprogramming, and unusual framework constructs can escape enumeration.
+That gap is precisely what the **discovery-coverage** axis exists to surface: a report tells you what
+it parsed, what it skipped, and where it could only partially model something, so a partial scan can
+never quietly pass for a complete one.
 
-Three rules keep it honest, and each exists because breaking it produced a real, embarrassing bug:
+### Three laws keep it honest
+Each exists because breaking it produced a real, embarrassing bug:
 
 1. **Nothing passes because a keyword was present.** A route containing `getUser()` is reported as
    *unverified*, never as safe — from a regex, a correct check is indistinguishable from one whose
    result is ignored. Those rows become the reviewer's work list.
-2. **Everything enumerated is accounted for.** A subject that quietly falls out of the ledger is
-   how "we found nothing" comes to mean "we looked nowhere".
+2. **Everything enumerated is accounted for.** A subject that quietly falls out of the ledger is how
+   "we found nothing" comes to mean "we looked nowhere".
 3. **A variable name is not a credential.** `FOO_API_KEY` in a name never justifies a P0 on its own.
 
 Severity says how bad a finding is *if it is real*, and is never discounted because we are unsure —
 that is what confidence is for. The headline verdict counts only **confirmed** findings, so an
-unproven P0 is still shown to you but does not turn the badge red.
+unproven P0 is still shown to you but does not turn the badge red. And a `clean` verdict is only
+emitted when nothing confirmed *and* nothing unproven-but-catastrophic is open *and* discovery
+coverage cleared its floor — otherwise the level is `unknown` ("not proven safe"), never `clean`.
 
-The regression suite includes a deliberately **correct** app — t3-env, user-scoped Supabase
-clients, RLS with `auth.uid()` policies, middleware auth — and asserts it produces **zero**
-findings. A security tool that cries wolf at correct code teaches people to ignore it, so that
-test is treated as seriously as the ones that catch real bugs.
+The regression suite includes a deliberately **correct** app — t3-env, user-scoped Supabase clients,
+RLS with `auth.uid()` policies, middleware auth — and asserts it produces **zero** findings. A
+security tool that cries wolf at correct code teaches people to ignore it, so that test is treated as
+seriously as the ones that catch real bugs.
+
+---
 
 ## How it's built
 
 `core/` is the single source of truth (plain markdown). `scripts/build.mjs` copies it into both
-wrappers, so one edit updates the plugin and the claude.ai skill together. Scanning is **hybrid**:
-it uses `gitleaks` / `semgrep` / `npm audit` when installed and falls back to Claude reading the
-code when they aren't — it never force-installs anything. The engine and grader have **zero**
-runtime dependencies, which CI enforces; you can run them with nothing but Node.
+wrappers, so one edit updates the plugin and the claude.ai skill together, and CI fails the build if
+the generated copies drift. Scanning is **hybrid**: it uses `gitleaks` / `semgrep` / `npm audit` /
+**Snyk** (reachability + dataflow) when installed, and falls back to Claude reading the code when they
+aren't — it never force-installs anything, and a tool that could not run becomes a declared
+`undeterminable` coverage row, never a silent pass. Findings also render to **SARIF 2.1.0** for GitHub
+Code Scanning. The engine and grader have **zero** runtime dependencies, which CI enforces; you can
+run them with nothing but Node ≥ 20.
+
+---
 
 ## Repo layout
 ```
 core/          shared knowledge (checks, guard-recipes, methodology, severity, i18n, authorization)
 plugin/        the Claude Code plugin (skills, agents, hooks, engine + grader scripts)
 skill-dist/    the claude.ai skill (assembled by build.mjs)
+bench/         run.mjs — the regression gate;  wild/ — 11 real repos, blind-labelled, real numbers
 scripts/       build.mjs
-test/          the regression suite, including the "correct app must stay quiet" fixture
+test/          the 616-test suite, including the "correct app must stay quiet" fixture
 sample-vulnerable-app/  a deliberately-insecure app to test against
 CONTEXT.md     the domain model — the vocabulary this codebase is written in
+ROADMAP.md · ERRATA.md   what's next, and every claim we made and later found wrong
 ```
 
 ## Why is there a "vulnerable app" in this repo?
-`sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be
-run against known-bad code. Its problems are at the **code** level (exposed `service_role` key,
-no RLS, IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it
-does trip Dependabot — every alert on this repository points at a fixture, and none of them is
-reachable from anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md), and
-**ERR-002** in [`ERRATA.md`](ERRATA.md) for the contradictory claims this README used to make about
-those dependencies.
+`sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be run
+against known-bad code. Its problems are at the **code** level (exposed `service_role` key, no RLS,
+IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it does trip
+Dependabot — every alert on this repository points at a fixture, and none of them is reachable from
+anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md), and **ERR-002** in
+[`ERRATA.md`](ERRATA.md) for the contradictory claims this README used to make about those
+dependencies.
 
 ## Errata
 
@@ -202,8 +282,15 @@ was announced before it was made (ERR-005), and the benchmark headline (ERR-006)
 The ledger exists because the failure this tool is built to catch — a confident statement nobody
 checked — is one we keep making too. Nothing is quietly deleted; each entry quotes the old claim.
 
+## How to judge this project
+
+Use it as a **first gate**, not a sign-off. It is stronger than an ordinary PR review for security
+coverage and completeness, and weaker than an experienced AppSec reviewer on subtle logic. It is not
+a pentest. The combination that works: this first, then a security-focused review, then authenticated
+testing for anything production-critical.
+
 ## Disclaimer
-Provided as-is, no warranty. A clean scan is **not** proof of safety. You are responsible for
-what you scan and for the scope of any live/DAST testing. Not affiliated with Anthropic.
+Provided as-is, no warranty. A clean scan is **not** proof of safety. You are responsible for what you
+scan and for the scope of any live/DAST testing. Not affiliated with Anthropic.
 
 MIT licensed — see `LICENSE`.
