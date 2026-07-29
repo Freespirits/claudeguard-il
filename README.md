@@ -2,6 +2,12 @@
 
 ![ClaudeGuardIL — security for vibecoded apps](assets/banner.png)
 
+<div align="center">
+
+### קלוד — הקהילה הישראלית · Claude — the Israeli Community
+
+</div>
+
 **Security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
 report of real vulnerabilities with evidence, and paste-ready hardening code — for web, AI/LLM,
 Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD.
@@ -101,7 +107,7 @@ deterministic layer underneath the model so it reasons over computed facts inste
   client/server boundary, traces env-var flow, and inventories every route, table, LLM call site
   and Supabase client. It emits **Facts** and has no opinion about how dangerous anything is.
 - The **grader** (`plugin/scripts/grader.mjs`) is the single authority on severity. Every rule
-  walks an enumerable set and decides each member, which is how completeness is achieved.
+  walks an enumerable set and decides each member, so nothing the engine discovered is left ungraded.
 - **Reviewers** (the subagents) then work the list of things the rules could not decide — business
   logic, workflow flaws, authorization that is present but wrong. Their findings are marked as
   judgement and can never be reported as proven.
@@ -110,9 +116,18 @@ What that buys you, stated so you can check it rather than take our word for it:
 
 | Claim | How to verify |
 |---|---|
-| **Complete enumeration** — every route, table and env var is accounted for | The report's coverage section: `pass + fail + undeterminable + allowlisted` must equal the number enumerated. It is asserted at runtime. |
+| **Complete accounting of what it found** — every route, table and env var the engine *discovered* is graded | The report's analysis-coverage section: `pass + fail + undeterminable + allowlisted` equals the number enumerated. Asserted at runtime. |
+| **Honest about what it might have missed** — it reports what it could not *see*, not just how it graded what it saw | A separate discovery-coverage section: files parsed vs skipped (with reasons), routes it could only partially model, unresolved imports. |
 | **Reproducible** — the same repo always yields the same severities | Severity is deterministic code, and confidence is a pure function of evidence. Run it twice. |
 | **Explicit about what it could not check** — a quiet report is not a safe one | Anything unverifiable is listed as `undeterminable` with the reason, not silently dropped. |
+
+**The honest caveat, stated plainly:** the engine is regex plus lightweight parsing, not a
+type-aware AST. So it can prove it accounted for every subject it *discovered* — not that it
+discovered every subject. Dynamic imports, metaprogramming, and unusual framework constructs can
+escape enumeration. That gap is precisely what the **discovery-coverage** axis exists to surface: a
+report tells you what it parsed, what it skipped, and where it could only partially model something,
+so a partial scan can never quietly pass for a complete one. A clean report is not proof of safety —
+it is a record of what was checked.
 
 Three rules keep it honest, and each exists because breaking it produced a real, embarrassing bug:
 
