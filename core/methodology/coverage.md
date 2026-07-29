@@ -26,9 +26,11 @@ because it was boring. A subject that silently falls out of the ledger is how *"
 nothing"* comes to mean *"we looked nowhere"*.
 
 The subject sets, at minimum: `envVars`, `routes`, `tables`, `dynamicTableRefs`, `sqlFunctions`,
-`llmSites`, `supabaseClients`, `nextConfigKeys`. Declare each set even when it is empty —
-`enumerated: 0` is a real and useful statement ("this project has no SQL functions"), and it is
-different from not having looked.
+`llmSites`, `supabaseClients`, `nextConfigKeys`, `mobileArtifacts`, `exportedComponents`,
+`ciWorkflows`, `iacFiles`, `firebaseRules` — and `ungradedSurfaces`, the grade-or-declare net
+(`grade-or-declare.md`) that holds every artifact class you saw and no rule owns. Declare each set
+even when it is empty — `enumerated: 0` is a real and useful statement ("this project has no SQL
+functions"), and it is different from not having looked.
 
 ---
 

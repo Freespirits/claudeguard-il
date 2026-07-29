@@ -1,0 +1,6 @@
+{
+  "name": "fb-fixed",
+  "dependencies": {
+    "firebase": "10.13.0"
+  }
+}

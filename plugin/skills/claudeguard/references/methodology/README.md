@@ -92,9 +92,11 @@ these files is downstream of a specific time that happened.
 | File | Read it when |
 |------|--------------|
 | `methodology/enumerate.md` | Building the inventory — routes, tables, env vars, LLM call sites — and deciding whether it is complete. |
+| `methodology/discovery.md` | Reporting what could be seen at all — the coverage axis that comes before the ledger. |
 | `methodology/grade.md` | Turning Facts into Findings: severity, evidence, confidence, the verdict. |
 | `methodology/false-positives.md` | **Always, before reporting anything.** The catalogue of wrong readings. |
 | `methodology/coverage.md` | Closing the audit: the ledger arithmetic and how to render it. |
+| `methodology/grade-or-declare.md` | Adding a new artifact type, or meeting an `ungradedSurfaces` row: why every discovered class must be graded or declared. |
 
 Related: `severity-model.md` (the P0–P4 ladder and the finding schema), `checks/*.md` (what to
 look for per stack), `guard-recipes/*.md` (the fix to paste).

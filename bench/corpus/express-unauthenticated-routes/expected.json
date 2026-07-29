@@ -1,0 +1,16 @@
+{
+  "notes": "INTENT: routes declared as CALLS rather than as files. Before audit fix C an Express app enumerated ZERO routes, LAW 2 was still satisfied because 0 === 0, and the coverage table printed a confident 'routes: 0' over an HTTP surface nobody had looked at — a silent blind spot, which is worse than a missed finding because it reads as completeness. All three handlers here are unauthenticated, and each must appear as its OWN subject: one file legitimately declares many routes, so the method and path are part of the subject or two rows would collide. Confidence is `needs-review` and not higher on purpose — the absence of an auth token in a handler is not proof, since the check could live in a helper this pass does not follow, and LAW 1 forbids turning a token's presence or absence into a verdict. Only the POST is asked to validate a body: the DELETE replies with res.json() and never reads one, and demanding validation there is the noise-on-correct-code failure that gets a report ignored. The fixed variant applies auth and a rate limit as app-level middleware before any route is registered — the recommended Express pattern, and the direct analogue of Next's middleware.ts — validates the POST body with zod, and scopes every query by the caller's id, so it must be completely silent.",
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-WEB-001", "severity": "P1", "confidence": "needs-review", "subject": "route:server.js:POST /api/orders", "at": "server.js:11" },
+      { "id": "CG-WEB-001", "severity": "P1", "confidence": "needs-review", "subject": "route:server.js:DELETE /api/orders/:id", "at": "server.js:15" },
+      { "id": "CG-WEB-001", "severity": "P2", "confidence": "needs-review", "subject": "route:server.js:GET /api/orders/:id", "at": "server.js:7" },
+      { "id": "CG-WEB-002", "severity": "P2", "confidence": "needs-review", "subject": "route:server.js:POST /api/orders", "at": "server.js:11" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

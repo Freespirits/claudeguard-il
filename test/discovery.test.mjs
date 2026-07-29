@@ -33,7 +33,7 @@ function modelOf(files) {
 // without a reason, and the file ledger always adds up.
 // ---------------------------------------------------------------------------
 
-test('the file ledger always reconciles: discovered = parsed + unsupported + oversized + readErrors', () => {
+test('the file ledger always reconciles: discovered = parsed + configParsed + unsupported + oversized + readErrors', () => {
   const m = modelOf({
     'package.json': '{"name":"x"}',              // unsupported (not code)
     'src/a.ts': 'export const a = 1',            // parsed
@@ -43,10 +43,28 @@ test('the file ledger always reconciles: discovered = parsed + unsupported + ove
     'big.ts': 'x'.repeat(1.6 * 1024 * 1024),     // oversized (> 1.5MB cap)
   })
   const c = m.discovery.counts
-  assert.equal(c.filesParsed + c.unsupported + c.oversized + c.readErrors, c.filesDiscovered,
-    'the four categories must sum to the discovered count, or the ledger is lying')
+  assert.equal(c.filesParsed + c.configParsed + c.unsupported + c.oversized + c.readErrors, c.filesDiscovered,
+    'the five categories must sum to the discovered count, or the ledger is lying')
   assert.equal(m.discovery.reconciles, true)
   assert.equal(c.oversized, 1, 'the 1.6MB file is over the cap')
+})
+
+test('a file read by a dedicated parser is counted as parsed, not as unsupported', () => {
+  // The ledger's only job is to be accurate about what was read. Once workflows, Dockerfiles and
+  // rules files have parsers, reporting them as "unsupported" says the engine ignored files it in
+  // fact examined — an understatement, but still a false one, in the section a reader consults to
+  // find out how much of their repo was actually looked at.
+  const m = modelOf({
+    'package.json': '{"name":"x"}',
+    '.github/workflows/ci.yml': 'on: push\njobs:\n  a:\n    steps:\n      - run: echo hi\n',
+    'Dockerfile': 'FROM node:22-alpine\nUSER node\n',
+    'firestore.rules': 'match /a/{x} { allow read: if false; }\n',
+    'README.md': '# genuinely unsupported\n',
+  })
+  const c = m.discovery.counts
+  assert.ok(c.configParsed >= 3, 'the workflow, Dockerfile and rules file were each read by a parser')
+  assert.equal(c.filesParsed + c.configParsed + c.unsupported + c.oversized + c.readErrors, c.filesDiscovered)
+  assert.equal(m.discovery.reconciles, true)
 })
 
 test('an oversized file is recorded as a notable skip WITH a reason, never silently dropped', () => {

@@ -96,8 +96,10 @@ Full policy in `references/severity-model.md`. The three things you must not get
 
 **Method (how to be complete and reproducible):** `references/methodology/` — `README.md` (the
 pipeline and the three laws), `enumerate.md` (building the inventory by hand, and knowing when it
-is incomplete), `grade.md` (severity + confidence policy), `false-positives.md` (the catalogue of
-mistakes that made earlier versions wrong — read this one), `coverage.md` (the accounting).
+is incomplete), `discovery.md` (what you could see, before what you graded), `grade.md` (severity
++ confidence policy), `false-positives.md` (the catalogue of mistakes that made earlier versions
+wrong — read this one), `coverage.md` (the accounting), `grade-or-declare.md` (every artifact
+class you can see is graded or declared as ungraded — never silent).
 
 **Report & i18n:** `references/report-template.md`, `references/i18n/{he,en}.md`.
 

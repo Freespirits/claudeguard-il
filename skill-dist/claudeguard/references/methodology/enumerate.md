@@ -319,6 +319,12 @@ Do this:
   `unknown-key`.
 - **SQL functions** — `create [or replace] function`. Record `security definer`,
   `set search_path`, and whether the body references `auth.uid()` / `auth.jwt()`.
+- **Artifact classes** — mobile manifests (`AndroidManifest.xml`, `Info.plist`), GitHub workflow
+  files, Dockerfiles / compose files / Terraform, and Firebase rules files each get their own set
+  (`mobileArtifacts` + `exportedComponents`, `ciWorkflows`, `iacFiles`, `firebaseRules`; what to
+  look for is in `checks/`). Any file class you saw and will not grade goes into
+  `ungradedSurfaces` as `undeterminable` — see `grade-or-declare.md`. A discovered class that
+  appears in no set is the defect that rule exists to kill.
 
 ---
 

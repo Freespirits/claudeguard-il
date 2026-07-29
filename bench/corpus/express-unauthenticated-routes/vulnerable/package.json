@@ -1,0 +1,6 @@
+{
+  "name": "ex-vuln",
+  "dependencies": {
+    "express": "4.19.2"
+  }
+}

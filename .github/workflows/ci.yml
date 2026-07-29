@@ -136,7 +136,7 @@ jobs:
               fails.push('the grader must surface a discovery ledger');
             } else {
               const c = r.discovery.counts;
-              const sum = c.filesParsed + c.unsupported + c.oversized + c.readErrors;
+              const sum = c.filesParsed + c.configParsed + c.unsupported + c.oversized + c.readErrors;
               if (sum !== c.filesDiscovered || r.discovery.reconciles !== true) {
                 fails.push('discovery ledger does not reconcile: ' + sum + ' != ' + c.filesDiscovered);
               }
@@ -144,4 +144,42 @@ jobs:
 
             if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
             console.log('ok: grader verdict, confirmed P0s, coverage accounting and discovery ledger all hold');
+          "
+
+      # GRADE OR DECLARE. Every artifact class the engine can discover must either be walked by a
+      # rule or be declared as an ungraded row. The failure this prevents is silent: adding a new
+      # artifact type to the engine and no rule for it widens the blind spot invisibly, because a
+      # class with no rows produces no output and a reader cannot tell an unexamined domain from a
+      # clean one. Asserted here on a real repository — this one — rather than on a synthetic model.
+      - name: Assert every discovered artifact class is graded or declared
+        run: |
+          node plugin/scripts/grader.mjs . > /tmp/self.json
+          node -e "
+            const r = require('/tmp/self.json');
+            const fails = [];
+            const sets = Object.keys(r.coverage);
+
+            // The subject sets audit fix C added must exist even when empty, or 'we found nothing'
+            // is indistinguishable from 'we never declared the set'.
+            for (const s of ['ciWorkflows', 'iacFiles', 'firebaseRules', 'ungradedSurfaces']) {
+              if (!sets.includes(s)) fails.push('coverage set \"' + s + '\" is missing');
+            }
+
+            // This repo HAS a workflow, so the CI rules must have walked it. A zero here would mean
+            // the parser silently stopped reading workflows.
+            const ci = r.coverage.ciWorkflows;
+            if (!ci || ci.enumerated < 1) {
+              fails.push('this repo has .github/workflows, so ciWorkflows must enumerate at least one subject');
+            }
+
+            // LAW 2 across every set, including the new ones.
+            for (const [name, set] of Object.entries(r.coverage)) {
+              const c = set.counts;
+              if (c.pass + c.fail + c.undeterminable + c.allowlisted !== set.enumerated) {
+                fails.push('coverage set \"' + name + '\" does not add up');
+              }
+            }
+
+            if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
+            console.log('ok: ' + sets.length + ' subject sets, all declared and all reconciling');
           "

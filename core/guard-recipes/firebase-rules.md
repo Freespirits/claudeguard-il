@@ -2,6 +2,7 @@
 
 Firestore/RTDB/Storage rules are the security boundary — the client talks to the DB directly.
 
+<a id="owner-scoped"></a>
 ## Firestore — owner-scoped, validated
 
 ```
@@ -36,6 +37,26 @@ Kill these anti-patterns:
 - `allow read, write: if request.auth != null;` — *any* logged-in user can touch *any* doc.
 - Test-mode `if request.time < timestamp.date(2025, ...)` left in prod.
 
+<a id="any-authenticated"></a>
+### Why `request.auth != null` is not authorization
+
+It is the single most common Firebase mistake, and it reads as safe because the word `auth` is in
+it. Anyone can create an account in your app — that is what a sign-up form is — so "any logged-in
+user" is a one-click-away version of "anyone". It grants every document to every user you have,
+which is a cross-tenant leak, not a login check.
+
+```diff
+  match /orders/{id} {
+-   allow read, write: if request.auth != null;
++   allow read, write: if request.auth != null
++                      && resource.data.userId == request.auth.uid;
+  }
+```
+
+Compare the caller to something **on the document**. The check has to name a field, or it is not
+scoping anything.
+
+<a id="storage"></a>
 ## Storage — scope by path + validate
 
 ```

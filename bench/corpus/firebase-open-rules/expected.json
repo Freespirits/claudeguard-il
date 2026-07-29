@@ -1,0 +1,13 @@
+{
+  "notes": "INTENT: `allow read, write: if true` on a Firestore wildcard match is the exact equivalent of a Postgres table with RLS disabled — the whole database readable and writable by anyone. It is not mitigated by obscurity: the Firebase config object ships in every client bundle BY DESIGN, so 'anyone with the config' means anyone who opens DevTools. The condition is a literal in the rules file, so this must grade as a confirmed P0. The fixed variant scopes each match to the caller's own uid, compares an ownership field on the document rather than merely checking that a caller is signed in, and closes with a deny-all wildcard — so it must be completely silent. This pair guards CG-FB-001, and its `fixed` side is the false-positive gate for the Firebase half of this audience, which previously received no coverage at all.",
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-FB-001", "severity": "P0", "confidence": "confirmed", "subject": "firebase-rules:firestore.rules", "at": "firestore.rules:5" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}
