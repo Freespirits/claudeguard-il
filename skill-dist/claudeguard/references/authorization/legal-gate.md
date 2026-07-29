@@ -14,7 +14,7 @@ layer too. **Both layers must pass.** If any check fails, stop and explain — n
 4. Only safe methods (GET/HEAD/OPTIONS). No request bodies, no auth-bypass attempts, no payloads.
 Print the warning banner, then proceed.
 
-### Tier 2 — active DAST (attack traffic)
+### Tier 2 — active probes (four live GET requests)
 All of Tier 1, plus:
 5. `active_dast.enabled: true` **and** `i_am_authorized_in_writing: true` **and**
    `i_own_or_control_these_targets: true`.
@@ -70,6 +70,6 @@ Tier 1:
 ```
 Tier 2:
 ```
-🚨  ACTIVE DAST — real attack traffic to a target you attested you OWN and are AUTHORIZED to test.
+🚨  ACTIVE PROBES — four live GET requests to a target you attested you OWN and are AUTHORIZED to test.
     Rate-limited, dry-run unless you passed --i-am-authorized. You are responsible for this scope.
 ```

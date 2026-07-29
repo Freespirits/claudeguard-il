@@ -8,8 +8,10 @@ user-invocable: true
 
 # /cg-dast — active DAST (Tier 2, hard-gated)
 
-Sends **real attack traffic**. This is penetration testing. Only for a target the user **owns**
-and is **authorized in writing** to test.
+Sends **four live GET probes** (reflected markup, a quote in `id`, open-redirect, CSP). This is a
+**smoke test, not a scanner** — no crawling, no auth flows, no IDOR, no fuzzing; point the user at
+Burp, ZAP or Nuclei for real DAST. Even so, it is live traffic to someone's server, so it is only for
+a target the user **owns** and is **authorized in writing** to test.
 
 Argument: `$ARGUMENTS` — the URL (must be in scope `targets`) and, for a live run, the literal
 `--i-am-authorized` flag.

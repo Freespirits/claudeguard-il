@@ -371,6 +371,59 @@ order by 1;
 Also print whatever the engine reported in `limits`, plus the tier's own blind spots: a static scan
 cannot see runtime configuration, and a passive scan cannot see what only attack traffic reveals.
 
+### The scanner-coverage rows
+
+External scanners (gitleaks, semgrep, npm-audit, Snyk) each add a `scan:<tool>` row to
+`coverage.scanCoverage`. **Print each one by name — a scan that did not run is a fact the reader
+must see, never an absence.** In particular the four Snyk rows — `scan:snyk-sca`, `scan:snyk-iac`,
+`scan:snyk-container`, `scan:snyk-code` — carry the runner's own reason when they are
+`undeterminable`. The one that matters most:
+
+```
+Snyk Code (deep dataflow analysis) was NOT run, because it uploads your source code to Snyk's
+cloud and you did not consent. Everything else ran locally.
+בדיקת Snyk Code (ניתוח מעמיק) לא רצה, כי היא מעלה את קוד המקור שלכם לענן של Snyk ולא אישרתם.
+כל שאר הבדיקות רצו מקומית.
+```
+
+"Skipped for consent" is a different fact from "not installed" or "no token" — render the reason the
+row carries, don't collapse them.
+
+## Business-logic model / מודל הלוגיקה העסקית
+
+This section renders `result.businessLogic`. It is the one place a **confident silence is most
+dangerous**, because business-logic bugs are the ones a scanner is expected to miss — so an
+`assumed` model is never rendered as if it were clean.
+
+**`status: "confirmed"`** — the audit ran against rules the author stated in `businessLogic.intentPath`.
+Name the file, and print `rulesChecked / rulesTotal` per resource from `businessLogic.resources`:
+
+```
+Business logic: checked against your confirmed claudeguard.intent.yml.
+  orders   — 6/10 rules checked   ·   profiles — 4/10 rules checked
+לוגיקה עסקית: נבדקה מול claudeguard.intent.yml שאישרתם.
+```
+
+**`status: "assumed"`** (no intent file) or **`"error"`** (file unreadable, so it was ignored
+entirely) — say so plainly in both languages, then print `businessLogic.proposedIntent` verbatim in
+a fenced `yaml` block under a save-correct-commit-re-run instruction, and point at `/cg-intent`:
+
+````
+Every ownership rule below was GUESSED from column names, not confirmed by you. A guess that
+happens to match the code produces a clean-looking section that means nothing. Run /cg-intent to
+turn it into a real review, or save this draft as claudeguard.intent.yml, correct it, and re-scan.
+כל כלל בעלות למטה נוחש משמות העמודות, לא אושר על ידכם. הריצו /cg-intent כדי להפוך את זה לסקירה
+אמיתית, או שמרו את הטיוטה כ-claudeguard.intent.yml, תקנו, וסרקו מחדש.
+
+```yaml
+# ...businessLogic.proposedIntent verbatim...
+```
+````
+
+Whichever the status, also print the `businessLogic.assumptions` list — every rule that was taken on
+trust rather than established. A business-logic section with no coverage line is the same false
+all-clear the rest of this tool exists to prevent.
+
 ---
 
 ## Footer
