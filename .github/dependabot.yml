@@ -9,13 +9,15 @@
 # Their dependencies are not kept current, and their vulnerabilities are in the CODE — exposed keys,
 # missing RLS, IDOR, prompt injection — not in the packages.
 #
-# WHAT BUMPING A FIXTURE DOES AND DOES NOT COST, because an earlier version of this comment got it
-# wrong. It claimed that updating fixture dependencies "would remove test coverage". It does not:
-# no `expected.json` in bench/corpus expects CG-DEP-001, and the dependency-scanning arm is
-# exercised in test/dep_audit_shapes.test.mjs and test/scanners.test.mjs against RECORDED TOOL
-# OUTPUT, never against a fixture's real installed versions. Three such bumps were merged and the
-# benchmark stayed at recall 100% / precision 100% / zero false positives. So a fixture bump is
-# noise, not a risk — merge or ignore it on that basis, and re-run `node bench/run.mjs` either way.
+# WHAT BUMPING A FIXTURE DOES AND DOES NOT COST. Nothing: no `expected.json` in bench/corpus expects
+# CG-DEP-001, and the dependency-scanning arm is exercised in test/dep_audit_shapes.test.mjs and
+# test/scanners.test.mjs against RECORDED TOOL OUTPUT, never against a fixture's real installed
+# versions. Several such bumps have been merged with the benchmark's regression gate green
+# throughout. So a fixture bump is noise, not a risk — merge or ignore it on that basis, and re-run
+# `node bench/run.mjs` either way.
+#
+# An earlier version of this comment claimed the opposite, that bumping a fixture "would remove test
+# coverage". That claim is quoted and retracted as ERR-002 in ERRATA.md, not silently rewritten.
 #
 # WHAT THIS FILE CAN AND CANNOT TURN OFF. `open-pull-requests-limit: 0` stops scheduled VERSION
 # updates. It does not stop SECURITY updates, which is what the `npm_and_yarn` group PRs are — those
