@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Tier 2 — active DAST. Sends REAL attack traffic. Hard-gated + dry-run by default.
+// Tier 2 — active probes. Sends four live GET requests (a reflected-markup check, a quote in `id`,
+// an open-redirect check, a CSP check) — a smoke test, not a scanner. Hard-gated + dry-run by default.
 // Enforces the Tier-2 authorization gate. Without --execute (and dry_run:false in scope) it only
 // PLANS requests and sends nothing.
 // Usage:
@@ -51,7 +52,7 @@ if (!gate.allowed) {
   process.exit(2)
 }
 
-console.error('🚨  ACTIVE DAST — real attack traffic to a target you attested you OWN and are AUTHORIZED to test.')
+console.error('🚨  ACTIVE PROBES — four live GET requests to a target you attested you OWN and are AUTHORIZED to test.')
 console.error(`    Rate cap: ${gate.rateCap} req/s · avoid_destructive: ${gate.avoidDestructive} · dry_run: ${gate.dryRun}`)
 
 // Dry run (default): plan only, send nothing.

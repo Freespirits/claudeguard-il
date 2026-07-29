@@ -1,7 +1,8 @@
 # Roadmap
 
 What is built, what is deliberately not, and what comes next. Kept honest on purpose: a security
-tool that overstates its own reach is doing the exact thing this project argues against.
+tool that overstates its own reach is doing the exact thing this project argues against. Where that
+happened anyway, the claim is quoted and retracted in [`ERRATA.md`](ERRATA.md) rather than deleted.
 
 Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 
@@ -11,7 +12,7 @@ Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 
 | Area | State |
 |---|---|
-| Static analysis (Tier 0) | **Solid.** 405 tests, benchmark at recall 100% / precision 100% / 0 false positives over 8 clean variants, deterministic. This is the part to rely on. |
+| Static analysis (Tier 0) | **Solid.** 405 tests; the benchmark gate holds **0 regressions across 18 pinned detections and 0 unexpected confirmed findings over 8 clean variants**, deterministic. That is regression protection, not a detection rate — see below. This is the part to rely on. |
 | Secrets, RLS, config, CI/CD, IaC, mobile manifests | **Its strongest surface.** Rules, ground truth and cry-wolf fixtures for each. |
 | Coverage accounting | **Unusual and load-bearing.** Every subject the engine enumerates is `pass`/`fail`/`undeterminable`/`allowlisted`, asserted arithmetically at runtime. Everything it sees but does not grade gets a declared row. |
 | Dataflow / injection (SQLi, XSS, SSRF) | **Delegated, on purpose.** See [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md). Without semgrep or Snyk installed, this surface depends on reviewer judgement. |
@@ -21,10 +22,21 @@ Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 
 ### The benchmark, stated plainly
 
-100% recall and precision is real and reproducible — and it is **7 vulnerable scenarios, 18 planted
-vulnerabilities, 8 clean variants, authored by this project.** That is excellent *regression
-protection*. It is not a claim about real-world detection rate, and it should never be quoted as one.
-Growing the corpus with cases we did not write is on the list below.
+The scorecard prints recall 100% / precision 100% / 0 false positives. Every one of those numbers is
+real and reproducible, and what they measure is a **golden-file regression gate** — not a detection
+rate. `bench/run.mjs` says so in its own header: `expected.json` for each case *records what the
+grader actually produces today*, asserted so it stays that way, and the harness ships a `--dump` mode
+for authoring it from that output. A vulnerability the grader misses therefore never becomes a label,
+so recall cannot fall below 100% except by regression. Which is exactly what the gate is for.
+
+Stated as what it is: **0 regressions across 18 pinned detections in 7 vulnerable scenarios, and 0
+unexpected confirmed findings across 8 clean variants — a corpus authored by this project.** That is
+excellent regression protection and a genuine cry-wolf gate. **Real-world detection rate: not yet
+measured.**
+
+The earlier framing led with the percentages and read as a detection claim; it is retracted as
+**ERR-006** in [`ERRATA.md`](ERRATA.md). Growing the corpus with cases we did not write (§5 below) is
+the only thing that changes the underlying fact.
 
 ---
 
@@ -119,9 +131,11 @@ detected at all.
 
 ### 5 · A corpus we did not write
 
-The benchmark's honesty problem is authorship, not size. Adding real-world cases — from public
-disclosures, from OWASP Benchmark-style suites, from repos we have not seen — is the only thing that
-turns "excellent regression protection" into evidence about detection rate.
+The benchmark's honesty problem is authorship and construction, not size: we wrote the cases, and
+`expected.json` is authored from what the grader already outputs (ERR-006). Adding real-world cases —
+from public disclosures, from OWASP Benchmark-style suites, from repos we have not seen — is the only
+thing that turns "excellent regression protection" into evidence about detection rate. Done when a
+number in this file comes from a corpus nobody here authored.
 
 ### 6 · Real dynamic testing, or none
 
@@ -161,11 +175,11 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
 - **Grade or declare.** Five artifact classes the engine discovered and no rule read — GitHub
   Actions workflows, Dockerfiles, compose, Terraform, Firebase rules — are graded, plus 22 new rules.
   Anything still ungraded gets a declared row.
-- **The gate was attacked and rebuilt.** Six real bypasses in the shipped Tier-1/Tier-2 gate, all of
+- **The gate was attacked and rebuilt** (ERR-001). Six real bypasses in the shipped Tier-1/Tier-2 gate, all of
   one family: the gate and the scanner parsed the same URL differently. `https://localhost:3000@169.254.169.254`
   — using the default target from our own example scope file — cleared the gate and reached the cloud
   metadata endpoint. Both now derive from one WHATWG parse.
-- **A credential leak in the Supabase spot-check.** `--supabase-url` was never gated and the request
+- **A credential leak in the Supabase spot-check** (ERR-003). `--supabase-url` was never gated and the request
   carried the user's anon key, so naming any host sent that key there. Found by external review,
   reproduced, fixed, and pinned with twelve tests.
 - **The mobile arm was re-audited.** Twenty proven defects. An untouched `npx react-native init`
@@ -175,4 +189,8 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
   seven phantom LLM call sites and eighteen phantom dependencies, in this repo alone.
 - **Business-logic tier** (facts → intent → audit) and the **Snyk adapter**, both validated against
   real recorded tool output.
-- Tests **159 → 405**. Benchmark held at 100% / 100% / 0 throughout.
+- **The Tier-2 overclaim was retracted** (ERR-004, and ERR-005 for the half of it that was announced
+  before it was made). "Real attack traffic (injection, IDOR, fuzzing)" was four GET probes.
+- Tests **159 → 405**. The benchmark's regression gate stayed green throughout — recall 100% /
+  precision 100% / 0 false positives, which is regression protection and not a detection rate
+  (ERR-006).

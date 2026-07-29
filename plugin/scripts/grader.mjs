@@ -22,22 +22,34 @@
 //   LAW 3  Name-only evidence may never justify a P0. `FOO_API_KEY` in a variable name is not
 //          proof that a privileged credential exists. ENFORCED by a runtime assertion in
 //          finding() and again in grade().
+//   LAW 4  A `clean` verdict may not be a lie. `clean` is only emitted when nothing was confirmed
+//          AND nothing unproven-but-catastrophic (a P0/P1 at `likely` or `needs-review`) is still
+//          open AND discovery coverage cleared its floor. Otherwise the level is `unknown`, never
+//          green. ENFORCED by a runtime assertion at the end of grade().
 //
 // Two rules that follow from the domain model:
 //   - Confidence is a pure function of Evidence, so the same repo always grades the same way.
 //   - Severity is impact-if-true and is NEVER reduced because we are unsure. Discounting twice
 //     buries a catastrophic-but-unproven issue where nobody looks. The renderer compensates by
-//     counting only `confirmed` Findings in the headline verdict.
+//     counting only `confirmed` Findings in the headline verdict — and LAW 4 keeps that from
+//     turning into a false all-clear.
 //
 // Usage:
 //   node grader.mjs <repo-path> [--json]        # runs the engine, then grades
 //   node project_model.mjs . | node grader.mjs  # grades a model on stdin
 //   node grader.mjs <repo-path> --observations live.json
-import { readFileSync } from 'node:fs'
+//   node grader.mjs <repo-path> --gate          # exit code from the verdict, summary on stderr
+//   node grader.mjs <repo-path> --intent claudeguard.intent.yml   # confirm the business-logic model
+//   node grader.mjs <repo-path> --propose-intent                  # print a draft intent file
+import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { auditBusinessLogic, loadIntent, proposeIntent, renderIntentYaml, TAXONOMY } from './business_logic.mjs'
+// Only these two are used. An earlier version imported proposeIntent/renderIntentYaml/TAXONOMY too
+// and called none of them — an import list advertising a proposer the grader did not have, which is
+// how the whole intent tier shipped unreachable. The proposal now round-trips through grade().
+import { auditBusinessLogic, loadIntent } from './business_logic.mjs'
 
 // ---------------------------------------------------------------------------
 // Policy tables — the whole severity model, in one readable place.
@@ -80,6 +92,92 @@ const JUDGEMENT_SOURCES = new Set(['snyk', 'semgrep'])
 // these sets are never allowed a `pass` row. A future rule that regressed into passing a route on
 // a bare `getUser` would throw here instead of printing a green check nobody double-checks.
 const NO_PASS_SETS = new Set(['routes', 'llmSites'])
+
+// ---------------------------------------------------------------------------
+// LAW 4 — the `clean` verdict must not lie.
+//
+// THE DEFECT THIS FIXES. The verdict counted `confirmed` findings and nothing else, so a repo
+// with a fully unauthenticated DELETE endpoint graded 🟢 `clean`: the route rule correctly raises
+// a P1 at `needs-review` (the absence of an auth token is not proof — LAW 1), and `needs-review`
+// does not count, so the badge came out green over an endpoint anyone on the internet can call to
+// destroy data. Same for a scan that could not read half the repo: nothing confirmed, badge green.
+// "Nothing was proven" and "nothing is wrong" printed the same colour, which is the exact failure
+// this whole tool exists to prevent — and the one failure a non-expert cannot detect for himself.
+//
+// So the badge is now a function of COVERAGE × CONFIRMED, not of confirmed alone:
+//
+//   `clean`  requires  (a) zero confirmed findings
+//                 AND  (b) zero UNPROVEN P0/P1 — a P0 or P1 at `likely` or `needs-review` that is
+//                          still open (an allowlisted or refuted subject raises no finding, so
+//                          anything left in the list is by definition unsettled)
+//                 AND  (c) discovery coverage at or above the floor below.
+//   otherwise, with nothing confirmed, the level is `unknown` — "not proven safe", never green.
+//
+// A repo WITH confirmed findings is unaffected: it keeps critical / high / medium / low exactly as
+// before. `unknown` only ever replaces what used to be `clean`, so this can never make a report
+// louder about a specific finding — the cry-wolf thesis is intact. It changes one thing: a badge
+// that used to claim more than the evidence supports now says so.
+// ---------------------------------------------------------------------------
+
+/** The levels the badge can take. `unknown` is not a severity — it is the absence of a claim. */
+const VERDICT_LEVELS = ['critical', 'high', 'medium', 'low', 'unknown', 'clean']
+
+/**
+ * THE COVERAGE FLOOR, in one number.
+ *
+ * Read `core/methodology/discovery.md`: discovery coverage asks "what did the engine manage to
+ * SEE", which is a different axis from the pass/fail ledger's "of what it saw, what did it grade".
+ * The floor is deliberately expressed over the files the engine SET OUT to read — parsed plus
+ * config-parsed plus oversized plus read-errors — and NOT over every file discovered. A repo full
+ * of PNGs and lockfiles is not under-read; those are deliberate, accounted-for exclusions, and
+ * putting them in the denominator would flip correct apps to `unknown` for owning a logo. What
+ * belongs in the denominator is only the files we wanted and failed to get.
+ *
+ * 0.95: more than one file in twenty that we meant to read and could not is a hole big enough to
+ * hide the finding, and at that point "we could not see enough to say" is the honest headline.
+ */
+const DISCOVERY_READ_RATIO_FLOOR = 0.95
+
+/**
+ * Is discovery good enough for a green badge? Every `false` carries its reason, because a floor
+ * that fails without saying why is just another opaque verdict.
+ *
+ * An ABSENT discovery ledger is inadequate, not neutral. A model that never says what it managed
+ * to see has not earned "clean" — and treating absence as adequate would make stripping one key
+ * off the model the cheapest way to buy a green badge.
+ */
+function assessDiscoveryCoverage(discovery) {
+  const floor = DISCOVERY_READ_RATIO_FLOOR
+  const counts = discovery && typeof discovery === 'object' ? discovery.counts : null
+  if (!counts || typeof counts !== 'object') {
+    return {
+      adequate: false, ratio: null, floor, filesRead: null, filesIntended: null,
+      reasons: ['no discovery ledger: this model does not record what the engine managed to see, ' +
+        'and an absent ledger is not evidence of complete discovery'],
+    }
+  }
+  const n = v => (Number.isFinite(v) ? v : 0)
+  const filesRead = n(counts.filesParsed) + n(counts.configParsed)
+  // Files we INTENDED to read. `unsupported` is excluded on purpose — see the constant above.
+  const filesIntended = filesRead + n(counts.oversized) + n(counts.readErrors)
+  const ratio = filesIntended > 0 ? filesRead / filesIntended : 0
+
+  const reasons = []
+  if (discovery.reconciles !== true) {
+    reasons.push('the discovery ledger does not reconcile' +
+      (discovery.discrepancy ? ` (${discovery.discrepancy})` : '') +
+      ' — its counts cannot be trusted, so neither can a verdict built on them')
+  }
+  if (!n(counts.filesDiscovered)) {
+    reasons.push('no files were discovered at all — there is nothing behind a clean verdict')
+  } else if (filesRead === 0) {
+    reasons.push('not one file was parsed — every discovered file was unsupported, oversized or unreadable')
+  } else if (ratio < floor) {
+    reasons.push(`only ${filesRead} of the ${filesIntended} files the engine set out to read were ` +
+      `actually read (${(100 * ratio).toFixed(1)}%, floor ${(100 * floor).toFixed(0)}%)`)
+  }
+  return { adequate: reasons.length === 0, ratio, floor, filesRead, filesIntended, reasons }
+}
 
 // ---------------------------------------------------------------------------
 // The ledger — enforces LAW 2 by construction.
@@ -2961,17 +3059,40 @@ function sortFindings(findings) {
     String(a.id).localeCompare(String(b.id)))
 }
 
-function summarize(findings) {
+function summarize(findings, discovery = null) {
   const confirmed = findings.filter(f => f.confidence === 'confirmed')
+  // Unproven catastrophe: impact-if-true is P0/P1, but the evidence never reached `confirmed`.
+  // These are exactly the findings the old verdict discarded — and the reason a repo with an open
+  // unauthenticated DELETE could print green.
+  const unproven = findings.filter(f =>
+    f.confidence !== 'confirmed' && (f.severity === 'P0' || f.severity === 'P1'))
+  const discoveryCoverage = assessDiscoveryCoverage(discovery)
+
+  // The level the CONFIRMED findings alone produce. `null` when nothing was confirmed. This is the
+  // axis reviewer findings may never move (see mergeReviewerFindings), and it is unchanged by LAW 4.
+  const confirmedLevel = confirmed.some(f => f.severity === 'P0') ? 'critical'
+    : confirmed.some(f => f.severity === 'P1') ? 'high'
+      : confirmed.some(f => f.severity === 'P2') ? 'medium'
+        : confirmed.length ? 'low' : null
+
+  // LAW 4. With nothing confirmed the badge is no longer automatically green: an open unproven
+  // P0/P1, or discovery below the floor, means we did not prove it safe — and `unknown` says so.
+  const level = confirmedLevel ??
+    ((unproven.length || !discoveryCoverage.adequate) ? 'unknown' : 'clean')
+
   return {
     verdict: {
-      rule: 'counts only findings whose confidence is `confirmed`',
+      rule: 'critical/high/medium/low count ONLY findings whose confidence is `confirmed`; ' +
+        '`clean` additionally requires zero unproven P0/P1 and discovery coverage at or above the ' +
+        'floor — otherwise the level is `unknown` ("not proven safe"), never `clean`',
+      level,
+      confirmedLevel,
       confirmedP0: confirmed.filter(f => f.severity === 'P0').length,
       confirmedP1: confirmed.filter(f => f.severity === 'P1').length,
-      level: confirmed.some(f => f.severity === 'P0') ? 'critical'
-        : confirmed.some(f => f.severity === 'P1') ? 'high'
-          : confirmed.some(f => f.severity === 'P2') ? 'medium'
-            : confirmed.length ? 'low' : 'clean',
+      // Printed beside the badge, because these are what an `unknown` is made of.
+      unprovenP0: unproven.filter(f => f.severity === 'P0').length,
+      unprovenP1: unproven.filter(f => f.severity === 'P1').length,
+      discoveryCoverage,
       needsReview: findings.filter(f => f.confidence === 'needs-review').length,
       likely: findings.filter(f => f.confidence === 'likely').length,
     },
@@ -2980,6 +3101,112 @@ function summarize(findings) {
       bySeverity: Object.fromEntries(SEVERITY_ORDER.map(s => [s, findings.filter(f => f.severity === s).length])),
       byConfidence: Object.fromEntries(CONFIDENCE_ORDER.map(c => [c, findings.filter(f => f.confidence === c).length])),
     },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Decision rate — the counter-pressure against a cheap `undeterminable`.
+//
+// LAW 1 makes `undeterminable` the honest answer whenever a token is all we have, and that is
+// right. But it is also the cheapest exit in the architecture: a rule that abstains on everything
+// satisfies LAW 2, prints a full coverage table, and decides nothing. Nothing in the ledger
+// distinguishes "we looked hard and could not settle it" from "we never tried".
+//
+// So the fraction of enumerated subjects actually DECIDED — `(pass + fail) / enumerated` — is
+// published per subject set and overall, and the benchmark gates on it never decreasing. Note
+// `allowlisted` is reported but not counted as decided: the user decided it, we did not.
+// ---------------------------------------------------------------------------
+
+function decisionRateOf(coverage) {
+  const bySet = {}
+  let enumerated = 0
+  let decided = 0
+  let abstained = 0
+  let allowlisted = 0
+  for (const [setName, set] of Object.entries(coverage || {})) {
+    const c = set.counts
+    const d = c.pass + c.fail
+    bySet[setName] = {
+      enumerated: set.enumerated,
+      decided: d,
+      abstained: c.undeterminable,
+      allowlisted: c.allowlisted,
+      rate: set.enumerated ? d / set.enumerated : null,
+    }
+    enumerated += set.enumerated
+    decided += d
+    abstained += c.undeterminable
+    allowlisted += c.allowlisted
+  }
+  return {
+    rule: '(pass + fail) / enumerated — the share of enumerated subjects the grader actually ' +
+      'decided, as opposed to abstaining via `undeterminable`',
+    overall: { enumerated, decided, abstained, allowlisted, rate: enumerated ? decided / enumerated : null },
+    bySet,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Run record — a reproducible attestation of WHAT WAS RUN.
+//
+// It is not a certificate of safety and must never be rendered as one: it says which tool version,
+// which commit and which model produced this verdict, so two people can tell whether they are
+// looking at the same run before they argue about the finding.
+//
+// Determinism is the whole point. Nothing in here may vary between two runs on the same model —
+// which is why `generatedAt` is null unless the CALLER supplies a clock (`opts.now`). A grader that
+// reaches for Date.now() cannot be diffed against itself, and "re-run after the fix and trust the
+// diff" is the only workflow this tool offers.
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+/** JSON with every object key sorted, so two structurally equal models hash identically. */
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']'
+  return '{' + Object.keys(value).sort()
+    .map(k => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}'
+}
+
+/** Memoised: identical for every grade() in one process, and one `git` spawn instead of N. */
+let _toolVersion
+function toolVersion() {
+  if (_toolVersion === undefined) {
+    try { _toolVersion = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')).version ?? null }
+    catch { _toolVersion = null }
+  }
+  return _toolVersion
+}
+
+let _commit
+function toolCommit() {
+  if (_commit === undefined) {
+    try {
+      const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+      _commit = /^[0-9a-f]{40}$/.test(out) ? out : null
+    } catch { _commit = null }   // no git, no repo, shallow export — a null is honest, a throw is not
+  }
+  return _commit
+}
+
+function buildRunRecord(model, summary, opts) {
+  return {
+    note: 'Attests WHAT WAS RUN — tool version, commit, model identity, verdict. It is not a ' +
+      'statement that this repository is secure.',
+    toolVersion: toolVersion(),
+    commit: toolCommit(),
+    // ONLY when the caller supplies one. The grader never reads a clock; see above.
+    generatedAt: opts.now ?? null,
+    modelHash: 'sha256:' + createHash('sha256').update(canonicalJson(model)).digest('hex'),
+    // Both ledgers add up: LAW 2 (asserted by Ledger.toJSON, which throws otherwise) and the
+    // engine's discovery ledger. A false here means the numbers below describe an incomplete read.
+    ledgerReconciles: model?.discovery?.reconciles === true,
+    confirmedP0: summary.verdict.confirmedP0,
+    confirmedP1: summary.verdict.confirmedP1,
+    verdict: summary.verdict.level,
   }
 }
 
@@ -3113,21 +3340,38 @@ export function mergeReviewerFindings(graded, reviewerFindings = []) {
   }
 
   const merged = sortFindings([...(graded.findings || []), ...accepted])
-  const summary = summarize(merged)
+  const summary = summarize(merged, graded.discovery)
 
-  // THE KEYSTONE INVARIANT. Reviewer findings may never move the badge, because the verdict counts
-  // only confirmed findings and a reviewer finding can never be confirmed. If this ever fails, the
-  // cap has a hole and the whole "safe to let an LLM contribute" claim is void.
-  if (summary.verdict.level !== graded.verdict.level ||
+  // THE KEYSTONE INVARIANT, stated on the axis it actually protects. Reviewer findings may never
+  // move the CONFIRMED verdict, because a reviewer finding can never be confirmed. If this ever
+  // fails, the cap has a hole and the whole "safe to let an LLM contribute" claim is void.
+  if (summary.verdict.confirmedLevel !== graded.verdict.confirmedLevel ||
       summary.verdict.confirmedP0 !== graded.verdict.confirmedP0 ||
       summary.verdict.confirmedP1 !== graded.verdict.confirmedP1) {
     throw new Error('reviewer findings changed the confirmed verdict — the reviewer cap has a hole')
+  }
+  // LAW 4 makes the BADGE a function of coverage as well as confirmations, so a reviewer's P0/P1
+  // judgement can move `clean` to `unknown` — and it should: an unsettled P1 from someone who read
+  // the code is precisely a reason we cannot claim proven-safe. That is the only move allowed. It
+  // is one-way (towards less certainty, never towards more), it can never reach a red badge, and
+  // any other transition means the cap leaked.
+  if (summary.verdict.level !== graded.verdict.level &&
+      !(graded.verdict.level === 'clean' && summary.verdict.level === 'unknown')) {
+    throw new Error(`reviewer findings moved the badge ${graded.verdict.level} -> ${summary.verdict.level}; ` +
+      'the only transition a reviewer may cause is clean -> unknown')
   }
 
   return {
     ...graded,
     findings: merged,
     ...summary,
+    // The run record travels with the result, so it must not keep attesting the pre-merge badge:
+    // a reviewer's unsettled P1 can legitimately move `clean` to `unknown`, and a record that still
+    // said `clean` beside a verdict that says `unknown` would be exactly the kind of quiet
+    // inconsistency someone later cites as proof the tool cannot be trusted.
+    runRecord: graded.runRecord
+      ? { ...graded.runRecord, verdict: summary.verdict.level }
+      : graded.runRecord,
     reviewer: {
       submitted: (reviewerFindings || []).length,
       accepted: accepted.length,
@@ -3149,6 +3393,8 @@ export function mergeReviewerFindings(graded, reviewerFindings = []) {
  * @param {object[]} [opts.observations]  tier-tagged observations from live_probe / dast_runner
  * @param {object} [opts.scanners]        { secrets, sast, dependencies, dynamic, snyk } adapter outputs
  * @param {string[]} [opts.allowlist]     subject ids the user has accepted
+ * @param {string} [opts.now]             caller-supplied timestamp for runRecord.generatedAt. The
+ *                                        grader never reads a clock itself — see buildRunRecord.
  */
 export function grade(model, opts = {}) {
   const ledger = new Ledger()
@@ -3217,14 +3463,48 @@ export function grade(model, opts = {}) {
   }
 
   const sorted = sortFindings(reconciled)
+  // The red badges count ONLY confirmed findings. Severity is uncapped precisely because this is
+  // where uncertainty is paid for: an unproven P0 is reported, but it does not turn the badge
+  // red. See CONTEXT.md, "Severity". LAW 4 completes the trade: not turning the badge red is not
+  // the same as turning it GREEN, so `clean` also has to clear coverage and unproven P0/P1.
+  const summary = summarize(sorted, model.discovery)
+
+  // ---- LAW 4: a `clean` verdict may not be a lie ---------------------------
+  // Asserted here, next to LAWs 1-3, rather than trusted from the code above. The failure this
+  // prevents is silent by nature: a renderer or a future refactor that reintroduces "no confirmed
+  // findings ⇒ green" produces a report that LOOKS like every other clean report, and the user
+  // whose DELETE endpoint is wide open has no way to tell. So it throws instead.
+  const v = summary.verdict
+  if (v.level === 'clean') {
+    if (v.unprovenP0 + v.unprovenP1 > 0) {
+      throw new Error(`LAW 4: verdict "clean" with ${v.unprovenP0} unproven P0 and ${v.unprovenP1} ` +
+        'unproven P1 still open. Nothing was proven wrong, but nothing was proven safe either — ' +
+        'the level must be "unknown".')
+    }
+    if (!v.discoveryCoverage.adequate) {
+      throw new Error('LAW 4: verdict "clean" on inadequate discovery coverage — ' +
+        v.discoveryCoverage.reasons.join('; ') + '. The level must be "unknown".')
+    }
+  }
+  // Defence in depth on the other side: `unknown` may only ever stand in for what used to be
+  // `clean`. If something confirmed is present, the badge owes the user a severity.
+  if (v.level === 'unknown' && v.confirmedLevel) {
+    throw new Error(`LAW 4: verdict "unknown" with confirmed findings present (${v.confirmedLevel}). ` +
+      '`unknown` replaces `clean`, never a graded level.')
+  }
+  if (!VERDICT_LEVELS.includes(v.level)) throw new Error(`unknown verdict level ${v.level}`)
+
   return {
     generatedBy: 'claudeguard/grader',
-    // The verdict counts ONLY confirmed findings. Severity is uncapped precisely because this is
-    // where uncertainty is paid for: an unproven P0 is reported, but it does not turn the badge
-    // red. See CONTEXT.md, "Severity".
-    ...summarize(sorted),
+    ...summary,
+    // A reproducible attestation of what produced this verdict. Deterministic by construction:
+    // two runs on the same model differ only in `generatedAt`, and only when a caller passed one.
+    runRecord: buildRunRecord(model, summary, opts),
     findings: sorted,
     coverage,
+    // How much of what we enumerated we actually DECIDED, versus abstained on. Published beside
+    // coverage because a full ledger of `undeterminable` rows is a complete accounting of nothing.
+    decisionRate: decisionRateOf(coverage),
     // DISCOVERY coverage travels alongside analysis coverage, as its own axis: what the engine
     // could and could not SEE, versus how it graded what it saw. The renderer prints them as two
     // separate blocks so a partial scan cannot pass for a complete one. See ADR/methodology.
@@ -3238,6 +3518,10 @@ export function grade(model, opts = {}) {
       status: businessLogic.status,
       error: businessLogic.error,
       columnsKnown: businessLogic.columnsKnown,
+      // Which file the conclusions rest on. Auto-discovery that never names the file it used is a
+      // confident silence — the reader must be able to see whether an intent was confirmed and from
+      // where. Null when the audit ran assumed.
+      intentPath: opts.intentPath ?? null,
       resources: businessLogic.resources,
       assumptions: businessLogic.assumptions,
       // Printed verbatim so the user can paste it into claudeguard.intent.yml and correct it.
@@ -3251,6 +3535,74 @@ export function grade(model, opts = {}) {
 }
 
 // ---- CLI --------------------------------------------------------------------
+
+/**
+ * Every flag that consumes the next argv element. Exported because `scripts/assert_cli_flags.mjs`
+ * asserts each one is either exercised by a skill or explicitly declared CLI-only — grade-or-declare
+ * turned inward, so a flag nobody ships and nobody documents cannot quietly rot here.
+ */
+export const CLI_FLAGS_TAKING_VALUE = new Set(['--model', '--observations', '--allowlist',
+  '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--snyk', '--reviewer',
+  // Both take a file path. `--check-intent` and `--propose-intent` are also listed CLI-only below;
+  // `--intent` is exercised by /cg-scan and /cg-intent, so it needs no declaration — but it must
+  // still parse its value here.
+  '--intent', '--check-intent'])
+
+/**
+ * Flags that are deliberately NOT surfaced in any `plugin/skills/*\/SKILL.md`, each with its reason:
+ *
+ *   --gate            a CI / pre-deploy hook switch, not part of an interactive skill's flow.
+ *   --model           documented in cg-scan's SKILL.md too; listed here because the CLI's own
+ *                     stdin/path/model triad is plumbing, not a user-facing feature.
+ *   --scanners        the combined-file convenience form of --secrets/--sast/--dependencies; the
+ *                     skills teach the individual flags, which are clearer at a call site.
+ *   --dynamic         DAST adapter output. `/cg-dast` hands its observations through
+ *                     --observations; this arm exists for a pre-collected adapter payload.
+ *   --snyk            the Snyk adapter's output. Documented in methodology/snyk-adapter.md; Snyk is
+ *                     optional and absent for most of this audience, so no skill step assumes it.
+ *   --propose-intent  business-logic intent scaffolding, taught in
+ *   --check-intent    guard-recipes/business-logic-intent.md rather than in a skill step.
+ *   --intent
+ *
+ * A flag NOT in this set and NOT named by a SKILL.md fails the build. Adding a name here is a
+ * declaration on the record, which is the point: it costs a line of prose to keep a flag private.
+ */
+export const CLI_ONLY_FLAGS = new Set(['--gate', '--model', '--scanners', '--dynamic', '--snyk',
+  '--propose-intent', '--check-intent', '--intent'])
+
+/**
+ * The gate's exit code, derived from the verdict and from nothing else.
+ *
+ * THE AGENT-DEPLOY STORY. This drops into a CI step or an agent's pre-deploy hook. Because a
+ * reviewer finding can never reach `confirmed` (see mergeReviewerFindings) and `unknown` is what
+ * LAW 4 emits when we could not prove safety, an agent cannot argue this gate green: the only way
+ * to a 0 is better evidence in the repository.
+ *
+ *   1  proven bad      — a confirmed P0 or P1. The thing the tool exists to stop.
+ *   2  not proven safe — `unknown`: an open unproven P0/P1, or discovery below the floor.
+ *   0  otherwise       — `clean`, or only confirmed P2/P3/P4. Deploying is a judgement call here,
+ *                        not a blocked one; gating on hygiene findings is how a gate gets disabled.
+ */
+export function gateExitCode(verdict) {
+  if (verdict.confirmedP0 > 0 || verdict.confirmedP1 > 0) return 1
+  if (verdict.level === 'unknown') return 2
+  return 0
+}
+
+/** One line for a human reading CI logs. Never claims safety — it reports what was established. */
+export function gateSummaryLine(result) {
+  const v = result.verdict
+  const dc = v.discoveryCoverage || {}
+  const cov = dc.ratio == null ? 'no discovery ledger'
+    : `discovery ${(100 * dc.ratio).toFixed(1)}% of ${dc.filesIntended} intended file(s), floor ${(100 * dc.floor).toFixed(0)}%`
+  const why = v.level === 'unknown'
+    ? ` — NOT PROVEN SAFE: ${v.unprovenP0} unproven P0, ${v.unprovenP1} unproven P1` +
+      (dc.adequate ? '' : `; ${(dc.reasons || []).join('; ')}`)
+    : v.level === 'clean' ? ' — nothing confirmed, no unproven P0/P1, coverage above floor'
+      : ` — ${v.confirmedP0} confirmed P0, ${v.confirmedP1} confirmed P1`
+  return `claudeguard --gate: ${String(v.level).toUpperCase()}${why} (${cov}; exit ${gateExitCode(v)})`
+}
+
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
 if (isMain) {
   // Parse in one pass. An earlier version searched the array with indexOf, which silently picked
@@ -3258,8 +3610,7 @@ if (isMain) {
   const argv = process.argv.slice(2)
   const flags = new Map()
   const positional = []
-  const TAKES_VALUE = new Set(['--model', '--observations', '--allowlist',
-    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--snyk', '--reviewer'])
+  const TAKES_VALUE = CLI_FLAGS_TAKING_VALUE
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (TAKES_VALUE.has(a)) flags.set(a, argv[++i])
@@ -3299,10 +3650,50 @@ if (isMain) {
   const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies ||
     scanners.dynamic || scanners.snyk
 
-  let result = grade(readModel(), {
+  // --check-intent <file>: validate an intent file and exit. Runs BEFORE readModel() on purpose —
+  // it needs no model, and reading one would block on stdin for the bare `--check-intent file` form
+  // the /cg-intent skill uses. `loadIntent` throws-and-catches on a bad shape (unknown key, wrong
+  // type, a transition to an undeclared state), so this catches a typo'd `owner_by:` before it can
+  // silently disable a check.
+  const checkFile = flag('--check-intent')
+  if (checkFile) {
+    const r = loadIntent(checkFile)
+    if (r.status === 'confirmed') { console.log(`ok: ${checkFile} is a valid intent file`); process.exit(0) }
+    console.error(r.status === 'missing' ? `--check-intent: no such file "${checkFile}"` : `invalid intent: ${r.error}`)
+    process.exit(1)
+  }
+
+  const model = readModel()
+
+  // --propose-intent: print the draft the tool would generate and exit. Routed through grade() so
+  // the string printed here is byte-identical to the `businessLogic.proposedIntent` the report
+  // carries — one code path, no second `columnsKnown` expression to drift.
+  if (flag('--propose-intent')) {
+    console.log(grade(model, {}).businessLogic.proposedIntent || '')
+    process.exit(0)
+  }
+
+  // Intent resolution. An explicit --intent wins; otherwise the file the user was told to commit,
+  // next to the repo that was SCANNED (model.root), never the cwd — running the grader from
+  // elsewhere must not bind an unrelated project's intent file. An auto-discovered file that is
+  // absent is silence (a missing optional config is not a finding). An EXPLICITLY named one that is
+  // absent is a typo, and grading without it silently is the failure this flag exists to prevent.
+  const intentFlag = flag('--intent')
+  const autoPath = model.root ? join(model.root, 'claudeguard.intent.yml') : null
+  const intentPath = intentFlag || (autoPath && existsSync(autoPath) ? autoPath : null)
+  const loadedIntent = intentPath ? loadIntent(intentPath) : { status: 'missing', intent: null, error: null }
+  if (intentFlag && loadedIntent.status === 'missing') {
+    console.error(`--intent: no such file "${intentPath}"`)
+    process.exit(2)
+  }
+
+  let result = grade(model, {
     observations: obsFile ? JSON.parse(readFileSync(obsFile, 'utf8')).observations : [],
     allowlist: allowFile ? JSON.parse(readFileSync(allowFile, 'utf8')).subjects : [],
     scanners: anyScanner ? scanners : null,
+    intent: loadedIntent.intent,
+    intentError: loadedIntent.error,
+    intentPath: loadedIntent.status === 'confirmed' ? intentPath : null,
   })
 
   // Reviewer findings (auditor subagent output) are validated and merged AFTER grading, so the
@@ -3315,4 +3706,11 @@ if (isMain) {
   }
 
   console.log(JSON.stringify(result, null, 2))
+
+  // GATE MODE. The report still goes to stdout so the step composes; the human line and the exit
+  // code go to stderr and to the process, where a CI runner and a pre-deploy hook can see them.
+  if (flags.get('--gate')) {
+    console.error(gateSummaryLine(result))
+    process.exit(gateExitCode(result.verdict))
+  }
 }

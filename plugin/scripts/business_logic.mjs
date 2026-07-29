@@ -335,9 +335,28 @@ export function proposeIntent(model) {
   }
 }
 
-/** The proposal as a file the user can save, correct, and commit. */
+/**
+ * The proposal as a file the user can save, correct, and commit.
+ *
+ * The five keys the PROPOSER cannot draft — `states`, `transitions`, `mutable_fields`,
+ * `read_only_for`, `system_routes` — are emitted as `# TODO:` guidance when the intent object does
+ * not carry them, and as REAL yaml when it does. That second half is what lets /cg-intent hand the
+ * interview's answers back through this one renderer instead of composing YAML by hand: the file
+ * the user commits is produced by the same code that produces the draft, and it round-trips through
+ * parseIntentYaml + validateIntent. A hand-written intent file can parse and still mean something
+ * other than what was said in the interview, which is the silent-wrong-check failure this whole
+ * tier exists to prevent.
+ */
 export function renderIntentYaml(intent, { columnsKnown = true } = {}) {
   const q = s => (/^[\w./-]+$/.test(String(s)) ? String(s) : JSON.stringify(String(s)))
+  const flow = v => `[${v.map(q).join(', ')}]`
+  // Absence and emptiness are DIFFERENT answers, and the audit reads them differently: an absent
+  // `mutable_fields` grades undeterminable ("not stated"), while `mutable_fields: []` is the claim
+  // "a user may set nothing" and makes every body field an offender. So a resource key is emitted
+  // whenever it is present at all, empty included. The two TOP-LEVEL lists are the opposite case —
+  // `proposeIntent` always sets them to `[]`, so requiring a non-empty value there is what keeps the
+  // draft's guidance comments exactly as they were.
+  const stated = v => Array.isArray(v)
   const out = [
     '# claudeguard.intent.yml — what this app is supposed to PERMIT.',
     '#',
@@ -369,25 +388,41 @@ export function renderIntentYaml(intent, { columnsKnown = true } = {}) {
     out.push(`    tenant: ${r.tenant ? q(r.tenant) : 'null'}`)
     if (r.state_column) {
       out.push(`    state_column: ${q(r.state_column)}`)
-      out.push('    # TODO: states: [draft, published]           # the legal values')
-      out.push('    # TODO: transitions:                          # and who may move between them')
-      out.push('    #   draft->published: [admin]')
+      if (stated(r.states)) out.push(`    states: ${flow(r.states)}`)
+      else out.push('    # TODO: states: [draft, published]           # the legal values')
+      const transitions = Object.entries(r.transitions || {})
+      if (transitions.length) {
+        out.push('    transitions:')
+        for (const [t, actors] of transitions) out.push(`      ${q(t)}: ${flow(actors || [])}`)
+      } else {
+        out.push('    # TODO: transitions:                          # and who may move between them')
+        out.push('    #   draft->published: [admin]')
+      }
     }
-    out.push('    # TODO: mutable_fields: [title, quantity]      # fields a USER may set (price is not one)')
-    out.push('    # TODO: read_only_for: [user]                  # roles that may read but never write')
+    if (stated(r.mutable_fields)) out.push(`    mutable_fields: ${flow(r.mutable_fields)}`)
+    else out.push('    # TODO: mutable_fields: [title, quantity]      # fields a USER may set (price is not one)')
+    if (stated(r.read_only_for)) out.push(`    read_only_for: ${flow(r.read_only_for)}`)
+    else out.push('    # TODO: read_only_for: [user]                  # roles that may read but never write')
   }
-  out.push(
-    '',
-    'rules:',
-    '  # Free-form invariants. The tool cannot check prose, so each line here is reported as a',
-    '  # reviewer task rather than silently ignored.',
-    '  # - "A coupon code may be applied at most once per order."',
-    '',
-    'system_routes:',
-    '  # Routes driven by the SYSTEM rather than by a user — payment webhooks, cron handlers. Listing',
-    '  # them here stops a legitimate `status = paid` write from being reported as a user-driven one.',
-    '  # - "pages/api/webhooks/**"',
-    '')
+  out.push('', 'rules:')
+  if (stated(intent.rules) && intent.rules.length) {
+    for (const rule of intent.rules) out.push(`  - ${q(rule)}`)
+  } else {
+    out.push(
+      '  # Free-form invariants. The tool cannot check prose, so each line here is reported as a',
+      '  # reviewer task rather than silently ignored.',
+      '  # - "A coupon code may be applied at most once per order."')
+  }
+  out.push('', 'system_routes:')
+  if (stated(intent.system_routes) && intent.system_routes.length) {
+    for (const p of intent.system_routes) out.push(`  - ${q(p)}`)
+  } else {
+    out.push(
+      '  # Routes driven by the SYSTEM rather than by a user — payment webhooks, cron handlers. Listing',
+      '  # them here stops a legitimate `status = paid` write from being reported as a user-driven one.',
+      '  # - "pages/api/webhooks/**"')
+  }
+  out.push('')
   return out.join('\n')
 }
 

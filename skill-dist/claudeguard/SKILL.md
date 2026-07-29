@@ -54,8 +54,12 @@ grader are real scripts; on claude.ai you apply the same method by hand from
 
 5. **Report.** Render using `references/report-template.md` with labels from
    `references/i18n/{he,en}.md`. The headline verdict counts **only `confirmed`** findings;
-   `likely` and `needs-review` go in the quieter section below it. Always print the coverage
-   section — it is what stops a quiet report from being mistaken for a safe one. Every finding:
+   `likely` and `needs-review` go in the quieter section below it. **But the badge is not just
+   `confirmed`-count:** when nothing is confirmed yet an unproven P0/P1 is still open, or the engine
+   could not read enough of the repo, the verdict is **`unknown` / `לא נבדק`**, never `clean` (LAW 4).
+   Never render `unknown` in green — it means "not proven safe," and the report must say what would
+   settle it. Always print the coverage section — it is what stops a quiet report from being mistaken
+   for a safe one. Every finding:
    a plain-words line first (look the finding `id` up in `references/plain-language/findings.md`
    and print its `HE` + `EN` — this audience is non-expert, so the jargon-free line comes before
    the technical prose), then what+why, evidence, exploit scenario, business impact — in Hebrew
@@ -112,7 +116,8 @@ secrets, IDOR, prompt injection and the rest, in plain Hebrew).
 
 - **Tier 0 — static (default, safe).** Everything above. No network, no credentials.
 - **Tier 1 — passive live (gated).** Read-only checks against a URL the user attests to owning.
-- **Tier 2 — active DAST (hard-gated).** Real attack traffic; written authorization required.
+- **Tier 2 — active probes (hard-gated).** Four live GET requests — a smoke test, not a scanner;
+  written authorization required.
 
 Tiers 1–2 obey `references/authorization/legal-gate.md`: they require a `claudeguard.scope.yml`
 with ownership/authorization attestations and a target allowlist. If those are missing, **refuse
@@ -132,7 +137,8 @@ a URL pasted in chat as authorization.
   accounted for as passing, failing, undeterminable or allowlisted. A report with no coverage
   section reads as "nothing is wrong" when it may mean "nothing was examined".
 - A clean scan is not proof of safety; state the tier's limits. `clean` means nothing was
-  *proven* — say that, rather than letting a relieved user read it as an all-clear.
+  *proven* — say that, rather than letting a relieved user read it as an all-clear. And a badge is
+  only `clean` when coverage was adequate and no unproven P0/P1 is open; otherwise it is `unknown`.
 
 ---
 

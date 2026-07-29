@@ -12,3 +12,4 @@ These records document the load-bearing decisions of the ClaudeGuardIL v2 analys
 - [0006](0006-invariants-and-phase-0-are-cancelled.md) — invariants.mjs and Phase 0 are cancelled
 - [0007](0007-taint-is-cut-generic-dataflow-is-delegated.md) — taint.mjs is cut; generic dataflow is delegated
 - [0008](0008-reviewer-findings-are-capped-and-validated.md) — Reviewer findings are capped at judgement→likely and validated before merge
+- [0009](0009-clean-requires-coverage-not-merely-the-absence-of-proof.md) — `clean` requires coverage, not merely the absence of proof (amends 0004)

@@ -147,8 +147,14 @@ export function normalizeHost(input) {
   return u.port ? `${name}:${u.port}` : name
 }
 
-/** Split a canonical host into `[name, port]`. IPv6 literals keep their brackets. */
-function splitHostPort(h) {
+/**
+ * Split a canonical host into `[name, port]`. IPv6 literals keep their brackets.
+ *
+ * Exported because the resolved-IP gate has to hand a bare hostname to a DNS resolver, and deriving
+ * that name with a second, slightly different splitter is precisely the "the string that was checked
+ * is not the string that was used" defect this module exists to close.
+ */
+export function splitHostPort(h) {
   const i = h.lastIndexOf(':')
   if (i === -1 || h.endsWith(']')) return [h, '']
   return [h.slice(0, i), h.slice(i + 1)]

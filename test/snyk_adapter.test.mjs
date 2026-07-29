@@ -12,7 +12,14 @@ import { grade } from '../plugin/scripts/grader.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ADAPTER = join(HERE, '..', 'plugin', 'scripts', 'run_snyk.mjs')
-const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] } }
+// The `discovery` block says the engine READ everything it set out to read. LAW 4 refuses a
+// `clean` verdict on a model that never states what was seen, so without it these tests would be
+// asserting things about discovery coverage rather than about the Snyk adapter.
+const FULLY_READ = {
+  counts: { filesDiscovered: 1, filesParsed: 1, configParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+  reconciles: true,
+}
+const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] }, discovery: FULLY_READ }
 
 // ---------------------------------------------------------------------------
 // WHY THIS FILE EXISTS.
@@ -415,13 +422,24 @@ test('NOTHING from Snyk may ever be confirmed, dataflow or not', () => {
   // `confirmed` drives the headline verdict and the auto-fix gate. Snyk's answer is a judgement
   // about code this grader never read — however good the analysis is, it is not a proof, and a
   // false P0 makes this audience rotate live keys over nothing.
+  //
+  // The assertion is on the RED axis, which is the guarantee: `confirmedLevel` is what the
+  // confirmed findings alone produce, and Snyk can never move it off null. What Snyk CAN do since
+  // LAW 4 is cost the repo its green badge — an unproven P0/P1 it raised leaves the level at
+  // `unknown`, "not proven safe". That is the honest reading and it is not a red badge.
   for (const payload of [CODE_SARIF_DATAFLOW, CODE_SARIF_NO_DATAFLOW]) {
     const r = grade(EMPTY_MODEL, { scanners: { snyk: snykScan({ code: normalizeSnykCode(payload) }) } })
     assert.ok(r.findings.every(f => f.source !== 'snyk' || f.confidence !== 'confirmed'))
-    assert.equal(r.verdict.level, 'clean', 'Snyk alone can never turn the badge red')
+    assert.equal(r.verdict.confirmedLevel, null, 'Snyk alone can never turn the badge red')
+    assert.equal(r.verdict.confirmedP0, 0)
+    assert.equal(r.verdict.confirmedP1, 0)
+    assert.ok(['clean', 'unknown'].includes(r.verdict.level), 'the badge is never graded on Snyk alone')
   }
   const reach = grade(EMPTY_MODEL, { scanners: { snyk: snykScan({ sca: normalizeSnykSca(withReachability('reachable')) }) } })
-  assert.equal(reach.verdict.level, 'clean')
+  assert.equal(reach.verdict.confirmedLevel, null)
+  // A reachable critical advisory is an unproven P1 here, so the repo is not proven safe either.
+  assert.equal(reach.verdict.level, 'unknown')
+  assert.ok(reach.verdict.unprovenP0 + reach.verdict.unprovenP1 > 0)
 })
 
 test('an observation cannot smuggle in its own evidence or confidence', () => {
@@ -856,7 +874,13 @@ test("Snyk's severity is re-mapped, and capped by weakness class rather than tru
   const f = critIac.findings.find(x => x.id === 'CG-SNYK-006')
   assert.equal(f.severity, 'P0')
   assert.equal(f.confidence, 'needs-review')
-  assert.equal(critIac.verdict.level, 'clean', 'an unproven P0 is printed but never reddens the badge')
+  assert.equal(critIac.verdict.confirmedLevel, null,
+    'an unproven P0 is printed but never reddens the badge')
+  assert.equal(critIac.verdict.confirmedP0, 0)
+  // ...and since LAW 4 it does not GREEN the badge either. An open, unproven P0 is exactly the
+  // state "we could not prove this safe" describes, and `clean` there was the false all-clear.
+  assert.equal(critIac.verdict.level, 'unknown')
+  assert.equal(critIac.verdict.unprovenP0, 1)
 })
 
 // ---------------------------------------------------------------------------

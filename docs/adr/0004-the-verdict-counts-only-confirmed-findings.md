@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-07-29
+Accepted — 2026-07-29. The `clean` row below is amended by [ADR 0009](0009-clean-requires-coverage-not-merely-the-absence-of-proof.md): the risk this record accepted ("`clean` is dangerously easy to misread as 'safe'") arrived, and `clean` now additionally requires adequate discovery coverage and no open unproven P0/P1. The four graded levels are unchanged.
 
 ## Context
 

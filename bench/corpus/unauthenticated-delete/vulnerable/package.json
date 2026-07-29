@@ -1,0 +1,7 @@
+{
+  "name": "unauth-delete-vuln",
+  "private": true,
+  "dependencies": {
+    "next": "15.5.4"
+  }
+}

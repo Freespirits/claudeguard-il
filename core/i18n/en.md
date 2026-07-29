@@ -27,7 +27,11 @@ Key names are unique across this file; `{name}` placeholders are filled in at re
 - high: High
 - medium: Medium
 - low: Low
+- unknown: Unknown
 - clean: Clean
+- unknown_line: Not proven safe. Nothing was confirmed, but coverage or confidence is too low to call this clean.
+- unknown_meaning: An UNKNOWN verdict means we could not prove it safe — it is never a clean result. Settle the unconfirmed findings and read the Coverage section.
+- unknown_counts: {p0} unproven P0, {p1} unproven P1 still open
 - clean_line: No confirmed findings. This is not a proof of safety.
 - clean_meaning: A clean verdict means nothing was proven — not that nothing is wrong. Read the Coverage section.
 - verdict_counts: {p0} confirmed P0, {p1} confirmed P1

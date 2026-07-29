@@ -67,7 +67,16 @@ function withDT(patch) {
   return base
 }
 
-const ask = (config, action, ctx = {}) => decide(config, action, { now: NOW, recent: [], ...ctx })
+/**
+ * Every test below drives the gate as an INTERACTIVE run — a human at a terminal, who can be asked.
+ *
+ * `interactive: true` is in the harness rather than in each test because it is a property of how
+ * this suite drives the gate, not a claim any individual test is making. The gate refuses tier
+ * `active` and above when the flag is absent (a headless run cannot produce a human confirmation);
+ * that rule and its deny-by-default default are attacked in test/gate_hardening.test.mjs, which
+ * drives the gate the other way. Not one assertion here changed when the rule was added.
+ */
+const ask = (config, action, ctx = {}) => decide(config, action, { now: NOW, recent: [], interactive: true, ...ctx })
 
 /** The happy path, so every denial below is provably caused by the one thing it changed. */
 const OK = { tool: 'nmap_scan', target: 'staging.myapp.com', path: '/' }
@@ -881,7 +890,16 @@ test('the example\'s flow-sequence tool lists parse as lists, not as strings', (
 // a check that did not happen is indistinguishable from the check having passed.
 // ---------------------------------------------------------------------------
 
-const EMPTY_MODEL = { database: { parserVersion: 2, tables: [] } }
+// `discovery` says the engine READ everything it set out to read. LAW 4 refuses a `clean` verdict
+// on a model that never states what was seen, so without this block the assertions below would be
+// about discovery coverage rather than about the dynamic-testing gate.
+const EMPTY_MODEL = {
+  database: { parserVersion: 2, tables: [] },
+  discovery: {
+    counts: { filesDiscovered: 1, filesParsed: 1, configParsed: 0, unsupported: 0, oversized: 0, readErrors: 0 },
+    reconciles: true,
+  },
+}
 const gradeWith = (opts) => grade(EMPTY_MODEL, opts)
 const scanRow = (r, subject) => Object.values(r.coverage.scanCoverage)
   .filter(Array.isArray).flat().find(s => s.subject === subject)

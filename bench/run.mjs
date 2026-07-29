@@ -162,6 +162,15 @@ function score(caseObj, ev) {
   const allowedAlternates = new Set(exp.allowedAlternates || [])
   const expectConfirmed = new Set(exp.expectConfirmed || [])
 
+  // THE VERDICT GATE. A case may pin the badge itself, not just the finding list. It exists for
+  // one shape of defect the finding gates cannot see: a repository where every individual finding
+  // is correct and the HEADLINE is still a lie — an open unproven P0/P1, or a scan that read too
+  // little, printed as 🟢 clean. Only cases that declare `verdict` are checked, so the existing
+  // corpus is untouched.
+  const expectedVerdict = exp.verdict ?? null
+  const actualVerdict = ev.result.verdict.level
+  const verdictMismatch = expectedVerdict && expectedVerdict !== actualVerdict
+
   const { matched, missing } = matchMustFind(mustFind, findings)
 
   // The set of ids that are legitimately allowed to appear for this variant.
@@ -184,6 +193,13 @@ function score(caseObj, ev) {
     filesDiscovered: dc.filesDiscovered || 0,
   }
 
+  // DECISION RATE — `(pass + fail) / enumerated`, straight from the grader. It is the counter-
+  // pressure against the architecture's cheapest exit: LAW 1 makes `undeterminable` the honest
+  // answer whenever a token is all we have, which is right, and it is also how a rule can abstain
+  // on everything while printing a full coverage table. Nothing else in this harness can tell
+  // "we looked hard and could not settle it" apart from "we never tried".
+  const dr = ev.result.decisionRate?.overall || { enumerated: 0, decided: 0 }
+
   return {
     variant: ev.variant,
     isClean,
@@ -195,6 +211,11 @@ function score(caseObj, ev) {
     total: findings.length,
     unexpected,
     unexpectedConfirmed,
+    expectedVerdict,
+    actualVerdict,
+    verdictMismatch,
+    enumerated: dr.enumerated,
+    decided: dr.decided,
     stable: ev.stable,
     ms: ev.ms,
     filesParsed: disc.filesParsed,
@@ -213,7 +234,9 @@ function dump(cases) {
     for (const variant of c.variants) {
       const ev = evaluate(c, variant)
       const dc = ev.discovery?.counts || {}
-      console.log(`\n  [${variant}]  files ${(dc.filesParsed || 0) + (dc.configParsed || 0)}/${dc.filesDiscovered} parsed, stable=${ev.stable}, ${ev.ms.toFixed(0)}ms`)
+      const dr = ev.result.decisionRate?.overall || {}
+      console.log(`\n  [${variant}]  files ${(dc.filesParsed || 0) + (dc.configParsed || 0)}/${dc.filesDiscovered} parsed, ` +
+        `verdict=${ev.result.verdict.level}, decided ${dr.decided}/${dr.enumerated}, stable=${ev.stable}, ${ev.ms.toFixed(0)}ms`)
       if (ev.secretScan) console.log(`  secret scan: engine=${ev.secretScan.engine} history=${ev.secretScan.scannedGitHistory} count=${ev.secretScan.count}`)
       if (!ev.result.findings.length) { console.log('    (no findings)'); continue }
       for (const f of ev.result.findings) {
@@ -233,6 +256,27 @@ function dump(cases) {
 
 const pct = (n, d) => (d === 0 ? '100.0%' : (100 * n / d).toFixed(1) + '%')
 
+/**
+ * THE DECISION-RATE FLOOR — the one gate that ratchets rather than merely holding.
+ *
+ * `(pass + fail) / enumerated` over the whole corpus: the share of enumerated subjects the grader
+ * actually DECIDED, as opposed to abstaining via `undeterminable`. Every other gate here protects
+ * against getting louder or wronger. This one protects against getting quieter: LAW 1 makes
+ * `undeterminable` the correct answer whenever a token is all the evidence there is, and that same
+ * correctness makes it the cheapest possible exit — a rule that abstains everywhere satisfies
+ * LAW 2, prints a complete coverage table, and has decided nothing.
+ *
+ * The floor is the value MEASURED on the corpus as it stands — 41 of 181 subjects decided across
+ * 17 variants, 22.65%, rounded down at the third decimal so the gate does not trip on its own
+ * rounding. It may not decrease. Raising it after real work is welcome; lowering it is the change
+ * this line exists to make somebody justify out loud.
+ *
+ * It is deliberately not a *target*: 22.65% is low, and it is low for a defensible reason (LAW 1
+ * forbids buying a `pass` with a token, and most route/LLM subjects have nothing else to offer).
+ * The number is here to be ratcheted upward by better evidence, never to be argued downward.
+ */
+const DECISION_RATE_FLOOR = 0.226
+
 function run(cases) {
   const failures = []
   const rows = []
@@ -242,6 +286,8 @@ function run(cases) {
   let totalFindings = 0, totalValid = 0
   let cleanVariants = 0, unexpectedConfirmedTotal = 0
   let filesParsed = 0, filesDiscovered = 0
+  let subjectsEnumerated = 0, subjectsDecided = 0
+  let verdictsPinned = 0
   let allStable = true, totalMs = 0
 
   for (const c of cases) {
@@ -260,9 +306,12 @@ function run(cases) {
       totalValid += s.valid
       filesParsed += s.filesParsed
       filesDiscovered += s.filesDiscovered
+      subjectsEnumerated += s.enumerated
+      subjectsDecided += s.decided
       totalMs += s.ms
       if (!s.stable) allStable = false
       if (s.isClean) { cleanVariants++; unexpectedConfirmedTotal += s.unexpectedConfirmed.length }
+      if (s.expectedVerdict) verdictsPinned++
 
       // ---- gates ----
       for (const m of s.missing) {
@@ -272,8 +321,20 @@ function run(cases) {
       for (const f of s.unexpectedConfirmed) {
         failures.push(`${c.id}/${variant}: UNEXPECTED confirmed finding on clean code — ${f.id} ${f.severity} ${f.subject} (false-positive gate)`)
       }
+      if (s.verdictMismatch) {
+        failures.push(`${c.id}/${variant}: the HEADLINE is wrong — expected verdict "${s.expectedVerdict}", got ` +
+          `"${s.actualVerdict}". Every finding can be right while the badge still lies (verdict gate)`)
+      }
       if (!s.stable) failures.push(`${c.id}/${variant}: grade() was not deterministic across two runs (stability gate)`)
     }
+  }
+
+  const decisionRate = subjectsEnumerated ? subjectsDecided / subjectsEnumerated : 0
+  if (decisionRate < DECISION_RATE_FLOOR) {
+    failures.push(`decision rate fell to ${pct(subjectsDecided, subjectsEnumerated)} ` +
+      `(${subjectsDecided}/${subjectsEnumerated}); the floor is ${(100 * DECISION_RATE_FLOOR).toFixed(1)}%. ` +
+      'The grader is abstaining more than it used to — `undeterminable` is honest, but it is not ' +
+      'an answer (decision-rate gate)')
   }
 
   // ---- scorecard ----
@@ -284,35 +345,46 @@ function run(cases) {
     'recall'.padEnd(9) +
     'prec'.padEnd(8) +
     'FP'.padEnd(5) +
+    'verdict'.padEnd(10) +
+    'dec'.padEnd(9) +
     'stable'.padEnd(8) +
     'ms')
-  console.log('-'.repeat(78))
+  console.log('-'.repeat(90))
   for (const r of rows) {
     const name = `${r.caseId}/${r.variant}`
     const recall = r.mustFindCount ? pct(r.matchedCount, r.mustFindCount) : '  -  '
     const prec = r.total ? pct(r.valid, r.total) : '  -  '
     const fp = r.isClean ? String(r.unexpectedConfirmed.length) : '-'
-    const bad = r.missing.length || r.unexpectedConfirmed.length || !r.stable
+    // A pinned verdict is marked with `=`, so a reader can tell an asserted badge from a reported one.
+    const verdict = (r.expectedVerdict ? '=' : ' ') + r.actualVerdict
+    const dec = `${r.decided}/${r.enumerated}`
+    const bad = r.missing.length || r.unexpectedConfirmed.length || r.verdictMismatch || !r.stable
     console.log(
       (bad ? '! ' : '  ') + name.padEnd(36) +
       recall.padEnd(9) +
       prec.padEnd(8) +
       fp.padEnd(5) +
+      verdict.padEnd(10) +
+      dec.padEnd(9) +
       (r.stable ? 'yes' : 'NO').padEnd(8) +
       r.ms.toFixed(0))
   }
-  console.log('-'.repeat(78))
+  console.log('-'.repeat(90))
 
   console.log('\nAggregate metrics')
   console.log(`  recall (planted vulns detected)   ${pct(totalMatched, totalMustFind)}  (${totalMatched}/${totalMustFind})`)
   console.log(`  precision (valid / all reported)  ${pct(totalValid, totalFindings)}  (${totalValid}/${totalFindings})`)
   console.log(`  false positives (confirmed on clean) ${unexpectedConfirmedTotal}  over ${cleanVariants} clean variant(s)  = ${pct(unexpectedConfirmedTotal, cleanVariants)}`)
   console.log(`  discovery coverage (parsed / found)  ${pct(filesParsed, filesDiscovered)}  (${filesParsed}/${filesDiscovered})`)
+  console.log(`  decision rate ((pass+fail)/enumerated) ${pct(subjectsDecided, subjectsEnumerated)}  ` +
+    `(${subjectsDecided}/${subjectsEnumerated})  floor ${(100 * DECISION_RATE_FLOOR).toFixed(1)}%` +
+    `${decisionRate < DECISION_RATE_FLOOR ? '  ← BELOW FLOOR' : ''}`)
+  console.log(`  verdicts pinned by ground truth      ${verdictsPinned} of ${rows.length} variant(s)`)
   console.log(`  stability (deterministic re-runs)    ${allStable ? 'all stable' : 'UNSTABLE'}`)
   console.log(`  runtime                              ${totalMs.toFixed(0)}ms total, ${(totalMs / Math.max(1, rows.length)).toFixed(0)}ms per variant`)
 
   // ---- verdict ----
-  console.log('\n' + '='.repeat(78))
+  console.log('\n' + '='.repeat(90))
   if (failures.length) {
     console.error(`FAIL — ${failures.length} release gate(s) tripped:`)
     for (const f of failures) console.error('  - ' + f)
@@ -321,6 +393,8 @@ function run(cases) {
   console.log('PASS — all release gates green:')
   console.log('  - recall 100% on every planted vulnerability')
   console.log('  - zero unexpected confirmed findings on fixed/clean code')
+  console.log('  - every pinned headline verdict matches (a right finding list can still print a wrong badge)')
+  console.log(`  - decision rate ${pct(subjectsDecided, subjectsEnumerated)} at or above its ${(100 * DECISION_RATE_FLOOR).toFixed(1)}% floor`)
   console.log('  - output deterministic across re-runs')
   process.exit(0)
 }
@@ -329,7 +403,7 @@ function run(cases) {
 // Exports — so test/benchmark.test.mjs can assert the same gates in-process (no duplicated logic).
 // ---------------------------------------------------------------------------
 
-export { discoverCases, evaluate, score, CLEAN_VARIANTS }
+export { discoverCases, evaluate, score, CLEAN_VARIANTS, DECISION_RATE_FLOOR }
 
 // Only take over the process when invoked directly; imported by the test, this file just exports.
 const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
