@@ -486,3 +486,119 @@ export const s = supabase`,
   assert.ok(!subjectsOf(r, 'tables').includes('table:ghost_table'),
     'a table named only in a comment must not be enumerated')
 })
+
+// ---------------------------------------------------------------------------
+// 9. AUDIT BYPASS GUARDS — the route / LLM / DEFINER / server-only detectors used to read RAW text
+//
+// The security-team audit reproduced a whole bypass tier: these detectors matched comment and
+// string content as if it were code, so a decoy comment could silence a real finding or invent a
+// false one. They now run over the stripper's CODE mask, like the table/client scans. Each test
+// below reproduces one bypass and asserts it is closed.
+// ---------------------------------------------------------------------------
+
+test('a `service_role` mention in a COMMENT does not inflate a route to a false P0', () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'app/api/public/route.ts': `// this route does NOT touch the service_role key
+export async function GET() { return Response.json({ ok: true }) }`,
+  })
+  const f = byId(r, 'CG-WEB-001')
+  assert.ok(f, 'the unauthenticated route is still flagged')
+  assert.notEqual(f.severity, 'P0', 'a comment must not make it a service-role P0')
+})
+
+test('an ownership mention in a COMMENT does not silence a service-role IDOR (CG-WEB-004)', () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'app/api/orders/[id]/route.ts': `import { createClient } from '@supabase/supabase-js'
+const admin = createClient(process.env.URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+export async function GET(req, { params }) {
+  // ownership is enforced by user_id upstream (it is not)
+  return Response.json(await admin.from('orders').select().eq('id', params.id).single())
+}`,
+  })
+  assert.ok(byId(r, 'CG-WEB-004'), 'a comment must not suppress the IDOR finding')
+})
+
+test('an auth.uid() mention in a SECURITY DEFINER comment does not silence CG-DB-004', () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'supabase/migrations/001.sql': `create function public.wipe() returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  -- access is gated by auth.uid() upstream (it is not)
+  delete from public.orders;
+end;
+$$;`,
+  })
+  assert.ok(byId(r, 'CG-DB-004'), 'a commented auth.uid() must not clear the no-auth-check finding')
+})
+
+test("a commented 'server-only' does not prune reachability and bury a leak (CG-DB-006)", () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'lib/db.ts': `// we intentionally do NOT import 'server-only' here
+import { createClient } from '@supabase/supabase-js'
+export const admin = createClient(process.env.URL, process.env.SUPABASE_SERVICE_ROLE_KEY)`,
+    'app/page.tsx': `'use client'
+import { admin } from '../lib/db'
+export default function P() { return admin ? null : null }`,
+  })
+  assert.ok(byId(r, 'CG-DB-006'), "a comment mentioning 'server-only' must not prune the client chain")
+})
+
+test('a commented `chat.completions.create` does not invent a phantom LLM site', () => {
+  const r = gradeRepo({
+    'package.json': JSON.stringify({ name: 'x', dependencies: { next: '15.0.0' } }),
+    'app/api/x/route.ts': `export async function POST() {
+  // TODO: later call openai.chat.completions.create(...) here
+  return Response.json({ ok: true })
+}`,
+  })
+  assert.ok(!byId(r, 'CG-LLM-002') && !byId(r, 'CG-LLM-004'),
+    'a commented LLM call must not create a phantom denial-of-wallet finding')
+})
+
+test('CG-LLM-003 fires on a string-concat prompt + shorthand tools (the bypass)', () => {
+  const r = gradeRepo({
+    'package.json': JSON.stringify({ name: 'x', dependencies: { openai: '4.60.0', next: '15.0.0' } }),
+    'app/api/agent/route.ts': `import OpenAI from 'openai'
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+export async function POST(req) {
+  const prompt = 'Answer this: ' + req.body.message
+  const tools = [{ name: 'sendMail' }]
+  return Response.json(await openai.chat.completions.create({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], tools }))
+}`,
+  })
+  assert.ok(byId(r, 'CG-LLM-003'),
+    'concat prompt + shorthand tools must still trigger the prompt-injection finding')
+})
+
+// Audit #6 — the worst reproduced finding. Moving the service-role client one import away used to
+// delete the IDOR and downgrade the missing-auth from P0 to P2. The import graph already knows the
+// helper is service-role; the route reachability post-pass now carries it through.
+test('a service-role client extracted into a helper still drives the route IDOR (CG-WEB-004)', () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'lib/db.ts': `import { createClient } from '@supabase/supabase-js'
+export const admin = createClient(process.env.URL, process.env.SUPABASE_SERVICE_ROLE_KEY)`,
+    'app/api/orders/[id]/route.ts': `import { admin } from '@/lib/db'
+export async function GET(req, { params }) {
+  return Response.json(await admin.from('orders').select().eq('id', params.id).single())
+}`,
+  })
+  assert.ok(byId(r, 'CG-WEB-004'), 'the IDOR must survive the client living in a helper')
+})
+
+test('an unauthenticated route reaching a service-role helper is a P0, not a P2', () => {
+  const r = gradeRepo({
+    'package.json': NEXT,
+    'lib/db.ts': `import { createClient } from '@supabase/supabase-js'
+export const admin = createClient(process.env.URL, process.env.SUPABASE_SERVICE_ROLE_KEY)`,
+    'app/api/wipe/route.ts': `import { admin } from '@/lib/db'
+export async function POST() { return Response.json(await admin.from('orders').delete()) }`,
+  })
+  const f = byId(r, 'CG-WEB-001')
+  assert.ok(f, 'the unauthenticated route is flagged')
+  assert.equal(f.severity, 'P0', 'reaching the service-role key via import makes an unauth route a total compromise')
+})

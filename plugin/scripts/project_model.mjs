@@ -13,7 +13,7 @@
 // Usage: node project_model.mjs [path] [--json]
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
-import { stripSql, stripJs, CODE } from './lib/strip_comments.mjs'
+import { stripSql, stripJs, CODE, COMMENT } from './lib/strip_comments.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -266,10 +266,24 @@ function isBarrel(rel) {
   const reexport = lines.filter(l => /^export\s+(\*|\{)[^=]*\bfrom\b/.test(l)).length
   return reexport / lines.length >= 0.6
 }
+const serverOnlyCache = new Map()
 // `import 'server-only'` makes a client import a BUILD ERROR, so a chain through it cannot exist.
+// It must be an actual import STATEMENT, not any textual mention: a comment like
+// `// we deliberately do NOT use 'server-only' here` used to match and prune the reachability
+// graph, burying a real client-side leak (an adversarial-audit bypass). Matched on raw text (the
+// module specifier is a string) but rejected inside comments via the mask.
 function hasServerOnly(rel) {
+  if (serverOnlyCache.has(rel)) return serverOnlyCache.get(rel)
   const f = files.get(rel)
-  return !!f && /['"]server-only['"]/.test(f.text)
+  let yes = false
+  if (f) {
+    const { mask } = stripJs(f.text)
+    const re = /import\s*['"]server-only['"]|require\(\s*['"]server-only['"]\s*\)/g
+    let m
+    while ((m = re.exec(f.text))) { if (mask[m.index] === CODE) { yes = true; break } }
+  }
+  serverOnlyCache.set(rel, yes)
+  return yes
 }
 
 const barrelCache = new Map()
@@ -397,6 +411,11 @@ for (const [r, f] of files) {
     : /^(app|src\/app)\/.*\/route\.(t|j)sx?$/.test(r) ? 'app-route'
       : /^(supabase\/functions|netlify\/functions|api)\//.test(r) ? 'serverless-fn' : null
   if (!kind) continue
+  // Security hints run on comment/string-STRIPPED code. A decoy comment mentioning `service_role`
+  // must not inflate a correct route to a false P0, and a comment mentioning `user_id`/`auth.uid()`
+  // must not silence a real IDOR — both were adversarial-audit bypasses. METHOD_RE stays on raw
+  // text because `req.method === 'GET'` reads a method-name string literal.
+  const { code } = stripJs(f.text)
   const methods = new Set(); let m; METHOD_RE.lastIndex = 0
   while ((m = METHOD_RE.exec(f.text))) methods.add(m[1] || m[2])
   const mutating = [...methods].some(x => x !== 'GET') || methods.size === 0
@@ -404,16 +423,16 @@ for (const [r, f] of files) {
     file: r, kind,
     methods: [...methods].length ? [...methods] : ['UNKNOWN'],
     mutating,
-    hasAuthCheck: AUTH_HINT.test(f.text),
-    hasRateLimit: RATE_HINT.test(f.text),
-    hasValidation: VALIDATE_HINT.test(f.text),
-    usesServiceRole: /SERVICE_ROLE|service_role/.test(f.text),
-    readsIdParam: /(params|query)\s*[.\[]\s*['"]?\w*id/i.test(f.text) || /\[\w*id\w*\]/i.test(r),
+    hasAuthCheck: AUTH_HINT.test(code),
+    hasRateLimit: RATE_HINT.test(code),
+    hasValidation: VALIDATE_HINT.test(code),
+    usesServiceRole: /SERVICE_ROLE|service_role/.test(code),
+    readsIdParam: /(params|query)\s*[.\[]\s*['"]?\w*id/i.test(code) || /\[\w*id\w*\]/i.test(r),
     // Whether the handler consumes a request body at all. Without this, "no schema validation"
     // fires on handlers that take no input, which is noise on correct code — and noise is what
     // makes people stop reading the report.
-    readsBody: /\breq(uest)?\.json\s*\(|\breq(uest)?\.body\b|\.formData\s*\(|await\s+\w+\.json\s*\(/.test(f.text),
-    ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id)/.test(f.text),
+    readsBody: /\breq(uest)?\.json\s*\(|\breq(uest)?\.body\b|\.formData\s*\(|await\s+\w+\.json\s*\(/.test(code),
+    ownershipFilter: /(user_id|userId|owner_id|ownerId|auth\.uid\(\)|session\.user\.id|user\.id)/.test(code),
   })
 }
 // middleware-based auth (a route may be protected centrally — avoids false "no auth")
@@ -456,7 +475,9 @@ for (const p of sqlFiles) {
         at: `${p}:${at}`,
         securityDefiner: /security\s+definer/i.test(tail),
         setsSearchPath: /set\s+search_path/i.test(tail),
-        bodyChecksAuth: body ? /auth\.uid\(\)|auth\.jwt\(\)/i.test(body.text) : null,
+        // Scan the comment-stripped body: a `-- enforced by auth.uid() elsewhere` comment inside a
+        // SECURITY DEFINER body used to silence the no-auth-check finding (an audit bypass).
+        bodyChecksAuth: body ? /auth\.uid\(\)|auth\.jwt\(\)/i.test(stripSql(body.text).code) : null,
       })
     }
   }
@@ -791,6 +812,31 @@ for (const [r, f] of files) {
   }
 }
 
+// ---------- route reachability to a service-role client ----------
+//
+// AUDIT #6 (the worst reproduced finding): the flagship IDOR/auth findings vanished the moment the
+// privileged client moved one import away — the universal real pattern is a route that imports
+// `lib/db.ts`, where a `createClient(url, SERVICE_ROLE_KEY)` lives. The route-file text scan
+// (`usesServiceRole`) can't see it, but the import graph and `supabaseClients` already do. This
+// post-pass marks a route as reaching a service-role client when any module it transitively imports
+// builds one, so `gradeRoutes` can treat "no auth" as a P0 and detect the IDOR.
+{
+  const serviceRoleFiles = new Set(
+    supabaseClients.filter(c => c.identity === 'service-role').map(c => c.file))
+  for (const route of routes) {
+    if (route.usesServiceRole) { route.reachesServiceRoleClient = true; continue }
+    const seen = new Set([route.file]); const q = [route.file]; let found = false
+    while (q.length && !found) {
+      for (const dep of imports.get(q.shift()) || []) {
+        if (seen.has(dep)) continue
+        if (serviceRoleFiles.has(dep)) { found = true; break }
+        seen.add(dep); q.push(dep)
+      }
+    }
+    route.reachesServiceRoleClient = found
+  }
+}
+
 // ---------- next.config.js ----------
 //
 // `env:` and `publicRuntimeConfig` INLINE arbitrary server env vars into the client bundle with NO
@@ -845,17 +891,30 @@ const llmSites = []
 for (const [r, f] of files) {
   const importsProvider = [...(bareImports.get(r) || [])]
     .some(p => LLM_PKGS.has(p) || p.startsWith('@ai-sdk/'))
-  if (!importsProvider && !LLM_CALL_RE.test(f.text)) continue
+  const { code, mask } = stripJs(f.text)
+  // A provider hostname lives in a URL STRING (which stripping blanks), so the call/host signal is
+  // matched on RAW text but rejected inside comments — a commented `chat.completions.create` must
+  // not invent a phantom LLM site (an audit false positive). The flags are code patterns, checked
+  // on stripped code; template-literal `${…}` expressions survive stripping as code.
+  let llmCall = false
+  { const re = new RegExp(LLM_CALL_RE.source, 'g'); let m; while ((m = re.exec(f.text))) { if (mask[m.index] !== COMMENT) { llmCall = true; break } } }
+  if (!importsProvider && !llmCall) continue
   llmSites.push({
     file: r,
     clientReachable: clientReachable.has(r),
     serverReachable: serverReachable.has(r),
-    browserFlag: /dangerouslyAllowBrowser\s*:\s*true/.test(f.text),
-    hasMaxTokens: /max_tokens|maxTokens|maxOutputTokens/.test(f.text),
-    hasRateLimit: RATE_HINT.test(f.text),
-    hasAuth: AUTH_HINT.test(f.text),
-    buildsPromptFromInput: /`[^`]*\$\{[^}]*(req\.body|req\.query|message|input|prompt|userMessage|query)[^}]*\}[^`]*`/.test(f.text),
-    definesTools: /(tools\s*:|tool\(|function_call|functionDeclarations|toolChoice)/.test(f.text),
+    browserFlag: /dangerouslyAllowBrowser\s*:\s*true/.test(code),
+    hasMaxTokens: /max_tokens|maxTokens|maxOutputTokens/.test(code),
+    hasRateLimit: RATE_HINT.test(code),
+    hasAuth: AUTH_HINT.test(code),
+    // User input reaching the prompt, via template interpolation OR string concatenation, case-
+    // insensitive. The concat form (`'…' + req.body.x`) defeated the template-only regex — an
+    // adversarial-audit bypass of the only prompt-injection detector.
+    buildsPromptFromInput:
+      /\$\{[^}]*(req\.body|req\.query|message|input|prompt|user(?:Message|Input)|query)[^}]*\}/i.test(code)
+      || /(req\.body|req\.query|user(?:Message|Input))\s*(?:\.\w+)?\s*\+|\+\s*(req\.body|req\.query|user(?:Message|Input))/i.test(code),
+    // Tools passed by explicit key `tools:`, object shorthand `tools,` / `tools }`, or a call form.
+    definesTools: /\btools\s*[:,}]|\btool\(|function_call|functionDeclarations|toolChoice/.test(code),
   })
 }
 
