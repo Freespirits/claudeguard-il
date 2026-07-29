@@ -1,0 +1,11 @@
+{
+  "name": "llm-fixed",
+  "private": true,
+  "dependencies": {
+    "next": "15.0.0",
+    "@supabase/ssr": "0.5.0",
+    "openai": "4.60.0",
+    "zod": "3.23.0",
+    "@upstash/ratelimit": "2.0.0"
+  }
+}

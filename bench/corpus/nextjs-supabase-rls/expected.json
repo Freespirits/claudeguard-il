@@ -1,0 +1,14 @@
+{
+  "notes": "INTENT: a table with RLS off is a total data exposure (anyone with the anon key reads/writes it), and a service-role key behind a NEXT_PUBLIC_ prefix is compiled into the browser bundle verbatim. Both are provable from source, so both must grade as confirmed P0s. The fixed variant enables RLS with an owner-scoped auth.uid() policy and moves the key server-side (no public prefix), so it must be completely silent. This pair guards the two flagship static detectors (CG-DB-001, CG-ENV-001).",
+  "vulnerable": {
+    "mustFind": [
+      { "id": "CG-DB-001", "severity": "P0", "confidence": "confirmed", "subject": "table:notes", "at": "supabase/migrations/001_init.sql:3" },
+      { "id": "CG-ENV-001", "severity": "P0", "confidence": "confirmed", "subject": "env:NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY", "at": "lib/supabase-admin.ts:7" }
+    ],
+    "allowedAlternates": []
+  },
+  "fixed": {
+    "expectConfirmed": [],
+    "allowedAlternates": []
+  }
+}

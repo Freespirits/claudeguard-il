@@ -180,9 +180,14 @@ The policy itself is written out in the `claudeguard` skill's `references/method
      *and* marking it unconfirmed — would bury it where nobody looks.
    - **Label provenance** on every finding: a rule proved it, or a reviewer thinks so. The two
      deserve different responses from the user.
-   - **Render the coverage block.** For each set: enumerated, and the pass / fail / undeterminable /
-     allowlisted counts, which add up by construction. Coverage is what stops a quiet report from
-     being read as a safe one.
+   - **Render discovery coverage first, then analysis coverage — they are two different axes.**
+     Discovery (`result.discovery`) is what the engine could *see*: files parsed vs skipped (with
+     reasons), routes modeled vs only partially (`withUnknownMethods`), unresolved imports, and
+     `schema.rlsVerifiable`. Analysis coverage (`result.coverage`) is how it *graded* what it saw —
+     the pass / fail / undeterminable / allowlisted counts, which add up by construction. A report
+     that shows only analysis coverage can look complete while the engine silently skipped half the
+     repo, so discovery goes first. If `discovery.reconciles` is false, or `schema.rlsVerifiable` is
+     false, say so loudly. See `references/methodology/discovery.md`.
    - If `verifyQuery` is non-null, hand it to the user verbatim — it answers the RLS question the
      repo could not, in about ten seconds against their own database.
    - Print `limits` from the model. A heuristic pass that hides its own blind spots is worse than

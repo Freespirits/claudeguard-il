@@ -1,0 +1,10 @@
+{
+  "name": "llm-vuln",
+  "private": true,
+  "dependencies": {
+    "next": "15.0.0",
+    "@supabase/ssr": "0.5.0",
+    "openai": "4.60.0",
+    "zod": "3.23.0"
+  }
+}

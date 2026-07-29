@@ -129,6 +129,19 @@ jobs:
               }
             }
 
+            // DISCOVERY coverage is a release gate: a parser failure or skipped subject may never
+            // be hidden. The engine must always emit a discovery ledger, and its file counts must
+            // reconcile — if they do not, the scan silently under-read the repo.
+            if (!r.discovery) {
+              fails.push('the grader must surface a discovery ledger');
+            } else {
+              const c = r.discovery.counts;
+              const sum = c.filesParsed + c.unsupported + c.oversized + c.readErrors;
+              if (sum !== c.filesDiscovered || r.discovery.reconciles !== true) {
+                fails.push('discovery ledger does not reconcile: ' + sum + ' != ' + c.filesDiscovered);
+              }
+            }
+
             if (fails.length) { fails.forEach(f => console.error('✖ ' + f)); process.exit(1); }
-            console.log('ok: grader verdict, confirmed P0s and coverage accounting all hold');
+            console.log('ok: grader verdict, confirmed P0s, coverage accounting and discovery ledger all hold');
           "

@@ -182,6 +182,51 @@ function urlPathOf(routeFile) {
 }
 
 /**
+ * Convert one Next.js middleware matcher pattern to a regex source.
+ *
+ * A matcher's spelling must not change its meaning: `/api/:path*` and `/api/(.*)` describe the same
+ * set of paths and must both cover `/api/widgets`. An earlier version escaped `(` `.` `)` but NOT
+ * `*`, so its attempt to un-escape `(.*)` never fired and a `(.*)` matcher — one of the most common
+ * Next.js forms — flipped a protected route to a false "no auth". This converter handles the tokens
+ * by MEANING, protecting user-written regex groups (balanced, possibly nested) before escaping the
+ * literal remainder.
+ */
+function matcherToRegex(pat) {
+  const stash = []
+  const put = s => `\x00${stash.push(s) - 1}\x00`
+
+  // 1. Protect user-written regex groups verbatim: `(.*)`, `(a|b)`, `((?!api|_next).*)`.
+  let out = ''
+  for (let i = 0; i < pat.length;) {
+    if (pat[i] === '(') {
+      let depth = 0, j = i
+      for (; j < pat.length; j++) {
+        if (pat[j] === '(') depth++
+        else if (pat[j] === ')' && --depth === 0) break
+      }
+      if (depth === 0) { out += put(pat.slice(i, j + 1)); i = j + 1; continue }
+    }
+    out += pat[i++]
+  }
+
+  // 2. Named params, by meaning. `/:x*` covers the segment AND its absence (`/api` and `/api/a`).
+  out = out
+    .replace(/\/:\w+\*/g, () => put('(?:/.*)?'))
+    .replace(/:\w+\*/g, () => put('.*'))
+    .replace(/:\w+\+/g, () => put('.+'))
+    .replace(/:\w+\?/g, () => put('[^/]*'))
+    .replace(/:\w+/g, () => put('[^/]+'))
+    .replace(/\*/g, () => put('.*'))
+
+  // 3. Escape the literal remainder. Placeholders (NUL + digits) carry no regex metachars, so they
+  //    survive this untouched.
+  out = out.replace(/[.+^${}()|[\]\\/]/g, '\\$&')
+
+  // 4. Restore the protected fragments.
+  return out.replace(/\x00(\d+)\x00/g, (_, n) => stash[Number(n)])
+}
+
+/**
  * Does a Next.js middleware matcher cover this URL path?
  *
  * Deliberately conservative: an unparseable matcher returns false, so we under-claim coverage
@@ -192,14 +237,8 @@ function matcherCovers(matcher, urlPath) {
   const patterns = String(matcher).split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
   for (const pat of patterns) {
     if (!pat.startsWith('/')) continue
-    let re = pat
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/:\w+\*/g, '.*')
-      .replace(/:\w+/g, '[^/]+')
-      .replace(/\/\\\(\\\.\\\*\\\)/g, '/.*')
-      .replace(/\*/g, '.*')
     try {
-      if (new RegExp(`^${re}$`).test(urlPath)) return true
+      if (new RegExp(`^${matcherToRegex(pat)}$`).test(urlPath)) return true
     } catch { /* unparseable matcher: claim nothing */ }
   }
   return false
@@ -750,6 +789,11 @@ function gradeLlmSites(model, ledger, findings, allow) {
     const subject = `llm:${s.file}`
     if (allow.has(subject)) { ledger.record('llmSites', subject, 'allowlisted', 'user allowlist'); continue }
 
+    // A call site's DISPOSITION is exclusive (LAW 2), but its FINDINGS are not: a browser-configured
+    // SDK is ALSO unthrottled and unbounded, and each is separately worth reporting. An earlier
+    // version returned right after the browser-flag finding, which hid the denial-of-wallet
+    // detectors on exactly the worst sites — the ones already leaking the key.
+    let browserExposed = false
     if (s.browserFlag) {
       findings.push(finding({
         id: 'CG-LLM-001', subject,
@@ -763,8 +807,7 @@ function gradeLlmSites(model, ledger, findings, allow) {
         guard: 'guard-recipes/llm-guardrails.md#server-proxy',
         owasp: 'LLM06', cwe: 'CWE-200',
       }))
-      ledger.record('llmSites', subject, 'fail', 'dangerouslyAllowBrowser enabled')
-      continue
+      browserExposed = true
     }
 
     if (!s.hasRateLimit) {
@@ -818,9 +861,14 @@ function gradeLlmSites(model, ledger, findings, allow) {
       }))
     }
 
-    // LAW 1: an auth token in the file does not prove the call site is gated.
-    ledger.record('llmSites', subject, 'undeterminable',
-      'server-side call site — whether it is gated and bounded is not verified from source')
+    // Disposition: a browser-exposed SDK is a definitive fail; otherwise LAW 1 applies — an auth
+    // token in the file does not prove the call site is gated, so it is undeterminable.
+    if (browserExposed) {
+      ledger.record('llmSites', subject, 'fail', 'dangerouslyAllowBrowser enabled — the SDK ships to the browser')
+    } else {
+      ledger.record('llmSites', subject, 'undeterminable',
+        'server-side call site — whether it is gated and bounded is not verified from source')
+    }
   }
 }
 
@@ -1587,6 +1635,10 @@ export function grade(model, opts = {}) {
     ...summarize(sorted),
     findings: sorted,
     coverage,
+    // DISCOVERY coverage travels alongside analysis coverage, as its own axis: what the engine
+    // could and could not SEE, versus how it graded what it saw. The renderer prints them as two
+    // separate blocks so a partial scan cannot pass for a complete one. See ADR/methodology.
+    discovery: model.discovery || null,
     // Handed to the user verbatim when the schema could not be read, so they can answer the
     // question we could not.
     verifyQuery: model.database?.coverage?.verifyQuery || null,
