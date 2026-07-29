@@ -1794,6 +1794,95 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Business logic — the one tier that cannot be proven, only reviewed.
+//
+// Every other rule asks a question the code answers by itself: is RLS on, is the key behind a public
+// prefix, does this handler compare a column. This one asks what the app is SUPPOSED to permit, and
+// the code cannot say. "User A can read user B's order" is a critical bug in a store and a
+// deliberate feature in an admin console — byte-identical code, opposite verdicts.
+//
+// So this layer never proves anything. It checks code against a STATED intent, and every finding it
+// makes is a reviewer's lead: `judgement` evidence, `reviewer` provenance, capped at `likely`, and
+// therefore unable to move the verdict, which counts only `confirmed`. The assertion under
+// OBSERVATION_POLICY enforces that at module load so a later edit cannot quietly promote a guess
+// about business rules into a certainty.
+// ---------------------------------------------------------------------------
+function gradeBusinessLogic(model, ledger, findings, allow, opts) {
+  const audit = auditBusinessLogic(model, {
+    intent: opts.intent ?? null,
+    intentError: opts.intentError ?? null,
+  })
+
+  ledger.declare('businessLogic')
+  ledger.declare('businessLogicScope')
+
+  const emit = o => {
+    const p = OBSERVATION_POLICY[o.kind]
+    // A kind with no policy is a wiring bug, not a finding. Declaring it keeps the arithmetic exact
+    // and makes the gap visible instead of dropping the observation on the floor.
+    if (!p) {
+      ledger.record('businessLogic', o.subject, 'undeterminable', `no policy owns business-logic kind "${o.kind}"`)
+      return
+    }
+    findings.push(finding({
+      id: p.id, subject: o.subject,
+      title_en: p.title_en, title_he: p.title_he,
+      severity: p.sev, evidence: p.evidence, provenance: p.provenance,
+      why: o.detail || p.title_en,
+      at: Array.isArray(o.at) ? o.at : [],
+      exploit: p.exploit, impact: p.impact, guard: p.guard,
+      cwe: p.cwe || null, owasp: p.owasp || null,
+      tier: 'business-logic', autofixable: false,
+      assumption: p.assumption || null,
+    }))
+  }
+
+  // Which handler touches which resource. Declared per route, because attributing a `.from('orders')`
+  // to one of twelve handlers sharing a file by proximity would be a guess wearing a fact's clothes.
+  for (const row of audit.scope) ledger.record('businessLogicScope', row.subject, row.disposition, row.note)
+
+  // The three classes no fact supports, the intent's free-form prose rules, resources the intent
+  // names that do not exist, and tables the intent says nothing about.
+  for (const row of [...audit.global, ...audit.extra]) {
+    ledger.record('businessLogic', row.subject, row.disposition, row.note)
+  }
+
+  const observed = new Map(audit.observations.map(o => [o.subject, o]))
+
+  for (const r of audit.resources) {
+    for (const c of r.classes) {
+      const subject = `bl:${r.resource}:${c.class}`
+      if (allow.has(subject)) {
+        ledger.record('businessLogic', subject, 'allowlisted', 'user allowlist')
+        continue
+      }
+      ledger.record('businessLogic', subject, c.disposition, c.note)
+      const o = observed.get(subject)
+      if (o) emit(o)
+    }
+  }
+
+  // An unconfirmed intent is a COVERAGE LIMITATION, never a finding — and this is the one place the
+  // distinction earns its keep. Emitting it as a finding put `CG-BIZ-010 P2` on every repository
+  // that has no claudeguard.intent.yml, which is every repository on its first run: the tool would
+  // have reported a security finding because the user had not configured it yet. Nothing about the
+  // app is wrong; something about our knowledge of it is, and that belongs in the coverage table.
+  //
+  // It is still recorded loudly. `businessLogic.status`, the assumptions list and the proposed
+  // intent file all travel in the report, so the section cannot be mistaken for a confirmed clean
+  // result — it just does not manufacture a P-level for a missing config file.
+  const banner = audit.observations.find(o => o.kind === 'bl-intent-unconfirmed')
+  if (banner) {
+    ledger.record('businessLogic', banner.subject, 'undeterminable',
+      audit.error
+        ? `claudeguard.intent.yml could not be read (${audit.error}), so it was ignored entirely and every ownership model below was assumed from column names`
+        : 'no claudeguard.intent.yml was provided, so every ownership model below was assumed from column names rather than confirmed by the author')
+  }
+
+  return audit
+}
+
 /**
  * GRADE OR DECLARE — the safety net.
  *
@@ -2064,19 +2153,19 @@ const OBSERVATION_POLICY = {
     guard: 'guard-recipes/zod-validation.md#pick-allowed-fields', cwe: 'CWE-915', owasp: 'A04:2021',
     assumption: 'That the object being spread was not already narrowed to safe fields by a validator this pass did not follow.',
   },
-  'bl-intent-unconfirmed': {
-    // A COVERAGE finding, not a claim about the app: it says the business-logic section rests on a
-    // guess. P2 because the impact-if-true is "a real authorization bug went unreported here", and
-    // `judgement` because raising it to `definitive` would make every repo without an optional
-    // config file grade `medium` — which is the cry-wolf failure this tool exists to avoid.
-    sev: 'P2', evidence: 'judgement', provenance: 'reviewer', id: 'CG-BIZ-010',
-    title_en: 'Business-logic rules were assumed, not confirmed',
-    title_he: 'כללי הלוגיקה העסקית הונחו ולא אושרו',
-    exploit: 'Nothing directly. The audit below checked the code against rules this tool guessed, so a real authorization bug can sit inside a section that reads as clean.',
-    impact: 'Every ownership conclusion in the business-logic section is unanchored until you confirm the model.',
-    guard: 'guard-recipes/business-logic-intent.md#intent-file',
-    assumption: 'That the guessed ownership model happens to match what the app actually intends.',
-  },
+  // `bl-intent-unconfirmed` DELIBERATELY HAS NO POLICY, and must never be given one.
+  //
+  // It had one. Being `judgement` it capped at `likely` and so could not turn the badge red — that
+  // much was reasoned correctly. But it still printed `CG-BIZ-010 P2` in the findings list of every
+  // repository with no `claudeguard.intent.yml`, which is every repository on its first run. The
+  // tool reported a security finding because the user had not written an optional config file yet.
+  // Every cry-wolf test in the suite caught it the moment the layer was wired in.
+  //
+  // Nothing about the app is wrong in that situation; something about OUR KNOWLEDGE of it is, and
+  // that is a coverage limitation. `gradeBusinessLogic` records it as an `undeterminable` row and
+  // the report carries `businessLogic.status`, the assumptions list and a proposed intent file, so
+  // the section can never be mistaken for a confirmed clean result. A missing config file is not a
+  // vulnerability, and a finding list that says otherwise trains people to skim past the real ones.
 
   // ---- dynamic testing (Tier 2/3, behind the gate in dynamic_gate.mjs) --------------------
   //
@@ -2677,6 +2766,7 @@ export function grade(model, opts = {}) {
   gradeFirebaseRules(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
+  const businessLogic = gradeBusinessLogic(model, ledger, findings, allow, opts)
   // Runs LAST, on purpose: it declares what the rules above did not claim, so it must see the
   // finished picture rather than race the rules for a subject.
   declareUngradedSurfaces(model, ledger)
@@ -2714,6 +2804,20 @@ export function grade(model, opts = {}) {
     // could and could not SEE, versus how it graded what it saw. The renderer prints them as two
     // separate blocks so a partial scan cannot pass for a complete one. See ADR/methodology.
     discovery: model.discovery || null,
+    // The business-logic tier's own accounting: whether the intent was CONFIRMED by the author or
+    // assumed from column names, `rulesChecked / rulesTotal` per resource, and what was assumed
+    // rather than established. A business-logic section with no coverage line is the same false
+    // all-clear the rest of this tool exists to prevent — worse here, because these are the bugs a
+    // scanner is expected to miss, so a confident silence is most dangerous exactly here.
+    businessLogic: {
+      status: businessLogic.status,
+      error: businessLogic.error,
+      columnsKnown: businessLogic.columnsKnown,
+      resources: businessLogic.resources,
+      assumptions: businessLogic.assumptions,
+      // Printed verbatim so the user can paste it into claudeguard.intent.yml and correct it.
+      proposedIntent: businessLogic.proposedYaml,
+    },
     // Handed to the user verbatim when the schema could not be read, so they can answer the
     // question we could not.
     verifyQuery: model.database?.coverage?.verifyQuery || null,
