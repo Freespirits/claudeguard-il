@@ -104,11 +104,23 @@ No confirmed findings. / אין ממצאים מאומתים.
 Render each finding twice-headed (EN then HE) but share one evidence/guard block. Print the
 `at` locations verbatim — they exist so the user can check our work in their own editor.
 
+**Every finding opens with a plain-words line, before the technical prose.** This audience is
+non-expert, so the first thing they read must be jargon-free. Look the finding's `id` up in
+`plain-language/findings.md` and print its `HE` and `EN` text as the `בפשטות / In plain words`
+line. If an id has no entry there, fall back to a one-sentence plain paraphrase — never leave it
+out. The concepts behind the findings are taught once in `plain-language/concepts.he.md`; link the
+reader there in the footer.
+
 ```markdown
 ### 1 · CG-SB-001 · 🔴 P0 · service_role key exposed to the browser
 **כותרת:** מפתח service_role חשוף לדפדפן · חומרה: 🔴 P0 · ודאות: מאומת
 Evidence: definitive · found by: rule · tier: static
 ראיה: חד-משמעית · נמצא על ידי: כלל · שכבה: static
+
+**בפשטות:** המפתח הכי חזק של מסד הנתונים שלכם נשלח לדפדפן של כל מי שנכנס לאתר. כל אחד יכול למצוא
+אותו ולמחוק את כל המידע. החליפו אותו עכשיו והעבירו אותו לצד השרת.
+**In plain words:** The most powerful key to your database is being sent to every visitor's
+browser. Anyone can find it and delete all your data. Rotate it now and move it to the server.
 
 **EN — What & why:** The Supabase `service_role` key bypasses all Row Level Security. It sits
 behind a `NEXT_PUBLIC_` prefix, which the bundler substitutes into client output verbatim, so it
@@ -260,6 +272,11 @@ Next steps / הצעדים הבאים:
 
 A clean verdict means nothing was proven — not that nothing is wrong. Read the Coverage section.
 פסק דין נקי אומר שדבר לא הוכח — לא שאין בעיות. קראו את מקטע הכיסוי.
+
+New to this? Read plain-language/concepts.he.md — it explains RLS, service_role, secrets and the
+rest in plain Hebrew, once, with no jargon.
+חדשים בתחום? קראו את plain-language/concepts.he.md — הוא מסביר RLS, service_role, סודות והשאר
+בעברית פשוטה, פעם אחת, בלי ז'רגון.
 
 Tiers 1–2 (live / DAST) require you to own the target and confirm authorization.
 בדיקות live/DAST דורשות בעלות על היעד ואישור מפורש.

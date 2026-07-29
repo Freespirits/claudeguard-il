@@ -26,6 +26,10 @@ const COPY = [
   // The v2 rigour lives in plugin/scripts/, which the claude.ai skill cannot run. methodology/
   // is that method written out for a reader with no interpreter, so both wrappers get it.
   ['methodology', 'dir'],
+  // Plain-Hebrew explanations for non-expert vibecoders: a per-finding "in plain words" table
+  // (findings.md, keyed by finding id) and a standalone concepts guide. Both wrappers render the
+  // per-finding line, so both need the table.
+  ['plain-language', 'dir'],
   ['severity-model.md', 'file'],
   ['report-template.md', 'file'],
 ]

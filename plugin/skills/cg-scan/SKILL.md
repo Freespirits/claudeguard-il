@@ -164,6 +164,12 @@ The policy itself is written out in the `claudeguard` skill's `references/method
 8. **Report.** Render with the `claudeguard` skill's `references/report-template.md`, bilingual
    Hebrew + English prose, code and identifiers in English only.
 
+   - **Open every finding with a plain-words line, before the technical prose.** The audience is
+     non-expert, so the first thing they read must be jargon-free. Look the finding's `id` up in
+     `references/plain-language/findings.md` and print its `HE` + `EN` text as the
+     `בפשטות / In plain words` line. No entry for an id → write a one-sentence plain paraphrase
+     yourself; never skip it. Point beginners to `references/plain-language/concepts.he.md` in the
+     footer — it teaches the concepts (RLS, service_role, secrets) once, in plain Hebrew.
    - **Headline verdict = `verdict` from the grader, unchanged.** It counts **only** findings whose
      confidence is `confirmed` (`confirmedP0`, `confirmedP1`, `level`). Print the rule next to it so
      the number is not mistaken for a total.

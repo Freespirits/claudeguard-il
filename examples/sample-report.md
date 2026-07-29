@@ -50,6 +50,14 @@ Only `confirmed` rows are here; this table is what the badge is made of.
 Evidence: definitive · found by: rule · tier: static
 ראיה: חד-משמעית · נמצא על ידי: כלל · שכבה: static
 
+**בפשטות:** המפתח הכי חזק של מסד הנתונים שלך — כזה שנותן שליטה מלאה — נשלח לדפדפן של כל מי שנכנס
+לאתר. כל אחד יכול ללחוץ F12, למצוא אותו, ולקרוא או למחוק את כל המידע, כולל של המשתמשים שלך. זו לא
+"אולי" בעיה — זו דלת פתוחה לרווחה. מה עושים: מחליפים את המפתח עכשיו (הישן כבר נחשף), ומעבירים אותו
+לצד השרת שבו רק הקוד שלך רואה אותו.
+**In plain words:** The most powerful key to your database is being sent to every visitor's browser.
+Anyone can press F12, find it, and read or delete all your data. Rotate it now (the old one is
+already burned) and move it to the server side.
+
 **EN — What & why:** `NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY` carries a `NEXT_PUBLIC_` prefix, which
 the bundler substitutes into client output verbatim. The `service_role` key bypasses every Row
 Level Security policy, and it now ships in the browser bundle for anyone to read.
@@ -78,6 +86,15 @@ server-only variable; use the anon key in the client and rely on RLS.
 **כותרת:** נמצאו סודות חיים שהועלו ל-git · חומרה: 🔴 P0 · ודאות: מאומת
 Evidence: definitive · found by: rule · tier: static
 ראיה: חד-משמעית · נמצא על ידי: כלל · שכבה: static
+
+**בפשטות:** ייתכן שסוד (מפתח, סיסמה או אסימון גישה) נשמר בטעות בתוך קוד המקור שהעליתם ל-git. כל מי
+שיש לו גישה למאגר — או להיסטוריה שלו — יכול להעתיק את הערך ולהשתמש בו. חשוב לזכור: גם אם תמחקו את
+השורה עכשיו, הערך נשאר בהיסטוריה של git ונחשב "שרוף". מה עושים: אם זה סוד שנותן גישה אמיתית —
+החליפו אותו מיד; אם זה מזהה ציבורי שנועד להיחשף, סמנו אותו ברשימת ההיתרים כדי שלא יופיע שוב.
+**In plain words:** A secret (a key, password, or access token) may have been accidentally saved in
+source code you pushed to git. Anyone with access to the repo or its history can copy and use it.
+Even if you delete the line now, the value stays in history and must be treated as burned — rotate
+it if it grants real access; allowlist it if it is a public identifier.
 
 **EN — What & why:** Four privileged credentials are committed as real values — an OpenAI key, an
 AWS access key, and a Postgres URL with an embedded password in `.env`, plus a second OpenAI key
@@ -137,6 +154,14 @@ Example block (note the **Assumption** line, which a confirmed block may omit):
 **כותרת:** לנתיב `/api/orders/[id]` אין אימות גלוי · חומרה: 🟠 P1 · ודאות: דורש בדיקה
 Evidence: weak · found by: rule · tier: static
 ראיה: חלשה · נמצא על ידי: כלל · שכבה: static
+
+**בפשטות:** לנקודת הקצה (endpoint — כתובת שהשרת שלך חושף) הזו לא נמצא אימות גלוי, כלומר לא ראינו קוד
+שבודק שהמשתמש מחובר. ייתכן שהבדיקה קיימת בקובץ אחר שהקוד הזה משתמש בו, ולכן כדאי לבדוק. אם באמת אין
+אימות, כל אחד באינטרנט יכול לקרוא לנקודה הזו בלי להתחבר. ודאו שיש כאן בדיקת התחברות לפני שהפעולה
+מתבצעת.
+**In plain words:** This endpoint has no visible auth — we saw no code checking the user is logged
+in. The check may live in another file this code imports, so it is worth verifying. If there really
+is none, anyone on the internet can call it without logging in. Make sure a login check runs first.
 
 **EN — What & why:** Neither the handler nor a middleware matcher covering this path contains any
 recognisable authentication call.
