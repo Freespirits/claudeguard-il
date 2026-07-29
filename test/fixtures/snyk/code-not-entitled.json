@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "error": "Snyk Code is not supported for your current organization: ``.",
+  "path": "sample-vulnerable-app"
+}

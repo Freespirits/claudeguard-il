@@ -17,7 +17,43 @@ SNYK_TOKEN=<personal-access-token>    # auth (SNYK_CFG_ORG=<org> optional)
 
 It is a **local** MCP server with local file access. One safety wrinkle to respect: Snyk requires
 **trusting a folder** before it scans (`snyk_trust`, or `--disable-trust`). The adapter trusts only
-the repo path under scan, never a parent.
+the repo path under scan, never a parent — a trust grant covers every subdirectory, so trusting a
+home directory silently authorises every future scan of every sibling project on the machine.
+
+### What the MCP transport actually returns — verified, and not what the table below implies
+
+The server does **not** proxy the CLI's JSON, and building on the assumption that it does is the
+single most expensive mistake available here: the adapter would answer `null` to every call, for
+ever, with nothing throwing to explain it. Confirmed against `snyk` 1.1306.2:
+
+- `snyk_sca_scan` and `snyk_code_scan` run the CLI, **discard its output**, and return Snyk's own
+  summary: `{success, issueCount, issues: [{id, title, severity, cwes[], cves[], packageName,
+  version, ecosystem, fixedIn[], filePath, line, column, message, dataflow[], isIgnored, …}]}`.
+  Snyk Code's dataflow survives that mapping; **SCA reachability does not appear in it at all**, so
+  the reachability win is a CLI-path capability.
+- `snyk_iac_scan` and `snyk_container_scan` expose **no `json` parameter and no output mapper** —
+  over MCP they answer in human-readable text. There is nothing to normalise, so those two are a
+  declared coverage gap on the MCP path and the CLI is the only structured route.
+- Every result arrives as `{content: [{type: 'text', text: '<json-encoded string>'}]}`, so the
+  payload needs parsing a second time.
+
+### The failure modes, which are the part that actually has to be right
+
+Recorded from a real unauthenticated run:
+
+```
+snyk test --json           → {"ok": false, "error": "Use `snyk auth` to authenticate.", "path": "…"}
+snyk code test --json      → the same envelope
+snyk container test --json → the same envelope
+snyk iac test --json       → NOT JSON. A bare stack trace: FailedToGetIacOrgSettingsError: …
+snyk_sca_scan (MCP)        → "Error: folder '…' is not trusted. Please run 'snyk_trust' first"
+```
+
+Three things follow. **Trust is checked before auth**, so an untrusted repo must not be reported as
+an authentication problem or the user fixes the wrong thing. **Not every failure is JSON**, so
+"could not parse" has to be a first-class branch that still names the cause. And an auth failure can
+arrive wearing another name — `FailedToGetIacOrgSettingsError` says nothing about tokens and means
+exactly "no token".
 
 ## The tools, and what each maps to
 
@@ -82,6 +118,62 @@ audience (vibecoders, private repos) must opt in explicitly:
 Snyk unavailable, unauthenticated (no token), or a folder untrusted → a `scanCoverage`
 `undeterminable` row naming why, exactly like a missing gitleaks. A commercial tool the user has not
 authenticated is a coverage limitation, not a clean result.
+
+## As implemented
+
+`plugin/scripts/run_snyk.mjs` (adapter) and `gradeSnyk` in `plugin/scripts/grader.mjs` (policy).
+Four decisions the design above left open, settled here so a reader running the method by hand
+grades the same way the script does:
+
+**The normaliser contract, inherited verbatim from `run_dep_audit.mjs`.** `[]` means the payload was
+recognised and holds zero results; `null` means it was not recognised. Unauthenticated,
+untrusted-folder and unknown-shape payloads are all `null`, which becomes an `undeterminable`
+coverage row naming why. Collapsing the two is how a scan that never ran gets reported as clean, and
+a shape adapter fails silently by nature — nothing throws, the output just goes quiet — so each
+normaliser is exported and unit-tested over recorded Snyk output rather than living inside a CLI.
+
+**Severity: the map, and its ceiling.** `critical → P0 · high → P1 · medium → P2 · low → P3` is the
+starting point; the per-kind ceiling is the override the Grader owns. `dep-vuln` and
+`container-vuln` are capped at **P1**, matching the ladder `npm audit` findings already use — one
+critical upstream advisory graded P1 by one tool and P0 by another would mean the badge depends on
+which scanner the user happens to have installed. The SAST kinds are capped at **P1**, matching
+`CG-DAST-SQLI` and `CG-DAST-XSS`. `iac-misconfig` is **uncapped**: a public bucket or an `0.0.0.0/0`
+rule on a database port really is total exposure, and severity is impact-if-true.
+
+**Confidence, stated as evidence — because confidence is a pure function of evidence and nothing
+may write one directly:**
+
+| Fact | Evidence | Confidence |
+|---|---|---|
+| SCA `reachability: reachable` | `strong` | `likely` |
+| SCA `reachability: not-reachable` | — | **no finding**; a `pass` row, "present but unreached" |
+| SCA `reachability: unknown` | `weak` | `needs-review` |
+| Snyk Code `hasDataflow: true` | `strong` | `likely` |
+| Snyk Code `hasDataflow: false` | `weak` | `needs-review` |
+| IaC / container | `weak` | `needs-review` |
+
+Snyk has **three overlapping vocabularies** for reachability and they do not agree: the CLI's own
+enum (`function`, `package`, `not-reachable`, `no-info`), the values that appear in real output
+(`reachable`, `no-path-found`), and the `--reachability-filter` flag
+(`reachable | no-info | not-applicable`). Everything that is not a firm yes or a firm no collapses
+to `unknown` **on purpose**, and that includes `no-info` — the CLI's help text calls it the
+"non-reachable" filter, while the CLI's own enum lists it as a *different* value from
+`not-reachable`. With the tool contradicting itself the tie goes to the reading that cannot hurt
+anyone: a `not-reachable` result becomes a `pass`, and a `pass` is an instruction to stop looking.
+
+Reachability also needs `--reachability=true` (Snyk Preview, CLI ≥ 1.1301.0) and warns that it
+"returns a new findings schema" in which "some legacy fields may not be available" — so this is the
+first mapping to re-check against a real authenticated run.
+
+**`confirmed` is unreachable for Snyk, and it is asserted, not merely intended.** `confirmed` drives
+the headline verdict and the auto-fix gate; Snyk's answer is a judgement about code this grader
+never read. The grader throws if a Snyk finding ever resolves to `confirmed`.
+
+**The `not-reachable` pass, and its limit.** It is a real `pass` — the honest disposition for
+"Snyk followed the call graph and found no path" — and the row states what could still break it: a
+dynamic `require` or reflection. A pass with a named limit is not a checkmark; recording these as
+`undeterminable` instead would move the noise rather than remove it, which is the whole reason
+reachability is worth paying for (`false-positives.md` FP-16).
 
 ## What it is not
 
