@@ -92,6 +92,18 @@ dynamic_testing:
     strix:
       mode: headless
 
+# Snyk (Tier 0 — static). Optional. Everything here needs SNYK_TOKEN in the environment.
+#
+# SCA, IaC and container scanning send MANIFEST METADATA to Snyk — package names and versions, not
+# your code — and are on by default when a token is present.
+#
+# Snyk Code (SAST) is different: it UPLOADS YOUR SOURCE to Snyk's cloud to analyse it. That is a
+# trust decision only you can make, so it stays off until you say otherwise here (or pass --code).
+# In exchange it proves source→sink dataflow, which is what lets a SAST result be graded `likely`
+# instead of `needs-review`. It is still never `confirmed` — it is an external tool's judgement.
+snyk:
+  code_scan_uploads_source: false   # must be true to run Snyk Code; your source leaves the machine
+
 # Hosts that are ALWAYS refused, even if mistakenly listed above (defense-in-depth). Binds every
 # tier, including dynamic_testing.
 # The runner additionally refuses well-known third-party providers by default.

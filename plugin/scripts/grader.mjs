@@ -62,6 +62,15 @@ const CONFIDENCE_ORDER = ['confirmed', 'likely', 'needs-review']
 /** Dispositions a subject can end up in. Exactly one each — see LAW 2. */
 const DISPOSITIONS = ['pass', 'fail', 'undeterminable', 'allowlisted']
 
+/**
+ * External tools whose output is an ANALYSIS rather than a located fact, and which therefore may
+ * never reach `confirmed`. gitleaks is deliberately absent: it reports a credential's VALUE at a
+ * file:line, which is exactly the kind of evidence LAW 3 allows to close a P0, and which a user can
+ * check by opening the file. Snyk's reachability and Snyk Code's dataflow are excellent and are
+ * still somebody else's judgement about code this grader never read.
+ */
+const JUDGEMENT_SOURCES = new Set(['snyk', 'semgrep'])
+
 // LAW 1, made mechanical. A `pass` in these sets could only ever come from a token in the source
 // (a route mentioning `getUser`, an LLM call mentioning an auth check) — and a token is not a
 // proof, so a static pass here is exactly the false checkmark LAW 1 forbids. Every legitimate pass
@@ -105,6 +114,21 @@ class Ledger {
     set.set(subject, { subject, disposition, note })
   }
 
+  /**
+   * Rewrite an existing row's NOTE, never its disposition.
+   *
+   * Used by reconciliation: when two tools report the same defect and one finding is absorbed into
+   * the other, the absorbed subject still failed — the disposition would be a lie if it changed —
+   * but its row has to say where its finding went. Coverage promises that every `fail` row has a
+   * finding id; a row pointing at nothing would quietly break that cross-check.
+   */
+  annotate(subject, note) {
+    for (const subjects of this.sets.values()) {
+      const row = subjects.get(subject)
+      if (row) row.note = note
+    }
+  }
+
   toJSON() {
     const out = {}
     for (const [setName, subjects] of this.sets) {
@@ -138,7 +162,7 @@ function finding(f) {
     id, subject, severity, evidence, at = [], why,
     title_en, title_he, exploit, impact, guard = null, cwe = null, owasp = null,
     autofixable = false, tier = 'static', nameOnly = false, assumption = null,
-    provenance = 'rule',
+    provenance = 'rule', source = null,
   } = f
 
   if (!SEVERITY_ORDER.includes(severity)) throw new Error(`${id}: bad severity ${severity}`)
@@ -152,6 +176,11 @@ function finding(f) {
     severity,
     confidence: CONFIDENCE_BY_EVIDENCE[evidence],
     provenance,
+    // WHICH external tool established this, or null when one of our own rules did. Reconciliation
+    // keys on it (see reconcileDuplicates): three tools flagging one line must produce one finding,
+    // and when our own rule already graded that defect, its grade is the authority — that is what
+    // "the grader is the single severity authority" means when a commercial scanner disagrees.
+    source,
     tier,
     // Evidence is a single concept with a strength and the places that establish it. The
     // renderer shows `at` verbatim so a user can check our work in their own editor.
@@ -160,6 +189,9 @@ function finding(f) {
     // What would have to be true for this to be a false positive. Stated because "likely" with
     // no named assumption is just hedging.
     assumption,
+    // Other tools that independently reported the same weakness at the same place, filled in by
+    // reconciliation. Empty for almost every finding; non-empty is a reason to look sooner.
+    corroboration: [],
   }
 }
 
@@ -1914,6 +1946,7 @@ function gradeScanners(scanners, ledger, findings, allow) {
           : 'Depends on what the value is. If it grants access, rotate it; if it is public by design, mark it allowlisted.',
         guard: 'guard-recipes/secrets-management.md#public-prefixes',
         cwe: 'CWE-798', owasp: 'A05:2021', tier: 'static',
+        source: sec.engine === 'gitleaks' ? 'gitleaks' : 'fallback-regex',
         autofixable: false,
         assumption: c.kind === 'privileged'
           ? 'That the key is still active. Rotate it regardless — a value in git history is compromised.'
@@ -1951,7 +1984,7 @@ function gradeScanners(scanners, ledger, findings, allow) {
           exploit: 'See the rule\'s own description; semgrep matched a pattern it associates with this weakness.',
           impact: 'Varies by rule. Treat as a lead for a reviewer, not a proven finding.',
           guard: 'guard-recipes/zod-validation.md',
-          tier: 'static', autofixable: false,
+          tier: 'static', autofixable: false, source: 'semgrep',
           assumption: 'That the semgrep rule matched real behaviour and not a shape that only looks like it.',
         }))
         ledger.record('sast', subject, 'fail', `${f.rule} (${label})`)
@@ -2009,6 +2042,7 @@ function gradeScanners(scanners, ledger, findings, allow) {
             impact: 'Depends on the advisory and on whether your code actually reaches the vulnerable path.',
             guard: 'guard-recipes/dependency-hygiene.md',
             cwe: 'CWE-1104', owasp: 'A06:2021', tier: 'static', autofixable: false,
+            source: res.tool || 'dep-audit',
             assumption: 'That the vulnerable code path is actually reached at runtime. Many dependency CVEs sit in code an app never calls.',
           }))
           ledger.record('dependencies', subject, 'fail', `${v.name} (${label})`)
@@ -2058,6 +2092,382 @@ function gradeScanners(scanners, ledger, findings, allow) {
         ((d.reasons || []).join('; ') || 'no reason recorded'))
     }
   }
+
+  // ---- Snyk ----
+  gradeSnyk(scanners.snyk, ledger, findings, allow)
+}
+
+// ---------------------------------------------------------------------------
+// Snyk — a commercial scanner, held to the same model as every other input
+//
+// Snyk is not a new axis; it is a stronger member of the family already integrated here. What
+// makes it worth more than "another scanner" is two facts a regex cannot produce, and both of them
+// buy CONFIDENCE rather than volume:
+//
+//   * SCA REACHABILITY. run_dep_audit has to cap every dependency CVE at `needs-review` because it
+//     cannot tell whether the vulnerable function is ever called (FP-16). Snyk can. `reachable` is
+//     a direct, single-hop observation of a call path — `strong` evidence, so `likely`.
+//     `not-reachable` is not a finding at all: it becomes a coverage row saying "present but
+//     unreached", which is how the unreachable-CVE false positive gets deleted with DATA instead of
+//     a caveat. `unknown` stays exactly where it is today, `weak` → `needs-review`.
+//
+//   * SNYK CODE DATAFLOW. A SAST hit that carries a proven source→sink path is a direct
+//     observation; the same rule matching with no path is a lead. So `hasDataflow: true` earns
+//     `strong` and `likely`, and everything else stays `needs-review`.
+//
+// THE CEILING. No Snyk finding may ever be `confirmed`, and it is asserted in grade() rather than
+// merely intended. `confirmed` drives the headline verdict and the auto-fix gate, and Snyk's
+// answer is an external tool's judgement — only our own deterministic rules (which read the file
+// themselves) or a live proof-of-concept may reach it. This audience cannot tell a false P0 from a
+// real one; a wrong one makes people rotate live keys and announce a breach that never happened.
+// ---------------------------------------------------------------------------
+
+/**
+ * Snyk's severities are its OPINION, re-mapped and re-graded — the same discipline semgrep gets.
+ * This is the starting point the methodology names; SNYK_KIND's `ceiling` is the "grader may
+ * override by rule" half, and it exists so the SAME weakness does not grade differently depending
+ * on which tool happened to find it.
+ */
+const SNYK_ADVISORY_SEVERITY = { critical: 'P0', high: 'P1', medium: 'P2', low: 'P3' }
+
+const SNYK_KIND = {
+  'dep-vuln': {
+    id: 'CG-SNYK-001',
+    // Deliberately the same ceiling as DEP_SEVERITY. One critical upstream advisory graded P1 by
+    // npm-audit and P0 by Snyk would mean the badge depends on which tool the user installed.
+    ceiling: 'P1',
+    title_en: v => `Vulnerable dependency: ${v}`,
+    title_he: v => `תלות פגיעה: ${v}`,
+    exploit: 'An attacker exercises the vulnerable code path in this package.',
+    impact: 'Depends on the advisory. Snyk reports whether your code reaches the vulnerable function; that is what separates a real risk from upstream noise.',
+    guard: 'guard-recipes/dependency-hygiene.md', cwe: 'CWE-1104', owasp: 'A06:2021',
+  },
+  'container-vuln': {
+    id: 'CG-SNYK-007', ceiling: 'P1',
+    title_en: v => `Vulnerable package in the container image: ${v}`,
+    title_he: v => `חבילה פגיעה באימג' הקונטיינר: ${v}`,
+    exploit: 'An attacker who reaches the running container exercises the vulnerable package.',
+    impact: 'Depends on the advisory and on whether the package is used at runtime rather than only present in the image.',
+    guard: 'guard-recipes/container-iac.md#pin-base-images', cwe: 'CWE-1104', owasp: 'A06:2021',
+  },
+  'sast-sqli': {
+    // Matches CG-DAST-SQLI. The same weakness, graded the same, whoever found it.
+    id: 'CG-SNYK-002', ceiling: 'P1',
+    title_en: () => 'User input may reach an SQL query unparameterised',
+    title_he: () => 'ייתכן שקלט משתמש מגיע לשאילתת SQL ללא פרמטרים',
+    exploit: 'An attacker rewrites the query through the input, reading or changing anything the database user can reach.',
+    impact: 'Read or modify any data the application\'s database user can touch.',
+    guard: 'guard-recipes/zod-validation.md#parameterised-queries', cwe: 'CWE-89', owasp: 'A03:2021',
+  },
+  'sast-xss': {
+    id: 'CG-SNYK-003', ceiling: 'P1',
+    title_en: () => 'User input may reach the page without escaping',
+    title_he: () => 'ייתכן שקלט משתמש מגיע לדף ללא בריחה',
+    exploit: 'An attacker sends a victim a link containing script that runs on your origin.',
+    impact: 'Session theft and actions performed as the victim.',
+    guard: 'guard-recipes/zod-validation.md#output-encoding', cwe: 'CWE-79', owasp: 'A03:2021',
+  },
+  'sast-ssrf': {
+    id: 'CG-SNYK-004', ceiling: 'P1',
+    title_en: () => 'User input may choose the address your server requests',
+    title_he: () => 'ייתכן שקלט משתמש קובע לאיזו כתובת השרת פונה',
+    exploit: 'An attacker points the request at your cloud metadata service or an internal host and reads the response.',
+    impact: 'Internal services and cloud credentials become reachable from the open internet.',
+    guard: 'guard-recipes/zod-validation.md', cwe: 'CWE-918', owasp: 'A10:2021',
+  },
+  'sast-path-traversal': {
+    id: 'CG-SNYK-005', ceiling: 'P1',
+    title_en: () => 'User input may choose which file is read or written',
+    title_he: () => 'ייתכן שקלט משתמש קובע איזה קובץ נקרא או נכתב',
+    exploit: 'An attacker walks out of the intended directory with ../ and reads a file you never meant to serve.',
+    impact: 'Disclosure of configuration, credentials, or other users\' uploads.',
+    guard: 'guard-recipes/zod-validation.md', cwe: 'CWE-22', owasp: 'A01:2021',
+  },
+  'sast-other': {
+    id: 'CG-SNYK-008', ceiling: 'P2',
+    title_en: r => `Snyk Code: ${r}`,
+    title_he: r => `ממצא Snyk Code: ${r}`,
+    exploit: 'See the rule\'s own description; Snyk Code matched a pattern it associates with this weakness.',
+    impact: 'Varies by rule. Treat as a lead for a reviewer, not a proven finding.',
+    guard: 'guard-recipes/zod-validation.md', cwe: null, owasp: null,
+  },
+  'iac-misconfig': {
+    // Uncapped on purpose: a public bucket or an 0.0.0.0/0 rule on a database port really is total
+    // exposure, and severity is impact-if-true. The uncertainty is paid in confidence, which never
+    // exceeds `needs-review` here because we did not parse the file ourselves.
+    id: 'CG-SNYK-006', ceiling: null,
+    title_en: t => `Infrastructure misconfiguration: ${t}`,
+    title_he: t => `הגדרת תשתית שגויה: ${t}`,
+    exploit: 'An attacker uses the misconfigured resource directly — an open port, a public bucket, an over-privileged container.',
+    impact: 'Depends on the resource. Infrastructure mistakes tend to expose everything behind them at once.',
+    guard: 'guard-recipes/container-iac.md', cwe: null, owasp: 'A05:2021',
+  },
+}
+
+/** Never above the ceiling for this weakness class. Severity is capped by DOMAIN, never by doubt. */
+function snykSeverity(kind, advisory) {
+  const base = SNYK_ADVISORY_SEVERITY[String(advisory || '').toLowerCase()] || 'P3'
+  const ceiling = SNYK_KIND[kind]?.ceiling
+  if (!ceiling) return base
+  return SEVERITY_ORDER.indexOf(base) < SEVERITY_ORDER.indexOf(ceiling) ? ceiling : base
+}
+
+/**
+ * The confidence win, written as an evidence decision — because confidence is a pure function of
+ * evidence and nothing here may write a confidence directly.
+ *
+ * `strong` and `weak` are the only two values this can return. `definitive` would mean `confirmed`,
+ * and an external tool never earns that.
+ */
+function snykEvidence(o) {
+  if (o.kind === 'dep-vuln' && o.reachability === 'reachable') return 'strong'
+  if (String(o.kind).startsWith('sast-') && o.hasDataflow === true) return 'strong'
+  return 'weak'
+}
+
+const SNYK_SCANS = {
+  sca: 'the Snyk dependency (SCA) scan',
+  code: 'the Snyk Code (SAST) scan',
+  iac: 'the Snyk infrastructure-as-code scan',
+  container: 'the Snyk container image scan',
+}
+
+function gradeSnyk(snyk, ledger, findings, allow) {
+  if (!snyk) return
+  ledger.declare('scanCoverage')
+  ledger.declare('snyk')
+
+  // GRADE OR DECLARE. Each of the four scans gets a row whether it ran or not, because a reader
+  // cannot tell silence apart from safety. "Snyk is not installed", "there is no token", "the
+  // folder is not trusted" and — the one that matters most for this audience — "Snyk Code was
+  // skipped because you did not consent to uploading your source" are all coverage facts.
+  for (const [name, label] of Object.entries(SNYK_SCANS)) {
+    const subject = `scan:snyk-${name}`
+    const s = snyk.scans?.[name]
+    if (!s) {
+      ledger.record('scanCoverage', subject, 'undeterminable',
+        `${label} was not attempted and the adapter said nothing about why`)
+      continue
+    }
+    if (!s.ran || s.observations == null) {
+      ledger.record('scanCoverage', subject, 'undeterminable', s.reason || `${label} did not run`)
+      continue
+    }
+    // A multi-target run can succeed and still have skipped members — recorded: Snyk IaC answers
+    // every GitHub Actions workflow with a per-file parse error (its parser does not cover them;
+    // this grader's own CG-CI rules do). The scan is a pass, and the limit is written on the row,
+    // because a partial scan that prints an unqualified checkmark is overstating its own coverage.
+    const skipped = s.skippedTargets || []
+    ledger.record('scanCoverage', subject, 'pass',
+      `${label} ran and returned ${s.observations.length} result(s)` +
+      (skipped.length
+        ? `; ${skipped.length} file(s) Snyk could not parse were skipped (${skipped[0].error}) — files of that kind are graded by this tool's own rules, not by Snyk`
+        : ''))
+  }
+
+  const all = Object.values(snyk.scans || {}).flatMap(s => (s && s.ran ? s.observations || [] : []))
+  const seen = new Set()
+  for (const o of all) {
+    if (!o || !o.subject) continue
+    const subject = String(o.subject)
+    // Snyk lists one row per (issue, dependency path), so one package with several advisories — and
+    // one advisory reached by several paths — are both normal input. LAW 2 answers a repeated
+    // subject with a throw, which would crash the whole report rather than print it.
+    if (seen.has(subject)) continue
+    seen.add(subject)
+    if (allow.has(subject)) { ledger.record('snyk', subject, 'allowlisted', 'user allowlist'); continue }
+
+    const p = SNYK_KIND[o.kind]
+    if (!p) {
+      // A result class no rule owns is DECLARED, never dropped. Adding a Snyk tool without a policy
+      // entry would otherwise widen the blind spot silently — the exact defect grade-or-declare
+      // exists to prevent.
+      ledger.record('snyk', subject, 'undeterminable',
+        `no rule owns Snyk result kind "${o.kind}" — open ${o.at?.file || 'the reported location'} and review it by hand`)
+      continue
+    }
+
+    // THE REACHABILITY WIN, honest half. Snyk followed the call graph and found no path from this
+    // application into the vulnerable function, so this is not a finding — it is a coverage row
+    // saying the package is present but unreached. Shipping it as a P0 anyway is FP-16, and burying
+    // two real findings under a wall of upstream advisories is how a report stops being read.
+    if (o.reachability === 'not-reachable') {
+      ledger.record('snyk', subject, 'pass',
+        `${o.title || subject} is present, but Snyk's reachability analysis found no path from your code into the vulnerable function ` +
+        '(a dynamic require or reflection could still reach it, so this is a pass with a named limit, not a guarantee)')
+      continue
+    }
+
+    const evidence = snykEvidence(o)
+    const label = o.title || o.ruleId || o.kind
+    findings.push(finding({
+      id: p.id, subject,
+      title_en: p.title_en(label), title_he: p.title_he(label),
+      severity: snykSeverity(o.kind, o.advisorySeverity),
+      evidence,
+      why: `${o.detail || label} Snyk rates it ${o.advisorySeverity}. ` + (
+        o.kind === 'dep-vuln'
+          ? o.reachability === 'reachable'
+            ? 'Snyk traced a call path from your code into the vulnerable function, so this advisory is about code this app actually runs.'
+            : 'Snyk could not establish whether your code reaches the vulnerable function, so this may be an advisory about code the app never calls.'
+          : String(o.kind).startsWith('sast-')
+            ? o.hasDataflow
+              ? 'Snyk Code traced a source→sink path for this, rather than only matching a pattern.'
+              : 'Snyk Code matched this rule without proving a source→sink path, so it is a lead rather than a traced flow.'
+            : 'Reported by an external scanner reading the file, so it is never auto-confirmed.'),
+      at: firstAt(o.at?.file || null, o.at?.line ?? null),
+      exploit: p.exploit, impact: p.impact, guard: p.guard,
+      cwe: o.cwe || p.cwe || null, owasp: p.owasp || null,
+      tier: 'static', autofixable: false, source: 'snyk',
+      assumption: o.kind === 'dep-vuln' && o.reachability !== 'reachable'
+        ? 'That the vulnerable code path is actually reached at runtime. Snyk could not establish it either way here.'
+        : String(o.kind).startsWith('sast-') && !o.hasDataflow
+          ? 'That the rule matched real behaviour and not a shape that only looks like it — Snyk proved no path from an input to this line.'
+          : 'That Snyk\'s analysis is right about this file. It is a commercial tool\'s judgement, not something this grader read for itself.',
+    }))
+    ledger.record('snyk', subject, 'fail',
+      `${o.kind} (${o.advisorySeverity}` +
+      (o.reachability && o.reachability !== 'unknown' ? `, ${o.reachability}` : '') +
+      (o.hasDataflow ? ', dataflow proven' : '') + ')')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation — three tools, one defect
+//
+// Snyk's findings overlap semgrep's, and both overlap rules this grader already owns. Printed
+// straight through, a single missing USER directive in one Dockerfile arrives three times with
+// three severities, and the reader has no way to tell that from three separate problems. Volume is
+// what destroys trust — not any single finding — so reconciliation is mandatory, not cosmetic.
+//
+// The join key is the WEAKNESS CLASS at a file:line, not the location alone. Two genuinely
+// different defects can share a line, and collapsing those would hide one — a false negative, which
+// is worse than a visible duplicate. So anything we cannot classify is never merged.
+//
+// Two rules keep this from losing information:
+//
+//   1. Only ACROSS sources. Two findings from the same producer at one line are that producer's
+//      business: it enumerated them deliberately (a compose file can mount the Docker socket AND
+//      run privileged). Reconciliation is about the same fact seen twice, not about tidying up.
+//   2. A native rule outranks any external tool. This grader is the single severity authority, and
+//      its own rules read the file directly; a commercial scanner's opinion about the same
+//      file:line does not override a grade we derived ourselves. Among external tools, the
+//      strongest evidence wins.
+//
+// The absorbed findings are not deleted, they are recorded on the survivor as `corroboration`,
+// carrying their own severity — so "semgrep and Snyk independently agreed" is visible, and a
+// higher severity claimed by a tool we did not follow is still legible in the report.
+// ---------------------------------------------------------------------------
+
+/** CWE is a stable, cross-tool vocabulary; it is the first thing we try. */
+const WEAKNESS_BY_CWE = {
+  'CWE-89': 'sqli', 'CWE-564': 'sqli',
+  'CWE-79': 'xss', 'CWE-80': 'xss',
+  'CWE-918': 'ssrf',
+  'CWE-22': 'path-traversal', 'CWE-23': 'path-traversal', 'CWE-36': 'path-traversal', 'CWE-73': 'path-traversal',
+  'CWE-78': 'command-injection',
+  'CWE-94': 'code-injection',
+  'CWE-798': 'hardcoded-secret',
+  'CWE-250': 'excess-privilege',
+  'CWE-1104': 'vulnerable-dependency',
+  'CWE-284': 'broken-access-control',
+  'CWE-319': 'cleartext-transport',
+  'CWE-352': 'csrf',
+  'CWE-601': 'open-redirect',
+  'CWE-668': 'exposed-resource',
+}
+
+/**
+ * Fallback for tools that report a rule id and no CWE — semgrep, in this codebase. Only consulted
+ * when there is no CWE, and only ever matched against a finding at the SAME file:line, which is
+ * what keeps a keyword this loose from merging unrelated things.
+ */
+const WEAKNESS_BY_TEXT = [
+  [/\bsqli\b|sql[-_. ]?injection/, 'sqli'],
+  [/\bxss\b|cross[-_. ]?site[-_. ]?script/, 'xss'],
+  [/\bssrf\b|server[-_. ]?side[-_. ]?request/, 'ssrf'],
+  [/path[-_. ]?traversal|zip[-_. ]?slip|directory[-_. ]?traversal/, 'path-traversal'],
+  [/command[-_. ]?injection|os[-_. ]?command|shell[-_. ]?injection/, 'command-injection'],
+  [/code[-_. ]?injection|unsafe[-_. ]?eval/, 'code-injection'],
+  [/hard[-_. ]?coded|baked[-_. ]?(in|secret)|secrets?[-_. ]?in[-_. ]/, 'hardcoded-secret'],
+  [/non[-_. ]?root|missing[-_. ]?user|runs?[-_. ]?as[-_. ]?root|root[-_. ]?user|privileged/, 'excess-privilege'],
+  [/open[-_. ]?redirect/, 'open-redirect'],
+]
+
+/** @returns a weakness-class string, or null when we cannot name it — null is never merged. */
+function weaknessOf(f) {
+  const byCwe = WEAKNESS_BY_CWE[String(f.cwe || '').toUpperCase()]
+  if (byCwe) return byCwe
+  const text = `${f.subject} ${f.title_en} ${f.evidence?.why ?? ''}`.toLowerCase()
+  for (const [re, klass] of WEAKNESS_BY_TEXT) if (re.test(text)) return klass
+  return null
+}
+
+const EVIDENCE_RANK = { definitive: 0, strong: 1, judgement: 2, weak: 3 }
+
+/** Total order, so two runs of the same repo reconcile identically. */
+function strongerFinding(a, b) {
+  return (EVIDENCE_RANK[a.evidence.strength] - EVIDENCE_RANK[b.evidence.strength]) ||
+    (SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)) ||
+    String(a.id).localeCompare(String(b.id)) ||
+    String(a.subject).localeCompare(String(b.subject))
+}
+
+/**
+ * @param {object[]} findings
+ * @param {Ledger} ledger  absorbed subjects get their coverage note rewritten to point at the
+ *                         survivor, so the "every fail row has a finding" cross-check still holds.
+ * @returns {object[]} the surviving findings
+ */
+function reconcileDuplicates(findings, ledger) {
+  const groups = new Map()
+  for (const f of findings) {
+    const at = f.evidence?.at?.[0]
+    if (!at?.file || at.line == null) continue // no location, nothing to reconcile against
+    const weakness = weaknessOf(f)
+    if (!weakness) continue
+    const key = `${at.file}:${at.line}:${weakness}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(f)
+  }
+
+  const absorbed = new Set()
+  for (const group of groups.values()) {
+    const bySource = new Map()
+    for (const f of group) {
+      const src = f.source || null
+      if (!bySource.has(src)) bySource.set(src, [])
+      bySource.get(src).push(f)
+    }
+    if (bySource.size < 2) continue // one tool's own enumeration — leave it alone
+
+    // Which SOURCE owns this defect. A native rule (source null) always does.
+    const sources = [...bySource.keys()].sort((a, b) => {
+      if ((a === null) !== (b === null)) return a === null ? -1 : 1
+      const bestA = bySource.get(a).slice().sort(strongerFinding)[0]
+      const bestB = bySource.get(b).slice().sort(strongerFinding)[0]
+      return strongerFinding(bestA, bestB) || String(a).localeCompare(String(b))
+    })
+    const winnerSource = sources[0]
+    // Findings from the winning source all survive; the best of them collects the corroboration.
+    const winner = bySource.get(winnerSource).slice().sort(strongerFinding)[0]
+
+    for (const src of sources.slice(1)) {
+      for (const f of bySource.get(src).slice().sort(strongerFinding)) {
+        absorbed.add(f)
+        winner.corroboration.push({
+          source: src, id: f.id, subject: f.subject,
+          severity: f.severity, confidence: f.confidence,
+          // Carried verbatim so a higher severity another tool claimed is still readable, rather
+          // than being silently replaced by the survivor's.
+          why: f.evidence?.why ?? f.title_en,
+        })
+        ledger.annotate(f.subject,
+          `reconciled into ${winner.id} (${winner.subject}) — the same weakness at the same location, reported by more than one tool`)
+      }
+    }
+  }
+  return findings.filter(f => !absorbed.has(f))
 }
 
 // ---------------------------------------------------------------------------
@@ -2259,7 +2669,7 @@ export function mergeReviewerFindings(graded, reviewerFindings = []) {
  * @param {object} model            output of project_model.mjs
  * @param {object} [opts]
  * @param {object[]} [opts.observations]  tier-tagged observations from live_probe / dast_runner
- * @param {object} [opts.scanners]        { secrets, sast, dependencies, dynamic } adapter outputs
+ * @param {object} [opts.scanners]        { secrets, sast, dependencies, dynamic, snyk } adapter outputs
  * @param {string[]} [opts.allowlist]     subject ids the user has accepted
  */
 export function grade(model, opts = {}) {
@@ -2292,13 +2702,28 @@ export function grade(model, opts = {}) {
   // finished picture rather than race the rules for a subject.
   declareUngradedSurfaces(model, ledger)
 
+  // Three tools flagging one defect must print once, not three times. Runs after every rule and
+  // adapter, because it can only reconcile what all of them have already produced.
+  const reconciled = reconcileDuplicates(findings, ledger)
+
   // ---- law enforcement -----------------------------------------------------
-  for (const f of findings) {
+  for (const f of reconciled) {
     if (f.confidence !== CONFIDENCE_BY_EVIDENCE[f.evidence.strength]) {
       throw new Error(`${f.id}: confidence must be a pure function of evidence`)
     }
     if (f.evidence.nameOnly && f.severity === 'P0') {
       throw new Error(`LAW 3 violated by ${f.id}`)
+    }
+    // THE EXTERNAL-ANALYSIS CEILING. `confirmed` drives the headline verdict and the auto-fix gate,
+    // and it means "the compiler, the bundler or the file itself guarantees this". Snyk and semgrep
+    // report an ANALYSIS — a judgement about code this grader did not read for itself — which is a
+    // different kind of claim from gitleaks pointing at a credential's value on a line, and it is
+    // capped accordingly. Asserted rather than merely intended, because the day someone adds a
+    // `definitive` branch to one of these adapters is the day this tool starts turning badges red
+    // on somebody else's opinion.
+    if (JUDGEMENT_SOURCES.has(f.source) && f.confidence === 'confirmed') {
+      throw new Error(`${f.id}: a finding from the external tool "${f.source}" resolved to confirmed. ` +
+        'Only our own deterministic rules or a live proof-of-concept may reach confirmed.')
     }
   }
   const coverage = ledger.toJSON() // throws if LAW 2 is violated
@@ -2312,7 +2737,7 @@ export function grade(model, opts = {}) {
     }
   }
 
-  const sorted = sortFindings(findings)
+  const sorted = sortFindings(reconciled)
   return {
     generatedBy: 'claudeguard/grader',
     // The verdict counts ONLY confirmed findings. Severity is uncapped precisely because this is
@@ -2341,7 +2766,7 @@ if (isMain) {
   const flags = new Map()
   const positional = []
   const TAKES_VALUE = new Set(['--model', '--observations', '--allowlist',
-    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--reviewer'])
+    '--scanners', '--secrets', '--sast', '--dependencies', '--dynamic', '--snyk', '--reviewer'])
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (TAKES_VALUE.has(a)) flags.set(a, argv[++i])
@@ -2376,8 +2801,10 @@ if (isMain) {
     sast: readJsonFlag('--sast') || combined.sast || null,
     dependencies: readJsonFlag('--dependencies') || combined.dependencies || null,
     dynamic: readJsonFlag('--dynamic') || combined.dynamic || null,
+    snyk: readJsonFlag('--snyk') || combined.snyk || null,
   }
-  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies || scanners.dynamic
+  const anyScanner = scanners.secrets || scanners.sast || scanners.dependencies ||
+    scanners.dynamic || scanners.snyk
 
   let result = grade(readModel(), {
     observations: obsFile ? JSON.parse(readFileSync(obsFile, 'utf8')).observations : [],
