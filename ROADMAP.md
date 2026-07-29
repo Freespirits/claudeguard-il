@@ -4,7 +4,7 @@ What is built, what is deliberately not, and what comes next. Kept honest on pur
 tool that overstates its own reach is doing the exact thing this project argues against. Where that
 happened anyway, the claim is quoted and retracted in [`ERRATA.md`](ERRATA.md) rather than deleted.
 
-Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
+Current version: **0.3.0**. See [CHANGELOG](#changelog-since-020) at the bottom.
 
 ---
 
@@ -240,6 +240,30 @@ testing for anything production-critical.
 A clean scan is not proof of safety. It is proof that nothing was proved.
 
 ---
+
+## Changelog since 0.2.0
+
+- **A second pillar: compliance.** Findings now carry `pillar: 'security' | 'compliance'`, held
+  rigorously apart — the security badge is computed over security findings only, and the benchmark's
+  decision-rate ratchet and false-positive gate are scoped to security, so a compliance domain can
+  never lower the security bar. There is deliberately no compliance P0; severity is
+  legal-exposure-if-unfixed. **Domain 1 — Accessibility (ת"י 5568 / WCAG 2.0 AA)** shipped:
+  CG-A11Y-001..007, with the mandatory accessibility statement handled as a *declared* row, not a
+  cry-wolf P1 on a fresh scaffold. **Domain 2 — Privacy / data security** documented (grader next).
+- **Vibecoder hygiene, wired and capped.** Four cheap high-signal checks — CG-HYG-001 placeholder
+  credential, -002 base64-as-encryption, -003 auth token in web storage, -004 auth TODO. None can
+  reach `confirmed` (a grep sees the sink, not whether it matters), so none reddens the badge alone.
+  Measured at 0 findings on four clean reference repos and 0 on this repo's own source.
+- **A benchmark we did not author.** `bench/wild.mjs`: 11 real repos at pinned SHAs, labelled by a
+  reviewer blind to the tool. First measured detection numbers (10/16 on covered categories, 83% on
+  the target profile), 0 candidate false positives — and it caught four real cry-wolf bugs on
+  reference code, all fixed. `bench/run.mjs`'s 100%-by-construction recall is retracted as a
+  detection claim (ERR-006); it is a regression gate, and stays green.
+- **SARIF 2.1.0 output** for GitHub Code Scanning, over the existing findings.
+- **Roadmap honesty pass.** Two "not wired yet" items (the Snyk adapter, the business-logic intent
+  loop) were struck after being re-verified end to end — they had been wired for some time and the
+  roadmap simply understated the tool. `dynamic_gate.mjs` remains deliberately unwired.
+- Tests **405 → 616**. The benchmark's regression gate stayed green throughout.
 
 ## Changelog since 0.1.0
 
