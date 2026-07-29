@@ -12,7 +12,13 @@ claudeguard-skill.zip
 .DS_Store
 Thumbs.db
 
-# NOTE: sample-vulnerable-app/.env is committed on purpose (fake test fixture).
+# local secrets — a security tool must NEVER commit its own .env. Note this does NOT match
+# .env.example / .env.template / .env.sample (different names, meant to be committed).
+.env
+.env.local
+.env.*.local
+# …except the fake test fixture, which is committed on purpose:
+!sample-vulnerable-app/.env
 
-# Claude Code agent worktrees and session scratch � never commit
+# Claude Code agent worktrees and session scratch � never commit
 .claude/
