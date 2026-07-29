@@ -137,11 +137,29 @@ from public disclosures, from OWASP Benchmark-style suites, from repos we have n
 thing that turns "excellent regression protection" into evidence about detection rate. Done when a
 number in this file comes from a corpus nobody here authored.
 
-### 6 · Real dynamic testing, or none
+### 6 · Real dynamic testing — the worklist resolver
 
-Tier 2 is four GET probes. The options are to build real crawling, authenticated flows, parameter
-discovery and multi-user IDOR testing behind the existing gate, or to keep the smoke test and say so
-in the name. **Until one of those happens, the documentation says exactly what it does.**
+Not "a scanner." The static engine leaves a route `undeterminable` when it cannot tell whether an
+auth call gates the handler; the resolver sends one gated, unauthenticated request and lets the
+answer settle it — a 200 is a **confirmed** auth bypass with a live proof, a 401/403 is a pass. A
+live proof is the definitive evidence a heuristic can never have, and the only honest route to
+`confirmed` for a class the static tier could only suspect.
+
+- **Phase 1 — the loop, one prober, no container. DONE.** `plugin/scripts/dynamic_runner.mjs` reads
+  the `undeterminable` route worklist, drives an `authz_probe` through the hardened gate
+  (`dynamic_gate.mjs`), and emits observations the grader maps to `CG-DAST-AUTHZ-POC` (definitive →
+  confirmed → P0). Dry-run by default; every send gated; the response body is never read, only the
+  status. Proven end-to-end in `test/dynamic_runner.test.mjs`.
+- **Phase 2 — multi-principal IDOR.** Two attested sessions: log in as A, read A's id, request it as
+  B. B receiving A's record is `exploited-idor`, a confirmed P0 — the one thing single-session DAST
+  structurally cannot prove. Record proof-of-access, never the record.
+- **Phase 3 — the sandbox.** A rootless container with a curated tool (nuclei), behind an
+  HTTP-proxy adapter that routes every call through `decide()`. Suspicion-grade tool output caps at
+  `likely`; only the purpose-built probers' positives reach `confirmed`.
+- **The exploit tier stays refused** for this audience (no sqlmap/hydra/metasploit), and any active
+  traffic needs machine-verified target ownership, not a typed boolean.
+
+The old four-GET Tier 2 (`dast_runner.mjs`) remains as the perimeter smoke test, honestly named.
 
 ---
 
