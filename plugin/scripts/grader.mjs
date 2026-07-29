@@ -261,11 +261,12 @@ function finding(f) {
     id, subject, severity, evidence, at = [], why,
     title_en, title_he, exploit, impact, guard = null, cwe = null, owasp = null,
     autofixable = false, tier = 'static', nameOnly = false, assumption = null,
-    provenance = 'rule', source = null,
+    provenance = 'rule', source = null, pillar = 'security',
   } = f
 
   if (!SEVERITY_ORDER.includes(severity)) throw new Error(`${id}: bad severity ${severity}`)
   if (!CONFIDENCE_BY_EVIDENCE[evidence]) throw new Error(`${id}: bad evidence ${evidence}`)
+  if (pillar !== 'security' && pillar !== 'compliance') throw new Error(`${id}: bad pillar ${pillar}`)
   if (nameOnly && severity === 'P0') {
     throw new Error(`LAW 3: ${id} claims P0 from name-only evidence. A variable name is not a credential.`)
   }
@@ -275,6 +276,11 @@ function finding(f) {
     severity,
     confidence: CONFIDENCE_BY_EVIDENCE[evidence],
     provenance,
+    // Which trouble this finding is about. `security` is a breach; `compliance` is a legal exposure
+    // (accessibility, and later privacy/terms). A compliance finding is graded and provable but is
+    // NOT a breach — `summarize()` keeps it out of the security verdict entirely, so a wide-open
+    // database and a missing alt attribute never share a badge.
+    pillar,
     // WHICH external tool established this, or null when one of our own rules did. Reconciliation
     // keys on it (see reconcileDuplicates): three tools flagging one line must produce one finding,
     // and when our own rule already graded that defect, its grade is the authority — that is what
@@ -407,7 +413,15 @@ function gradeEnvVars(model, ledger, findings, allow) {
     }
 
     const decl = v.declared || {}
-    const at = firstAt(decl.file || v.usages?.[0]?.file, decl.line || v.usages?.[0]?.line)
+    // An illustrative-file declaration (.env.example/.template/.sample/.dist) holds a PLACEHOLDER, not
+    // the leak — point the finding at a real usage instead, so it lands where the exposure actually is
+    // (the client code the bundler inlines into) rather than at a template's `your-key-here`. Only fall
+    // back to the illustrative declaration when there is no usage at all. (wild benchmark: a real
+    // repo's `.env.template` produced a confirmed secret finding on a placeholder value.)
+    const declReal = decl.file && !decl.example
+    const at = declReal
+      ? firstAt(decl.file, decl.line)
+      : firstAt(v.usages?.[0]?.file || decl.file, v.usages?.[0]?.line || decl.line)
 
     switch (v.exposure) {
       case 'bundler-inlined-public-prefix': {
@@ -666,21 +680,43 @@ function gradeTables(model, ledger, findings, allow) {
 
     const permissive = (t.policies || []).filter(p => p.permissive)
     if (permissive.length) {
-      const p0 = permissive[0]
+      // A world-open (`true`) predicate — but the COMMAND decides how bad. A world-WRITABLE policy
+      // (`for all`/insert/update/delete) is never intentional: anyone can modify or delete every row,
+      // so it stays a definitive P0. A read-only `for select using (true)` is the STANDARD Supabase
+      // pattern for public-by-design data — a products table, published posts — so a confirmed P0
+      // there is cry-wolf (it turns the canonical vercel/nextjs-subscription-payments starter
+      // `critical`). Read-only is impact-if-true P1 (a full read leak IF the table is private) at
+      // `weak`→needs-review, since we cannot tell a public table from a leak; the assumption says so.
+      // (Found by the wild benchmark, bench/wild/nextjs-subscription-payments.)
+      const write = permissive.find(p => p.cmd !== 'select')
+      const p0 = write || permissive[0]
+      const readOnly = !write
       const loc = splitAt(p0.at)
       findings.push(finding({
         id: 'CG-DB-002', subject,
-        title_en: `Table "${t.name}" has RLS on, but a policy allows everyone`,
-        title_he: `לטבלה "${t.name}" יש RLS, אך מדיניות אחת מתירה לכולם`,
-        severity: 'P0', evidence: 'definitive',
-        why: `Policy "${p0.name}" uses \`true\` as its predicate, which matches every row for every caller.`,
+        title_en: readOnly
+          ? `Table "${t.name}" is world-readable (a policy allows everyone to read)`
+          : `Table "${t.name}" has RLS on, but a policy allows everyone`,
+        title_he: readOnly
+          ? `הטבלה "${t.name}" קריאה לכולם (מדיניות מתירה קריאה לכל אחד)`
+          : `לטבלה "${t.name}" יש RLS, אך מדיניות אחת מתירה לכולם`,
+        severity: readOnly ? 'P1' : 'P0',
+        evidence: readOnly ? 'weak' : 'definitive',
+        why: `Policy "${p0.name}" uses \`true\` as its predicate for \`${p0.cmd}\`, which matches every row for every caller.`,
         at: firstAt(loc.file, loc.line),
-        exploit: 'Anyone with the anon key runs the policy\'s command against every row.',
-        impact: 'RLS is enabled but not enforcing anything — the protection reads as present in the dashboard while granting full access.',
+        exploit: readOnly
+          ? 'Anyone with the anon key reads every row this policy covers.'
+          : 'Anyone with the anon key runs the policy\'s command against every row.',
+        impact: readOnly
+          ? 'Every row is world-readable. Fine if this table is public by design (products, published content); a full data leak if it holds anything private.'
+          : 'RLS is enabled but not enforcing anything — the protection reads as present in the dashboard while granting full access.',
         guard: 'guard-recipes/rls-policies.md#owner-scoped-policy',
         cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: readOnly
+          ? 'That this table holds private data. If it is public by design (a products or published-content table), a world-readable SELECT policy is correct — allowlist it.'
+          : null,
       }))
-      ledger.record('tables', subject, 'fail', `permissive policy "${p0.name}"`)
+      ledger.record('tables', subject, 'fail', `permissive policy "${p0.name}" (${p0.cmd})`)
       continue
     }
 
@@ -1874,23 +1910,32 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
     if (allow.has(subject)) { ledger.record('firebaseRules', subject, 'allowlisted', 'user allowlist'); continue }
 
     if (r.openRules.length) {
-      const o = r.openRules[0]
+      // A world-WRITABLE `if true` is never intentional (anyone can modify/delete every document) →
+      // definitive P0. A read-only `allow read: if true` is the common public-data pattern (published
+      // content, a public profile) → P1 impact-if-true at `weak`→needs-review, since we cannot tell a
+      // public collection from a leak. Same cry-wolf split as the Supabase read-only-permissive case;
+      // found by the wild benchmark on jtCodes/lyrictor (intentional public reads graded critical).
+      const writableRule = r.openRules.find(x => /write|create|update|delete/i.test((x.ops || []).join(',')) || !(x.ops || []).length)
+      const o = writableRule || r.openRules[0]
       const ops = (o.ops || []).join(', ') || 'read, write'
-      const writable = /write|create|update|delete/.test(ops)
+      const writable = !!writableRule
       findings.push(finding({
         id: 'CG-FB-001', subject,
-        title_en: `Firebase rules allow ${ops} to anyone`,
-        title_he: `כללי Firebase מתירים ${ops} לכל אחד`,
-        severity: 'P0', evidence: 'definitive',
+        title_en: writable ? `Firebase rules allow ${ops} to anyone` : `Firebase rules are world-readable (${ops} to anyone)`,
+        title_he: writable ? `כללי Firebase מתירים ${ops} לכל אחד` : `כללי Firebase מאפשרים קריאה (${ops}) לכל אחד`,
+        severity: writable ? 'P0' : 'P1',
+        evidence: writable ? 'definitive' : 'weak',
         why: `A rule grants \`${ops}\` with the condition \`true\`, which every request satisfies — including one with no account at all.`,
         at: firstAt(r.file, o.line, `allow ${ops}: if true`),
         exploit: 'The Firebase config object ships in your client bundle by design. Anyone reads it out of DevTools and queries the database directly with the SDK.',
         impact: writable
           ? 'Anyone can read, modify and delete everything this rule covers. This is the Firebase equivalent of running with no access control at all.'
-          : 'Everything this rule covers is world-readable, including anything a user uploaded expecting privacy.',
+          : 'Everything this rule covers is world-readable. Fine if it is public by design (published content, a public profile); a leak if it holds anything private.',
         guard: 'guard-recipes/firebase-rules.md#owner-scoped',
         cwe: 'CWE-284', owasp: 'A01:2021', autofixable: false,
-        assumption: 'That this path holds anything not intended to be public. A deliberately public collection is a legitimate use — allowlist it.',
+        assumption: writable
+          ? 'That this path holds anything not intended to be public. A deliberately public collection is a legitimate use — allowlist it.'
+          : 'That this path holds private data. If it is public by design (published content, a public profile), a world-readable rule is correct — allowlist it.',
       }))
       ledger.record('firebaseRules', subject, 'fail', `${r.openRules.length} rule(s) with an unconditional \`true\``)
       continue
@@ -1916,11 +1961,35 @@ function gradeFirebaseRules(model, ledger, findings, allow) {
       continue
     }
 
-    // Structural pass: every allow rule in the file carries a condition that is neither `true` nor
-    // the bare signed-in check. What those conditions actually compare is not verified here — the
-    // auditors read them — so this is a pass on the two catastrophic shapes, not on the rules.
+    if ((r.timeLockedRules || []).length) {
+      const o = r.timeLockedRules[0]
+      const ops = (o.ops || []).join(', ') || 'read, write'
+      findings.push(finding({
+        id: 'CG-FB-003', subject,
+        title_en: `Firebase rules grant ${ops} to anyone until a date ("test mode")`,
+        title_he: `כללי Firebase מתירים ${ops} לכל אחד עד לתאריך ("מצב בדיקה")`,
+        // P0 impact-if-true (total unauthenticated access), but `strong`→`likely`, not `definitive`:
+        // the pattern is unmistakable, yet the grader is clock-free by construction and cannot evaluate
+        // whether the expiry date is in the future (wide open now) or the past (deny-all now). It is
+        // reported as a prominent unproven P0, and its assumption names the one thing to check.
+        severity: 'P0', evidence: 'strong',
+        why: 'The condition gates access on `request.time` against a fixed date and checks no identity — the Firebase "start in test mode" default. Until that date, every request from anyone is allowed; access is scoped by a wall clock, not by who is asking.',
+        at: firstAt(r.file, o.line, `allow ${ops}: if ${o.condition}`),
+        exploit: 'The Firebase config object ships in your client bundle by design. Before the expiry date, anyone reads it out of DevTools and queries the database directly with the SDK — no account needed.',
+        impact: 'Total unauthenticated read/write until the date, then a hard denial of ALL access. Either way the rule is wrong: access must be scoped by identity, not by a wall-clock date.',
+        guard: 'guard-recipes/firebase-rules.md#owner-scoped',
+        cwe: 'CWE-284', owasp: 'A01:2021',
+        assumption: 'That the expiry date has not already passed. If it has, these rules now deny everyone and the app is broken rather than exposed — the fix is the same: replace the time check with an identity check.',
+      }))
+      ledger.record('firebaseRules', subject, 'fail', `${r.timeLockedRules.length} time-locked "test mode" rule(s)`)
+      continue
+    }
+
+    // Structural pass: every allow rule in the file carries a condition that is neither `true`, the
+    // bare signed-in check, nor a time-lock. What those conditions actually compare is not verified
+    // here — the auditors read them — so this is a pass on the catastrophic shapes, not on the rules.
     ledger.record('firebaseRules', subject, 'pass',
-      `${r.dialect} rules: no unconditional or signed-in-only grant`)
+      `${r.dialect} rules: no unconditional, signed-in-only, or time-locked grant`)
   }
 }
 
@@ -2013,6 +2082,132 @@ function gradeBusinessLogic(model, ledger, findings, allow, opts) {
   return audit
 }
 
+// ---------------------------------------------------------------------------
+// Vibecoder hygiene (SECURITY pillar) — the four cheap, high-signal grep checks.
+//
+// Security, not compliance: each of these is a breach path, so they carry `pillar:'security'` (the
+// default) and count like any other security finding. What makes them worth having is cost — no
+// dataflow, no AST, four regex passes over source already in memory. What makes them SAFE to ship
+// is their ceiling: none of them reaches `definitive`.
+//
+// That ceiling is a deliberate policy call, not timidity. In every one of these checks the engine
+// sees the sink but not the thing that decides whether it matters: a placeholder-shaped literal
+// (is this the value that actually ships, or dead scaffolding?), a base64 call beside a sensitive
+// identifier (encryption stand-in, or one honest encoding step inside a real crypto flow?), a
+// storage write under a token-ish key (a bearer credential, or an opaque id?), a marker near an
+// auth word (an unfinished check, or a note about one that is finished?). A regex cannot close any
+// of those, so the ceiling is `strong` → `likely`, and CG-HYG-004 — the weakest signal of the four
+// — sits at `weak` → `needs-review`. None can reach `confirmed`, so none can redden the badge on
+// its own. That is the correct authority for a grep, and it is what lets these ship without
+// re-opening the cry-wolf risk the whole model exists to prevent.
+//
+// LAW 1 holds in the other direction too. lib/hygiene_scan.mjs reports POSITIVES only; it never
+// asserts a file is clean. So these sets enumerate what was FOUND, exactly like `nextConfigKeys`,
+// and an empty set is `enumerated: 0` — "the check ran and matched nothing", never a pass we did
+// not earn. A file with no match is not silently credited as safe.
+//
+// NOTE: guard citations are FULL single-quoted literals for the same reason as the a11y block —
+// build.mjs's guard-link checker only validates single-quoted `guard:` literals, so a template
+// string would ship unchecked and could rot into a dead "how to fix" link.
+// ---------------------------------------------------------------------------
+
+function gradeHygiene(model, ledger, findings, allow) {
+  // Declared up front so a repo with none of these still shows four `enumerated: 0` rows — the
+  // reader sees the checks ran, rather than seeing nothing and having to guess.
+  for (const s of ['hygienePlaceholderSecrets', 'hygieneFakeCrypto', 'hygieneTokenStorage',
+    'hygieneAuthTodos']) ledger.declare(s)
+  const h = model.hygiene
+  if (!h) return
+
+  // One shape for all four: the scanner already decided the fact is real, so each fact is one
+  // subject, one finding, one `fail` row. `emit` keeps the allowlist and ledger handling in one
+  // place so a new check cannot forget either half.
+  const emit = (set, kind, fact, build) => {
+    const subject = `hygiene:${kind}:${fact.file}:${fact.at.line}`
+    if (allow.has(subject)) { ledger.record(set, subject, 'allowlisted', 'user allowlist'); return }
+    findings.push(build(subject, firstAt(fact.file, fact.at.line, fact.snippet)))
+    ledger.record(set, subject, 'fail', `${kind} at ${fact.file}:${fact.at.line}`)
+  }
+
+  for (const f of h.placeholderSecrets || []) {
+    emit('hygienePlaceholderSecrets', 'placeholder-secret', f, (subject, at) => finding({
+      id: 'CG-HYG-001', subject,
+      title_en: `Placeholder credential \`${f.token}\` shipped in source`,
+      title_he: `סוד־דמה \`${f.token}\` נשלח בקוד`,
+      severity: 'P2', evidence: 'strong',
+      why: `The value \`${f.token}\` is a self-evident placeholder, and it sits in a file that is not an .example/.template/.sample/docs/test path where placeholders belong.`,
+      at,
+      exploit: 'Either the integration silently fails closed in production, or — for a guessable default like `admin123` — anyone who reads this public repo can log in with it.',
+      impact: 'A credential that was never configured, or a default one that everybody knows. The second case is account takeover with no exploit required.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#placeholder-secrets',
+      cwe: 'CWE-1188', owasp: 'A05:2021',
+      assumption: 'That this file ships as-is and the placeholder is not overwritten at build or deploy time by a real value.',
+    }))
+  }
+
+  for (const f of h.fakeCrypto || []) {
+    emit('hygieneFakeCrypto', 'fake-crypto', f, (subject, at) => finding({
+      id: 'CG-HYG-002', subject,
+      title_en: 'Base64 is used as if it were encryption on a secret',
+      title_he: 'Base64 משמש כאילו היה הצפנה על סוד',
+      severity: 'P1', evidence: 'strong',
+      why: 'A btoa/atob or Buffer.toString(\'base64\') call sits on a value the surrounding code names as a password, token, secret or key. Base64 is an ENCODING, reversible by anyone, with no key involved.',
+      at,
+      exploit: 'Anyone who reads the stored or transmitted string decodes it in one step — `atob(value)` in any browser console — and has the plaintext secret.',
+      impact: 'The secret is stored in plaintext for every practical purpose, while the code reads as though it were protected. That false sense of protection is what makes this worse than storing it plainly.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#fake-crypto',
+      cwe: 'CWE-326', owasp: 'A02:2021',
+      assumption: 'That the base64 step is standing in for encryption rather than being one encoding hop inside a real crypto or transport flow.',
+    }))
+  }
+
+  for (const f of h.clientTokenStorage || []) {
+    emit('hygieneTokenStorage', 'token-storage', f, (subject, at) => finding({
+      id: 'CG-HYG-003', subject,
+      title_en: `Auth credential written to ${f.api} under \`${f.key}\``,
+      title_he: `אישור הזדהות נכתב ל-${f.api} תחת \`${f.key}\``,
+      severity: 'P2', evidence: 'strong',
+      why: `\`${f.api}\` is readable by ANY JavaScript running on the origin, including injected script. The key \`${f.key}\` names a credential, not a preference.`,
+      at,
+      exploit: 'One XSS anywhere on the origin — a dependency, an ad, a comment field — reads the token straight out of storage and replays it. An httpOnly cookie is unreadable to that same script.',
+      impact: 'Turns any XSS into full account takeover, and the stolen token stays valid until it expires. This is the single most common auth mistake in vibecoded apps.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#token-storage',
+      cwe: 'CWE-922', owasp: 'A01:2021',
+      assumption: 'That the stored value is a real bearer credential rather than an opaque identifier that is useless without a server-side session.',
+    }))
+  }
+
+  // One LINE is one place to look, so it is one finding — even when it carries several markers
+  // (`// TODO/FIXME: fix auth`). The scanner emits per (line, marker) because a marker is what it
+  // matched; collapsing belongs here, where the subject is defined. Without this, four markers on a
+  // line produced four findings but only ONE ledger row: `record()` returns silently when a subject
+  // repeats with the SAME disposition, so the mismatch would not have thrown — it would just have
+  // made the coverage table disagree with the finding list.
+  const todosByLine = new Map()
+  for (const f of h.authTodos || []) {
+    const key = `${f.file}:${f.at.line}`
+    const prev = todosByLine.get(key)
+    if (prev) { if (!prev.markers.includes(f.marker)) prev.markers.push(f.marker); continue }
+    todosByLine.set(key, { ...f, markers: [f.marker] })
+  }
+  for (const f of todosByLine.values()) {
+    const markers = f.markers.join('/')
+    emit('hygieneAuthTodos', 'auth-todo', f, (subject, at) => finding({
+      id: 'CG-HYG-004', subject,
+      title_en: `${markers} left inside authentication code`,
+      title_he: `${markers} נותר בתוך קוד אימות`,
+      severity: 'P3', evidence: 'weak',
+      why: `A ${markers} marker sits within five lines of an authentication or authorization token, and leads its comment rather than merely being mentioned in one. The author flagged this code as unfinished; whether the unfinished part IS the security check cannot be read from the comment.`,
+      at,
+      exploit: 'If the deferred work is the auth check itself, the endpoint ships open — the most common way a "temporary" bypass reaches production.',
+      impact: 'Unknown until a human reads it. This is a pointer to a place worth reading, not a proven defect.',
+      guard: 'guard-recipes/vibecoder-hygiene.md#auth-todos',
+      cwe: 'CWE-489',
+      assumption: 'That the marker refers to the adjacent auth logic rather than to unrelated work that merely sits nearby.',
+    }))
+  }
+}
+
 /**
  * GRADE OR DECLARE — the safety net.
  *
@@ -2024,6 +2219,372 @@ function gradeBusinessLogic(model, ledger, findings, allow, opts) {
  * Everything here is `undeterminable` on purpose. That is the honest disposition for "we saw this
  * and did not grade it", and it puts the row in the same coverage table as everything else.
  */
+// ---------------------------------------------------------------------------
+// Accessibility (compliance pillar) — ת"י 5568 חלק 1 / WCAG 2.0 AA.
+//
+// COMPLIANCE, not security. Every finding here is `pillar:'compliance'`: a missing alt is a legal
+// exposure (in Israel a civil suit needs no proof of harm), not a breach, so summarize() keeps all of
+// it out of the security verdict — a wide-open database and a missing alt never share a badge.
+// Severity is legal-exposure-if-unfixed, and there is deliberately no compliance P0.
+//
+// The engine (lib/a11y_scan.mjs) already encoded every false-positive trap as DATA: an empty `alt=""`
+// still carries the `alt` token (valid for a decorative image), a `{...spread}` sets `hasSpread` (we
+// must abstain — it could supply anything, LAW 1), a dynamic child sets `hasChildExpr`, a dynamic
+// `lang` shows up in `dynamicAttrs`. This function only turns that data into findings and dispositions.
+// Grade-or-declare holds: the static subset is graded here; the rendered-DOM subset (contrast, focus
+// order/visible, ARIA-in-practice, live-region announcements) is declared in one honest row.
+// NOTE: guard citations below are written as FULL single-quoted literals
+// ('guard-recipes/accessibility.md#anchor'), not `${A11Y_GUARD}#anchor` template strings, because
+// build.mjs's guard-link checker only validates single-quoted `guard:` literals — a template string
+// would ship UNCHECKED and could rot into a dead "how to fix" link. Verbose on purpose.
+const A11Y_SET_BY_KIND = {
+  image: 'a11yImages', formControl: 'a11yFormControls', iconable: 'a11yInteractive',
+  media: 'a11yMedia', clickable: 'a11yClickable', htmlRoot: 'a11yDocument',
+}
+// <input> types that get their accessible name from something other than a text label, so demanding
+// a label of them would be a false positive.
+const A11Y_UNLABELABLE_INPUT = new Set(['hidden', 'submit', 'button', 'reset', 'image'])
+
+function gradeAccessibility(model, ledger, findings, allow) {
+  // Declare every set up front so an app with no <img> still reports `a11yImages: enumerated 0` —
+  // grade-or-declare means the reader sees the check ran and found nothing, not silence.
+  for (const s of ['a11yImages', 'a11yFormControls', 'a11yInteractive', 'a11yMedia',
+    'a11yClickable', 'a11yDocument', 'a11yStatement', 'a11yRenderedDom']) ledger.declare(s)
+  const a = model.a11y
+  if (!a) return
+
+  for (const el of a.elements || []) {
+    const set = A11Y_SET_BY_KIND[el.kind]
+    if (!set) continue
+    const subject = el.subject
+    if (allow.has(subject)) { ledger.record(set, subject, 'allowlisted', 'user allowlist'); continue }
+
+    const at = firstAt(el.file, el.line)
+    const attrs = new Set(el.attrs || [])
+    const dyn = new Set(el.dynamicAttrs || [])
+    const has = n => attrs.has(n)
+    const before = findings.length
+    const reasons = []          // why this subject failed; joined into the fail note
+    let clean = null            // {disposition, note} to use when nothing failed
+
+    // Cross-cutting: a positive tabIndex is a barrier on ANY element (WCAG 2.4.3). -1 and 0 are fine.
+    if (typeof el.tabIndex === 'number' && el.tabIndex > 0) {
+      findings.push(finding({
+        id: 'CG-A11Y-006', subject, pillar: 'compliance',
+        title_en: `Positive tabIndex (${el.tabIndex}) forces an unnatural keyboard focus order`,
+        title_he: `tabIndex חיובי (${el.tabIndex}) כופה סדר מעבר-מקלדת לא טבעי`,
+        severity: 'P2', evidence: 'definitive',
+        why: `tabIndex="${el.tabIndex}" pulls this element ahead of the natural DOM order for keyboard users.`,
+        at,
+        exploit: 'A keyboard or screen-reader user tabs into a jumbled order — content is reached out of sequence or skipped.',
+        impact: 'A documented, screenshot-able barrier under ת"י 5568 (WCAG 2.4.3). Legal exposure if unfixed.',
+        guard: 'guard-recipes/accessibility.md#tabindex',
+      }))
+      reasons.push(`positive tabIndex ${el.tabIndex}`)
+    }
+
+    switch (el.kind) {
+      case 'image': {
+        if (el.role === 'presentation' || el.role === 'none' || has('aria-hidden')) {
+          ledger.record(set, subject, 'allowlisted', 'decorative — opted out of the accessibility tree'); continue
+        }
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply alt; cannot tell from source' } }
+        else if (has('alt')) { clean = { disposition: 'pass', note: 'alt attribute present' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-001', subject, pillar: 'compliance',
+            title_en: `<${el.tag}> has no \`alt\` attribute`,
+            title_he: `לתגית <${el.tag}> אין תכונת \`alt\``,
+            severity: 'P1', evidence: 'definitive',
+            why: `The <${el.tag}> tag has no \`alt\` attribute and no {...spread} that could supply one. (An empty alt="" would be valid for a decorative image; this has neither.)`,
+            at,
+            exploit: 'A screen-reader user hears nothing where the image is — the content is simply missing for them.',
+            impact: 'The single most-litigated accessibility barrier (WCAG 1.1.1). Legal exposure under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#img-alt', autofixable: true,
+          }))
+          reasons.push('no alt attribute')
+        }
+        break
+      }
+      case 'formControl': {
+        const type = el.type
+        if (type && A11Y_UNLABELABLE_INPUT.has(type)) { clean = { disposition: 'pass', note: `type="${type}" gets its name elsewhere, not from a text label` } }
+        else if (type === '(dynamic)') { clean = { disposition: 'undeterminable', note: 'input type is set from an expression; cannot tell whether a label is required' } }
+        else if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a label attribute; cannot tell from source' } }
+        else if (has('aria-label') || has('aria-labelledby') || has('title')) { clean = { disposition: 'pass', note: 'has an accessible name (aria-label/aria-labelledby/title)' } }
+        else if (has('id')) { clean = { disposition: 'undeterminable', note: 'has an id; a <label htmlFor> may target it, which this pass does not resolve' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-003', subject, pillar: 'compliance',
+            title_en: `Form control <${el.tag}> has no accessible label`,
+            title_he: `לפקד הטופס <${el.tag}> אין תווית נגישה`,
+            severity: 'P1', evidence: 'weak',
+            why: 'The control has no aria-label/aria-labelledby/title and no id a <label htmlFor> could target — so no label can be associated with it. (A placeholder is not a label.)',
+            at,
+            exploit: 'A screen-reader user reaches an unlabelled field and cannot tell what to type.',
+            impact: 'A core barrier under ת"י 5568 (WCAG 1.3.1 / 4.1.2). Legal exposure if unfixed.',
+            guard: 'guard-recipes/accessibility.md#form-labels',
+            assumption: 'That the field is not labelled by a wrapping <label> or an aria-labelledby target this pass does not resolve.',
+          }))
+          reasons.push('no associable label')
+        }
+        break
+      }
+      case 'iconable': {
+        const hasName = has('aria-label') || has('aria-labelledby') || has('title')
+          || el.hasStaticText || el.hasNestedImgAlt || el.hasNestedAria
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a name; cannot tell from source' } }
+        else if (el.childrenKnown === false) { clean = { disposition: 'undeterminable', note: 'could not read the children — accessible name is undeterminable' } }
+        else if (hasName) { clean = { disposition: 'pass', note: 'has an accessible name (text, aria, title, or a nested image alt)' } }
+        else if (el.hasChildExpr) {
+          findings.push(finding({
+            id: 'CG-A11Y-004', subject, pillar: 'compliance',
+            title_en: `<${el.tag}> may have no accessible name (its only child is an expression)`,
+            title_he: `ל-<${el.tag}> ייתכן שאין שם נגיש (הילד היחיד הוא ביטוי)`,
+            severity: 'P1', evidence: 'weak',
+            why: `The <${el.tag}> has no text, no aria-label/title, and its only child is a {expression} — if that renders visible text this is fine, otherwise the control is unnamed.`,
+            at,
+            exploit: 'If the expression renders an icon rather than text, a screen-reader user hears only "button" with no purpose.',
+            impact: 'An interactive control with no accessible name (WCAG 4.1.2). Legal exposure if the name is truly missing.',
+            guard: 'guard-recipes/accessibility.md#accessible-name',
+            assumption: 'That the {child expression} does not render visible text or an accessible name.',
+          }))
+          reasons.push('accessible name only from an expression')
+        } else {
+          findings.push(finding({
+            id: 'CG-A11Y-004', subject, pillar: 'compliance',
+            title_en: `Icon-only <${el.tag}> has no accessible name`,
+            title_he: `ל-<${el.tag}> מבוסס-אייקון אין שם נגיש`,
+            severity: 'P1', evidence: 'strong',
+            why: `The <${el.tag}> has no text child, no aria-label/aria-labelledby/title, and no nested image with alt — nothing gives it an accessible name.`,
+            at,
+            exploit: 'A screen-reader user hears only the role ("button"/"link") with no indication of what it does.',
+            impact: 'An unnamed interactive control (WCAG 4.1.2). A common, provable barrier under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#accessible-name',
+          }))
+          reasons.push('no accessible name')
+        }
+        break
+      }
+      case 'media': {
+        if (el.tag === 'audio') { clean = { disposition: 'undeterminable', note: 'audio needs a transcript (WCAG 1.2.1), which lives off-page — declared, not gradable from markup' } }
+        else if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply a track; cannot tell from source' } }
+        else if (el.childrenKnown === false) { clean = { disposition: 'undeterminable', note: 'could not read the children — captions track is undeterminable' } }
+        else if (el.hasCaptionsTrack === true) { clean = { disposition: 'pass', note: 'has a <track kind="captions"> (or subtitles)' } }
+        else if (el.hasCaptionsTrack === '(dynamic)') { clean = { disposition: 'undeterminable', note: 'a <track> with a dynamic kind — cannot confirm it is captions' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-005', subject, pillar: 'compliance',
+            title_en: '<video> has no captions track',
+            title_he: 'ל-<video> אין רצועת כתוביות',
+            severity: 'P2', evidence: 'strong',
+            why: 'The <video> element contains no <track kind="captions"> child.',
+            at,
+            exploit: 'A deaf or hard-of-hearing user gets no access to the spoken content.',
+            impact: 'Missing captions (WCAG 1.2.2). Mandatory for public bodies and larger businesses under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#captions',
+            assumption: 'That captions are not added at runtime by a video-player component this pass does not follow.',
+          }))
+          reasons.push('no captions track')
+        }
+        break
+      }
+      case 'clickable': {
+        // A div/span with onClick must be operable by keyboard: role + tabIndex + a key handler.
+        const hasRole = has('role')
+        const hasTab = has('tabindex')
+        const hasKey = has('onkeydown') || has('onkeypress') || has('onkeyup')
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may add role/tabIndex/key handlers; cannot tell from source' } }
+        else if (hasRole && hasTab && hasKey) { clean = { disposition: 'pass', note: 'has role, tabIndex, and a keyboard handler' } }
+        else {
+          const missing = [!hasRole && 'role', !hasTab && 'tabIndex', !hasKey && 'a key handler'].filter(Boolean).join(', ')
+          findings.push(finding({
+            id: 'CG-A11Y-007', subject, pillar: 'compliance',
+            title_en: `Clickable <${el.tag}> is not keyboard-operable (missing ${missing})`,
+            title_he: `<${el.tag}> לחיץ אינו נגיש למקלדת (חסר ${missing})`,
+            severity: 'P2', evidence: 'weak',
+            why: `This <${el.tag}> has an onClick but is missing ${missing}, so it cannot be reached or activated with a keyboard.`,
+            at,
+            exploit: 'A keyboard-only user cannot focus or activate this control at all.',
+            impact: 'A non-interactive element used as a control (WCAG 2.1.1 keyboard). Legal exposure if unfixed.',
+            guard: 'guard-recipes/accessibility.md#clickable-div',
+            assumption: 'That the handler is not on a genuinely presentational element whose action is also available through a real control nearby.',
+          }))
+          reasons.push(`clickable but missing ${missing}`)
+        }
+        break
+      }
+      case 'htmlRoot': {
+        if (el.hasSpread) { clean = { disposition: 'undeterminable', note: 'a {...spread} may supply lang; cannot tell from source' } }
+        else if (has('lang') && dyn.has('lang')) { clean = { disposition: 'undeterminable', note: 'lang is set from an expression — verify it resolves to a valid BCP-47 code' } }
+        else if (has('lang')) { clean = { disposition: 'pass', note: 'lang attribute present on the document root' } }
+        else {
+          findings.push(finding({
+            id: 'CG-A11Y-002', subject, pillar: 'compliance',
+            title_en: 'Document root <html> has no `lang` attribute',
+            title_he: 'לשורש המסמך <html> אין תכונת `lang`',
+            severity: 'P2', evidence: 'definitive',
+            why: 'The <html> element has no `lang` attribute, so assistive tech cannot know the page language. A Hebrew site expects lang="he" dir="rtl".',
+            at,
+            exploit: 'A screen reader reads the whole page with the wrong pronunciation rules.',
+            impact: 'Wrong language for the entire document (WCAG 3.1.1). Legal exposure under ת"י 5568.',
+            guard: 'guard-recipes/accessibility.md#html-lang', autofixable: true,
+          }))
+          reasons.push('no lang on the document root')
+        }
+        break
+      }
+    }
+
+    if (findings.length > before) ledger.record(set, subject, 'fail', reasons.join('; ') || 'accessibility barrier')
+    else if (clean) ledger.record(set, subject, clean.disposition, clean.note)
+    else ledger.record(set, subject, 'undeterminable', 'not gradable from the markup')
+  }
+
+  // The web-only obligations (the published statement, the rendered-DOM audit) apply ONLY to a web
+  // surface. A React Native / Capacitor shell or a pure backend has no website to make accessible, so
+  // asking it for a הצהרת נגישות would be a false positive — the sets stay enumerated: 0.
+  if (!a.webSurface) return
+
+  // The accessibility statement is legally mandatory, but its ABSENCE is NOT a fireable finding: a
+  // static scan cannot tell a real deployed site with no statement from a fresh scaffold that simply
+  // has not written one yet, and firing a red P1 on `create-next-app` output is exactly the cry-wolf
+  // failure this tool forbids (a false positive is worse than a miss). So presence is a `pass`, and
+  // absence is an honest `undeterminable` row — "we could not confirm you publish one" — while the
+  // report's mandatory-artifacts reminder carries the legal "you must have one". Declaration, not alarm.
+  const stmtSubject = 'a11y:statement'
+  if (allow.has(stmtSubject)) {
+    ledger.record('a11yStatement', stmtSubject, 'allowlisted', 'user allowlist')
+  } else if (a.statement?.present) {
+    ledger.record('a11yStatement', stmtSubject, 'pass', 'an accessibility statement page or link was detected')
+  } else if (a.widget?.detected) {
+    ledger.record('a11yStatement', stmtSubject, 'undeterminable',
+      `no statement page detected in the source, but an accessibility widget (${(a.widget.vendors || []).join(', ') || 'unknown'}) is present that may provide one — a published הצהרת נגישות is legally required; verify you have one`)
+  } else {
+    ledger.record('a11yStatement', stmtSubject, 'undeterminable',
+      'no accessibility statement page (/accessibility, /נגישות) or link was found in the source. A published הצהרת נגישות is legally mandatory — confirm you publish one (it may live on a hosted page this static pass cannot see)')
+  }
+
+  // Grade-or-declare: the rendered-DOM half of ת"י 5568 is out of static reach. Declare it in one
+  // honest row so "passed the static checks" is never mistaken for "accessible".
+  const widgetNote = a.widget?.detected
+    ? ` An accessibility widget (${(a.widget.vendors || []).join(', ')}) was detected — it signals intent but is not a substitute for real conformance.`
+    : ''
+  ledger.record('a11yRenderedDom', 'a11y:rendered-dom-audit', 'undeterminable',
+    'colour contrast (1.4.3), focus order/visible (2.4.3/2.4.7), ARIA-in-practice, and dynamic-content ' +
+    'announcements need a rendered DOM and manual testing — plus a named accessibility coordinator ' +
+    '(רכז נגישות) if over the size threshold.' + widgetNote)
+}
+
+// ---------------------------------------------------------------------------
+// Privacy / data security (compliance pillar) — תקנות הגנת הפרטיות (אבטחת מידע), 2017.
+//
+// The SECOND compliance domain, same pillar mechanism as accessibility: pillar:'compliance', legal-
+// exposure severity, no P0, and summarize() keeps all of it off the security badge. The regulation is
+// overwhelmingly process and paperwork invisible to a repo, so this is grade-or-declare taken to its
+// limit — a thin GRADED slice (cleartext transit, session-cookie flags, from lib/privacy_scan.mjs)
+// and the rest DECLARED as `undeterminable` obligation rows tied to their תקנה. The absence of a
+// security policy / an audit / a pen-test is NEVER asserted from source: that would be the exact
+// false positive the tool exists to avoid. See core/checks/privacy-data-security.md.
+// ---------------------------------------------------------------------------
+
+// Obligations a source scan cannot verify — declared, never asserted as violations. `level` is the
+// security level they attach to; the level itself is user-confirmed (CG-PRIV-LEVEL).
+const PRIVACY_OBLIGATIONS = [
+  { id: 'CG-PRIV-DEF-DOC', reg: '2', level: 'all', what: 'a database definition document (מסמך הגדרות מאגר)' },
+  { id: 'CG-PRIV-VETTING', reg: '7', level: 'all', what: 'personnel vetting before access is granted' },
+  { id: 'CG-PRIV-ACCESS-LIST', reg: '8', level: 'all', what: 'a maintained least-privilege roles/permissions list' },
+  { id: 'CG-PRIV-ACCESS-VERIFY', reg: '9(א)', level: 'all', what: 'practical verification that access is restricted to authorised users' },
+  { id: 'CG-PRIV-PHYSICAL', reg: '6', level: 'all', what: 'physical security of the systems holding the data' },
+  { id: 'CG-PRIV-PORTABLE', reg: '12', level: 'all', what: 'portable-media restriction + standard encryption on export' },
+  { id: 'CG-PRIV-POLICY', reg: '4', level: 'medium+high', what: 'a written security policy (נוהל אבטחה)' },
+  { id: 'CG-PRIV-AUTHN', reg: '9(ב)', level: 'medium+high', what: 'authentication rules: password strength, lockout, rotation ≤6mo, auto-logout, revocation on termination' },
+  { id: 'CG-PRIV-AUDIT-LOG', reg: '10', level: 'medium+high', what: 'tamper-resistant access logging retained at least 24 months' },
+  { id: 'CG-PRIV-NET', reg: '14', level: 'medium+high', what: 'network security: intrusion/malware defences (14א) and strong remote-access auth (14ג)' },
+  { id: 'CG-PRIV-SEPARATION', reg: '13', level: 'medium+high', what: 'system isolation and patching (no end-of-life versions)' },
+  { id: 'CG-PRIV-OUTSOURCING', reg: '15', level: 'medium+high', what: 'data-processor contracts (permitted data, return/destruction, breach reporting)' },
+  { id: 'CG-PRIV-BREACH', reg: '11', level: 'medium+high', what: 'a breach-notification process to the Privacy Protection Authority' },
+  { id: 'CG-PRIV-AUDIT-24MO', reg: '16', level: 'medium+high', what: 'an independent security audit at least every 24 months' },
+  { id: 'CG-PRIV-BACKUP', reg: '18', level: 'medium+high', what: 'backup procedures' },
+  { id: 'CG-PRIV-RISK-SURVEY', reg: '5(ג)', level: 'high', what: 'a risk survey (סקר סיכונים) every 18 months' },
+  { id: 'CG-PRIV-PENTEST', reg: '5(ד)', level: 'high', what: 'penetration testing (מבדקי חדירות) every 18 months' },
+  { id: 'CG-PRIV-ARCH-INVENTORY', reg: '5(א)', level: 'high', what: 'a current system-architecture inventory' },
+  { id: 'CG-PRIV-BACKUP-COPY', reg: '18', level: 'high', what: 'a maintained backup copy with verified integrity and a tested recovery path' },
+]
+
+function gradePrivacy(model, ledger, findings, allow) {
+  for (const s of ['privacyTransport', 'privacyCookies', 'privacyObligations']) ledger.declare(s)
+  const p = model.privacy
+  if (!p) return
+
+  // CG-PRIV-TLS — cleartext personal data in transit (תקנה 14(ב)). The lib already suppressed
+  // localhost, xmlns/schema namespaces, comments, and non-request-target strings, so a fact here is a
+  // real http:// request target (or an explicit TLS-off DB connection) to a non-local host.
+  for (const t of (p.transport || [])) {
+    const subject = `priv:transport:${t.file}:${t.at.line}:${t.kind}`
+    if (allow.has(subject)) { ledger.record('privacyTransport', subject, 'allowlisted', 'user allowlist'); continue }
+    const dbTls = t.kind === 'db-tls-disabled'
+    findings.push(finding({
+      id: 'CG-PRIV-TLS', subject, pillar: 'compliance',
+      title_en: dbTls ? `Database connection to ${t.host} disables TLS` : `Cleartext http:// request to ${t.host}`,
+      title_he: dbTls ? `החיבור למסד הנתונים ${t.host} מבטל TLS` : `בקשת http:// לא מוצפנת אל ${t.host}`,
+      severity: 'P1',
+      // http-target is a strong static fact; db-tls-disabled is weak (a managed provider may enforce
+      // TLS server-side regardless), so needs-review, not a confirmed violation. Impact-if-true is the
+      // same P1 — the uncertainty lives in confidence, not severity.
+      evidence: dbTls ? 'weak' : 'strong',
+      why: dbTls
+        ? 'A database/backend connection to a non-local host explicitly disables TLS, so anything the app reads or writes — including personal data — can travel in cleartext.'
+        : 'A request goes to a non-local host over plain http://, so any personal data in it (and its response) travels unencrypted and can be read or altered in transit.',
+      at: firstAt(t.file, t.at.line, t.snippet),
+      exploit: 'Anyone on the network path — shared Wi-Fi, a compromised router, an ISP — reads or modifies the data in transit.',
+      impact: 'Transmitting personal data without encryption violates תקנה 14(ב). Exposure: an enforcement order from the Privacy Protection Authority, and a reportable security event if data is actually intercepted.',
+      guard: 'guard-recipes/security-headers.md#tls',
+      cwe: 'CWE-319', owasp: 'A02:2021',
+      assumption: dbTls
+        ? 'That the managed database provider does not enforce TLS server-side regardless of this client flag.'
+        : 'That this request actually carries personal data rather than only public information.',
+    }))
+    ledger.record('privacyTransport', subject, 'fail', dbTls ? 'TLS explicitly disabled to a non-local host' : 'plain http:// request target')
+  }
+
+  // CG-PRIV-COOKIE — a session cookie without Secure/HttpOnly (supports תקנה 9(ב)/14). The lib emits
+  // only when it can see the literal options object and Secure and/or HttpOnly is the problem.
+  for (const c of (p.cookies || [])) {
+    const subject = `priv:cookie:${c.file}:${c.at.line}:${c.name}`
+    if (allow.has(subject)) { ledger.record('privacyCookies', subject, 'allowlisted', 'user allowlist'); continue }
+    const flags = (c.missing || []).filter(x => x === 'secure' || x === 'httpOnly')
+    findings.push(finding({
+      id: 'CG-PRIV-COOKIE', subject, pillar: 'compliance',
+      title_en: `Session cookie "${c.name}" is missing ${flags.join(' and ')}`,
+      title_he: `לעוגיית ההתחברות "${c.name}" חסר ${flags.join(' ו-')}`,
+      severity: 'P2', evidence: 'strong',
+      why: `The session cookie "${c.name}" is set without ${flags.join(' and ')}, weakening the authentication control the regulation requires.`,
+      at: firstAt(c.file, c.at.line, c.snippet),
+      exploit: flags.includes('httpOnly')
+        ? 'An XSS foothold reads the session cookie from document.cookie and hijacks the session.'
+        : 'The session cookie rides a plain-HTTP hop and is captured in transit.',
+      impact: 'A weakness in the authentication controls the data-security regulation requires (תקנה 9(ב)/14). Exposure: a gap an Authority audit or a post-breach review would flag.',
+      guard: 'guard-recipes/security-headers.md#cookies',
+      cwe: 'CWE-1004', owasp: 'A05:2021',
+      assumption: `That "${c.name}" is genuinely a session/authentication cookie rather than a non-sensitive one that matched the name heuristic.`,
+    }))
+    ledger.record('privacyCookies', subject, 'fail', `missing ${flags.join(', ')}`)
+  }
+
+  // Declared: the security-level classifier + the process obligations (grade-or-declare). Only when
+  // the repo actually KEEPS a personal-data database — the regulation binds a data holder, not a
+  // static site. Every row is `undeterminable`, never asserted as a violation (LAW 1 / cry-wolf).
+  if (p.hasDataLayer) {
+    ledger.record('privacyObligations', 'priv:level', 'undeterminable',
+      'CG-PRIV-LEVEL: the database security level (basic/medium/high) is not knowable from source — it depends on record and authorised-user counts. Confirm it (sensitive data? ≥100k subjects? >100 users?); obligations are listed conservatively at Medium until then.')
+    for (const o of PRIVACY_OBLIGATIONS) {
+      ledger.record('privacyObligations', `priv:obligation:${o.id}`, 'undeterminable',
+        `${o.id} (תקנה ${o.reg}, ${o.level}): ${o.what} — organisational, not visible in the repo; confirm it holds.`)
+    }
+  }
+}
+
 function declareUngradedSurfaces(model, ledger) {
   ledger.declare('ungradedSurfaces')
   const a = model.artifacts || {}
@@ -3060,11 +3621,19 @@ function sortFindings(findings) {
 }
 
 function summarize(findings, discovery = null) {
-  const confirmed = findings.filter(f => f.confidence === 'confirmed')
+  // The two pillars are summarised separately and never mix. A compliance finding (a missing alt
+  // attribute, no accessibility statement) is real and provable, but it is a LEGAL exposure, not a
+  // breach — folding it into the security badge would make "you might get sued" and "you might get
+  // hacked" the same red light, which helps nobody. So the security verdict below is computed over
+  // security findings ONLY, and compliance gets its own summary.
+  const securityFindings = findings.filter(f => (f.pillar || 'security') !== 'compliance')
+  const complianceFindings = findings.filter(f => f.pillar === 'compliance')
+
+  const confirmed = securityFindings.filter(f => f.confidence === 'confirmed')
   // Unproven catastrophe: impact-if-true is P0/P1, but the evidence never reached `confirmed`.
   // These are exactly the findings the old verdict discarded — and the reason a repo with an open
   // unauthenticated DELETE could print green.
-  const unproven = findings.filter(f =>
+  const unproven = securityFindings.filter(f =>
     f.confidence !== 'confirmed' && (f.severity === 'P0' || f.severity === 'P1'))
   const discoveryCoverage = assessDiscoveryCoverage(discovery)
 
@@ -3101,6 +3670,19 @@ function summarize(findings, discovery = null) {
       bySeverity: Object.fromEntries(SEVERITY_ORDER.map(s => [s, findings.filter(f => f.severity === s).length])),
       byConfidence: Object.fromEntries(CONFIDENCE_ORDER.map(c => [c, findings.filter(f => f.confidence === c).length])),
     },
+    // The compliance pillar's own summary — legal exposure, not a breach. Rendered as its own report
+    // section, never mixed into the security badge above. `violations` counts the settled ones (a
+    // missing alt is definitive); `needsReview` is the honestly-uncertain rest. `total === 0` here is
+    // NOT the same as compliant — the rendered-DOM half of WCAG is declared, not checked (grade or
+    // declare), which the report states plainly.
+    compliance: {
+      total: complianceFindings.length,
+      violations: complianceFindings.filter(f => f.confidence === 'confirmed').length,
+      needsReview: complianceFindings.filter(f => f.confidence === 'needs-review').length,
+      likely: complianceFindings.filter(f => f.confidence === 'likely').length,
+      bySeverity: Object.fromEntries(SEVERITY_ORDER.map(s =>
+        [s, complianceFindings.filter(f => f.severity === s).length])),
+    },
   }
 }
 
@@ -3117,12 +3699,19 @@ function summarize(findings, discovery = null) {
 // `allowlisted` is reported but not counted as decided: the user decided it, we did not.
 // ---------------------------------------------------------------------------
 
+// A coverage set belongs to the compliance pillar (accessibility, privacy) rather than security.
+// The decision-rate ratchet is a SECURITY-quality metric — "the security grader must not start
+// abstaining more" — and the compliance pillar is grade-or-declare by design, with whole sets
+// (the rendered-DOM audit, the declared privacy obligations) that are `undeterminable` on purpose.
+// Folding those into the ratchet would let a new compliance domain silently lower the security bar,
+// so the scoped totals below keep the two pillars' rates apart.
+const COMPLIANCE_SET_RE = /^(a11y|priv)/
+
 function decisionRateOf(coverage) {
   const bySet = {}
-  let enumerated = 0
-  let decided = 0
-  let abstained = 0
-  let allowlisted = 0
+  const tot = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
+  const sec = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
+  const comp = { enumerated: 0, decided: 0, abstained: 0, allowlisted: 0 }
   for (const [setName, set] of Object.entries(coverage || {})) {
     const c = set.counts
     const d = c.pass + c.fail
@@ -3133,15 +3722,20 @@ function decisionRateOf(coverage) {
       allowlisted: c.allowlisted,
       rate: set.enumerated ? d / set.enumerated : null,
     }
-    enumerated += set.enumerated
-    decided += d
-    abstained += c.undeterminable
-    allowlisted += c.allowlisted
+    const bucket = COMPLIANCE_SET_RE.test(setName) ? comp : sec
+    for (const t of [tot, bucket]) {
+      t.enumerated += set.enumerated; t.decided += d; t.abstained += c.undeterminable; t.allowlisted += c.allowlisted
+    }
   }
+  const withRate = t => ({ ...t, rate: t.enumerated ? t.decided / t.enumerated : null })
   return {
     rule: '(pass + fail) / enumerated — the share of enumerated subjects the grader actually ' +
-      'decided, as opposed to abstaining via `undeterminable`',
-    overall: { enumerated, decided, abstained, allowlisted, rate: enumerated ? decided / enumerated : null },
+      'decided, as opposed to abstaining via `undeterminable`. `security` and `compliance` are the ' +
+      'same measure scoped to each pillar; the ratchet gates on `security`, since compliance is ' +
+      'grade-or-declare and its declared rows are honest abstentions, not laziness.',
+    overall: withRate(tot),
+    security: withRate(sec),
+    compliance: withRate(comp),
     bySet,
   }
 }
@@ -3420,6 +4014,11 @@ export function grade(model, opts = {}) {
   gradeCiWorkflows(model, ledger, findings, allow)
   gradeIac(model, ledger, findings, allow)
   gradeFirebaseRules(model, ledger, findings, allow)
+  gradeHygiene(model, ledger, findings, allow)
+  // Compliance pillar. Runs like any other rule, but its findings are pillar:'compliance' and never
+  // touch the security verdict (see summarize). ת"י 5568 / WCAG 2.0 AA, and the privacy regs.
+  gradeAccessibility(model, ledger, findings, allow)
+  gradePrivacy(model, ledger, findings, allow)
   gradeObservations(opts.observations, ledger, findings)
   gradeScanners(opts.scanners, ledger, findings, allow)
   const businessLogic = gradeBusinessLogic(model, ledger, findings, allow, opts)

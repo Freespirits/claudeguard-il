@@ -14,6 +14,11 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, extname, dirname, resolve, sep } from 'node:path'
 import { stripSql, stripJs, stripHash, CODE, COMMENT } from './lib/strip_comments.mjs'
+import { scanA11yElements, scanStatementSignals, scanWidgetSignals, STMT_PATH_RE } from './lib/a11y_scan.mjs'
+import { scanTransport, scanCookies } from './lib/privacy_scan.mjs'
+import {
+  scanPlaceholderSecrets, scanFakeCrypto, scanClientTokenStorage, scanAuthTodos,
+} from './lib/hygiene_scan.mjs'
 
 const ROOT = resolve(process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : '.')
 
@@ -401,14 +406,18 @@ for (const [r, f] of files) {
     }
   }
 }
-// declared env files
-const envFiles = allPaths.filter(p => /(^|\/)\.env(\.|$)/.test(p) && !/\.example$/.test(p))
+// declared env files. `.example`/`.template`/`.sample`/`.dist` are ILLUSTRATIVE — they exist to show
+// which vars to set, with placeholder values, and are meant to be committed. Grading them produces a
+// cry-wolf secret finding on a file that holds no real secret (found by the wild benchmark on a real
+// repo's `.env.template`). Only `.example` was excluded before; the other three conventions are equally
+// illustrative.
+const envFiles = allPaths.filter(p => /(^|\/)\.env(\.|$)/.test(p) && !/\.(example|template|sample|dist)$/i.test(p))
 const envDeclared = new Map() // NAME -> {file,line,hasValue}
 for (const p of allPaths.filter(x => /(^|\/)\.env/.test(x))) {
   const text = readParsedConfig(p); if (text == null) continue
   text.split(/\r?\n/).forEach((ln, i) => {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(ln)
-    if (m) envDeclared.set(m[1], { file: p, line: i + 1, hasValue: m[2].trim().length > 2, example: /\.example$/.test(p) })
+    if (m) envDeclared.set(m[1], { file: p, line: i + 1, hasValue: m[2].trim().length > 2, example: /\.(example|template|sample|dist)$/i.test(p) })
   })
 }
 
@@ -2296,7 +2305,7 @@ for (const p of artifacts.firebaseRules) {
   }
   // Firestore / Storage rules language. Comments use `//`, which stripHash blanks.
   const { code } = stripHash(raw)
-  const openRules = [], authOnlyRules = []
+  const openRules = [], authOnlyRules = [], timeLockedRules = []
   const re = /allow\s+([a-z, ]+?)\s*(?::\s*if\s+([^;{]+))?;/gi
   let m
   while ((m = re.exec(code))) {
@@ -2307,8 +2316,15 @@ for (const p of artifacts.firebaseRules) {
     // `if request.auth != null` means ANY signed-in user, including one who just self-registered.
     // Not open to the world, but not owner-scoped either — the cross-tenant case.
     else if (/^request\.auth\s*!=\s*null$/i.test(cond)) authOnlyRules.push({ line, ops, condition: cond })
+    // The Firebase console "start in test mode" default: `allow ...: if request.time < timestamp.date(Y,M,D)`.
+    // Access is gated on the wall clock, not on identity — until the date, every request from anyone is
+    // allowed. It fell through to a structural PASS before, because it is neither `true` nor the bare
+    // signed-in check, so a database left in test mode graded green. The guard is "no `auth` in the
+    // condition": an `... && request.auth != null` expiry has SOME identity component and is a different
+    // (weaker) shape, so it is deliberately not matched here.
+    else if (/\brequest\.time\b/i.test(cond) && !/\brequest\.auth\b/i.test(cond)) timeLockedRules.push({ line, ops, condition: cond })
   }
-  firebaseRules.push({ file: p, dialect: /storage/i.test(p) ? 'storage' : 'firestore', openRules, authOnlyRules })
+  firebaseRules.push({ file: p, dialect: /storage/i.test(p) ? 'storage' : 'firestore', openRules, authOnlyRules, timeLockedRules })
 }
 
 // ---------- finish the discovery ledger ----------
@@ -2385,6 +2401,153 @@ discovery.schema = {
   }
 }
 
+// ---------- accessibility (compliance pillar) ----------
+//
+// Facts for the accessibility checks (ת"י 5568 / WCAG 2.0 AA). This is the COMPLIANCE pillar, not
+// security: the grader turns these into `pillar:'compliance'` findings that never touch the security
+// badge. The engine only reports what the markup IS — which elements exist, which attributes they
+// carry, whether an accessibility statement and a widget are present. Every severity, and every
+// false-positive trap (an empty `alt=""` is valid, a `{...spread}` could supply anything, a dynamic
+// child might be the label), lives in the grader. See lib/a11y_scan.mjs for the tokenizer.
+const UI_EXT = new Set(['.jsx', '.tsx', '.js', '.mjs', '.cjs', '.vue', '.svelte'])
+const a11yElements = []
+const a11yStatementEvidence = []
+const a11yWidgetVendors = new Set()
+let a11yTruncated = false
+const MAX_A11Y_ELEMENTS = 800
+
+const collectA11y = (path, text) => {
+  if (a11yElements.length >= MAX_A11Y_ELEMENTS) { a11yTruncated = true; return }
+  const { elements, truncated } = scanA11yElements(text)
+  if (truncated) a11yTruncated = true
+  for (const e of elements) {
+    if (a11yElements.length >= MAX_A11Y_ELEMENTS) { a11yTruncated = true; break }
+    a11yElements.push({ subject: `a11y:${path}:${e.line}:${e.tag}`, file: path, ...e })
+  }
+  for (const ev of scanStatementSignals(text, path)) a11yStatementEvidence.push({ file: path, ...ev })
+  for (const v of scanWidgetSignals(text)) a11yWidgetVendors.add(v)
+}
+
+// Parsed UI source, already in memory. `.ts` is excluded on purpose: it cannot carry JSX (that is
+// what `.tsx` is for), so scanning it only risks a `<Generic>` type param being mistaken for a tag.
+for (const [r, f] of files) if (UI_EXT.has(f.ext)) collectA11y(r, f.text)
+
+// Static HTML entrypoints (Vite/CRA `index.html`, a plain `public/…​.html`) are where `<html lang>`
+// and a footer statement link live, and they are NOT in CODE_EXT — so read them on demand, recorded
+// in the discovery ledger. XML comments are blanked first (offsets preserved) so a commented-out
+// `<img>` or a commented statement link can mislead in neither direction.
+const htmlEntrypoints = allPaths.filter(p => /\.html?$/i.test(p))
+for (const p of htmlEntrypoints.slice(0, 50)) {
+  let sz = 0
+  try { sz = statSync(join(ROOT, p)).size } catch { continue }
+  if (sz > MAX_FILE) continue
+  const raw = readParsedConfig(p)
+  if (raw == null) continue
+  collectA11y(p, blankXmlComments(raw))
+}
+
+// The statement is legally mandatory, and the FINDING is its ABSENCE — so presence is read
+// generously to avoid a false "missing statement". A routable accessibility page (by file path or by
+// a framework route's urlPath) or any statement link counts.
+const stmtRouteFromRoutes = routes.some(rt => rt.urlPath && STMT_PATH_RE.test(rt.urlPath))
+if (stmtRouteFromRoutes) {
+  const rt = routes.find(x => x.urlPath && STMT_PATH_RE.test(x.urlPath))
+  a11yStatementEvidence.push({ file: rt.file || '(route)', kind: 'route', at: rt.urlPath })
+}
+// Is this a WEB surface at all? The accessibility law (ת"י 5568) is about websites, so the
+// web-only obligations (a published statement, the rendered-DOM audit) apply only when there is a
+// browser DOM to speak of. A web framework, an index.html, or any recognised DOM tag says yes; a
+// React Native / Expo / Capacitor shell whose UI is <View>/<Text> (never `<img>`) says no, and a
+// pure backend says no — neither should be asked for a web accessibility statement.
+const a11yWebSurface = !!(framework.next || framework.vue || framework.svelte || framework.vite)
+  || htmlEntrypoints.length > 0
+  || a11yElements.length > 0
+const a11y = {
+  scannedFiles: [...files.keys()].filter(r => UI_EXT.has(files.get(r).ext)).length
+    + Math.min(htmlEntrypoints.length, 50),
+  webSurface: a11yWebSurface,
+  truncated: a11yTruncated,
+  elements: a11yElements,
+  statement: {
+    present: a11yStatementEvidence.length > 0,
+    evidence: a11yStatementEvidence.slice(0, 20),
+  },
+  // Informational only: a widget signals intent, but the law wants real conformance, so its absence
+  // is never itself a finding. The grader renders this, it does not grade it.
+  widget: { detected: a11yWidgetVendors.size > 0, vendors: [...a11yWidgetVendors] },
+}
+
+// ---------- privacy / data-security (compliance pillar) ----------
+//
+// Facts for the privacy checks (תקנות הגנת הפרטיות (אבטחת מידע)). Compliance, not security: the grader
+// turns these into pillar:'compliance' findings that never touch the security badge. The lib
+// (lib/privacy_scan.mjs) owns every false-positive trap — localhost, xmlns/schema namespaces, comment
+// context, env-conditional `secure`, indirection → abstain — so the engine only collects the facts.
+const privacyTransport = []
+const privacyCookies = []
+const MAX_PRIVACY_FACTS = 300
+for (const [r, f] of files) {
+  for (const t of scanTransport(f.text, r)) { if (privacyTransport.length >= MAX_PRIVACY_FACTS) break; privacyTransport.push({ ...t, file: r }) }
+  for (const c of scanCookies(f.text)) { if (privacyCookies.length >= MAX_PRIVACY_FACTS) break; privacyCookies.push({ ...c, file: r }) }
+}
+// Does this repo KEEP a personal-data database? The data-security regulations bind a business that
+// holds personal data — a static marketing site does not carry the obligations, so the declared
+// obligation list is gated on this. Signal: any modeled table, or a Supabase/Firebase/ORM data layer.
+const privacyDataLayer = tables.size > 0
+  || !!(framework.supabase || framework.firebase)
+  || ['prisma', '@prisma/client', 'drizzle-orm', 'mongoose', 'typeorm', 'sequelize', 'knex'].some(has)
+const privacy = {
+  transport: privacyTransport,
+  cookies: privacyCookies,
+  hasDataLayer: privacyDataLayer,
+}
+
+// ---------- vibecoder hygiene (security pillar) ----------
+//
+// Facts for the four cheap, high-signal checks the cross-model poll converged on (LLMs/SYNTHESIS.md
+// rows 4, 7 and 8): a placeholder credential shipped in real source, base64 used AS "encryption", a
+// bearer token parked in web storage, and a TODO left sitting inside auth code. These are SECURITY
+// facts, not compliance — they describe a breach path, not a legal exposure.
+//
+// lib/hygiene_scan.mjs owns every false-positive trap (exempt paths, word-level sensitivity so
+// `tokenizer` never reads as `token`, the mirrored PUBLIC_BY_DESIGN set, comment context), so the
+// engine here only collects and attaches a file. No severity is decided in this file.
+const hygienePlaceholders = []
+const hygieneFakeCrypto = []
+const hygieneTokenStorage = []
+const hygieneAuthTodos = []
+const MAX_HYGIENE_FACTS = 300
+let hygieneTruncated = false
+const pushHygiene = (bucket, fact, file) => {
+  if (bucket.length >= MAX_HYGIENE_FACTS) { hygieneTruncated = true; return }
+  bucket.push({ ...fact, file })
+}
+for (const [r, f] of files) {
+  for (const x of scanPlaceholderSecrets(f.text, r)) pushHygiene(hygienePlaceholders, x, r)
+  for (const x of scanFakeCrypto(f.text)) pushHygiene(hygieneFakeCrypto, x, r)
+  for (const x of scanClientTokenStorage(f.text)) pushHygiene(hygieneTokenStorage, x, r)
+  for (const x of scanAuthTodos(f.text)) pushHygiene(hygieneAuthTodos, x, r)
+}
+// A `.env` file is not CODE_EXT, and `API_KEY=changeme` — the entire purpose of the scanner's env
+// pass — lives in exactly one. Only the files the engine already treats as REAL are read: `envFiles`
+// has already dropped `.example`/`.template`/`.sample`/`.dist`, the illustrative conventions whose
+// whole job is to carry placeholders (the cry-wolf the wild benchmark caught on a real repo).
+// scanPlaceholderSecrets exempts those same paths itself, so this is belt and braces, not a
+// duplicated rule. readParsedConfig records into a Set, so re-reading cannot double-count discovery.
+for (const p of envFiles) {
+  const text = readParsedConfig(p)
+  if (text == null) continue
+  for (const x of scanPlaceholderSecrets(text, p)) pushHygiene(hygienePlaceholders, x, p)
+}
+const hygiene = {
+  scannedFiles: files.size + envFiles.length,
+  truncated: hygieneTruncated,
+  placeholderSecrets: hygienePlaceholders,
+  fakeCrypto: hygieneFakeCrypto,
+  clientTokenStorage: hygieneTokenStorage,
+  authTodos: hygieneAuthTodos,
+}
+
 const model = {
   root: ROOT.split(sep).join('/'),
   generatedBy: 'claudeguard/project_model',
@@ -2392,6 +2555,7 @@ const model = {
     filesTotal: allPaths.length, codeFiles: files.size,
     clientReachable: clientReachable.size, serverReachable: serverReachable.size,
     routes: routes.length, tables: tables.size, envVars: envVars.length, llmSites: llmSites.length,
+    a11yElements: a11yElements.length,
   },
   framework, artifacts,
   // DISCOVERY coverage — a first-class output, and a DIFFERENT axis from the grader's analysis
@@ -2433,6 +2597,12 @@ const model = {
   envGuards,
   nextConfig: nextConfigFacts,
   llmSites,
+  // Compliance pillar (accessibility). Facts only; the grader owns the ת"י 5568 / WCAG severities.
+  a11y,
+  // Compliance pillar (privacy / data security). Facts only; the grader owns the תקנות severities.
+  privacy,
+  // Security pillar. The cheap high-signal hygiene facts; the grader owns their severities.
+  hygiene,
   mobile: { android: androidManifests, ios: iosPlists, networkSecurityConfigs },
   // Audit fix C: three artifact classes the engine used to discover and never read. Each is now a
   // graded subject set, so silence about them is no longer indistinguishable from safety.
@@ -2443,6 +2613,7 @@ const model = {
     'Heuristic parsing (regex + import resolution), not a type-aware AST. May miss dynamic requires, re-exports through barrels, and monorepo aliases.',
     'Client/server classification is decisive for public env prefixes and "use client" chains; other cases are reported as weaker signals.',
     'Database model reflects migrations in the repo, not the live database. Applied state is the ground truth.',
+    'Accessibility facts are read from static JSX/HTML tags. Component wrappers (<Button>, <Input>) are not resolved, and rendered-DOM properties (colour contrast, focus order/visible, ARIA-in-practice) are out of static reach — both are declared, not graded.',
   ],
 }
 

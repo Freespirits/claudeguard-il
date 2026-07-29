@@ -1,0 +1,19 @@
+{
+  "repo": "whoiskatrin/chart-gpt",
+  "source_url": "https://github.com/whoiskatrin/chart-gpt",
+  "ref": "afb3c7b8322f92941933a7cba2f5bca02121a738",
+  "profile": "nextjs-supabase",
+  "fetched": [
+    "repo/lib/supabase.tsx",
+    "repo/utils/helper.ts",
+    "repo/components/PurchaseCredits.tsx",
+    "repo/.env.example",
+    "repo/package.json"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "privileged-key-client", "cwe": "CWE-522", "file": "repo/lib/supabase.tsx", "line": 4, "severity": "critical", "confidence": "certain", "note": "The Supabase client is built from process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY (line 4) and exported (createClient at line 6). The service_role key bypasses all Row Level Security, and the NEXT_PUBLIC_ prefix makes Next.js inline its value into the client bundle; this module is imported by the client component components/PurchaseCredits.tsx (import at line 2), so the full-admin key ships to every visitor's browser and grants unrestricted read/write to the whole database." }
+  ],
+  "expectClean": false,
+  "notes": "Provenance: whoiskatrin/chart-gpt, a real, popular public Next.js (pages-router) app -- ChartGPT, chart generation from text -- (recall case; NOT authored by us). The single, unambiguous issue is a service_role key exposed to the browser: lib/supabase.tsx reads NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY (also declared in .env.example line 4) and the resulting admin client is imported into a React client component (components/PurchaseCredits.tsx) as well as server helpers (utils/helper.ts). Because service_role bypasses RLS, exposing it client-side is a critical privilege escalation for any visitor. Deliberate non-findings: .env.example ships only empty placeholders (no committed secret value), so this is privileged-key-client, not exposed-secret; the anon key var (NEXT_PUBLIC_SUPABASE_ANON_KEY, .env.example line 3) is public by design and not flagged."
+}

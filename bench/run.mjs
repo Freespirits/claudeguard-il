@@ -178,9 +178,11 @@ function score(caseObj, ev) {
   const unexpected = findings.filter(f => !validIds.has(f.id))
 
   // False positives are UNEXPECTED CONFIRMED findings on a clean/fixed variant — the cry-wolf case
-  // that makes this audience rotate live keys over nothing.
+  // that makes this audience rotate live keys over nothing. Compliance-pillar findings are excluded:
+  // this is the SECURITY false-positive gate, and a confirmed accessibility violation on a clean
+  // security fixture is not a security false positive. Compliance has its own corpus axis.
   const unexpectedConfirmed = isClean
-    ? findings.filter(f => f.confidence === 'confirmed' && !expectConfirmed.has(f.id))
+    ? findings.filter(f => f.confidence === 'confirmed' && f.pillar !== 'compliance' && !expectConfirmed.has(f.id))
     : []
 
   // `filesParsed` counts source files; `configParsed` counts files a dedicated parser read instead
@@ -198,7 +200,10 @@ function score(caseObj, ev) {
   // answer whenever a token is all we have, which is right, and it is also how a rule can abstain
   // on everything while printing a full coverage table. Nothing else in this harness can tell
   // "we looked hard and could not settle it" apart from "we never tried".
-  const dr = ev.result.decisionRate?.overall || { enumerated: 0, decided: 0 }
+  // The ratchet gates on the SECURITY-scoped rate. Compliance is grade-or-declare — whole sets (the
+  // rendered-DOM audit, the declared privacy obligations) are `undeterminable` on purpose — so
+  // folding them in would let a new compliance domain silently lower the security decision bar.
+  const dr = ev.result.decisionRate?.security || ev.result.decisionRate?.overall || { enumerated: 0, decided: 0 }
 
   return {
     variant: ev.variant,

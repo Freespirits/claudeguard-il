@@ -4,7 +4,7 @@ What is built, what is deliberately not, and what comes next. Kept honest on pur
 tool that overstates its own reach is doing the exact thing this project argues against. Where that
 happened anyway, the claim is quoted and retracted in [`ERRATA.md`](ERRATA.md) rather than deleted.
 
-Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
+Current version: **0.3.0**. See [CHANGELOG](#changelog-since-020) at the bottom.
 
 ---
 
@@ -17,8 +17,10 @@ Current version: **0.2.0**. See [CHANGELOG](#changelog-since-010) at the bottom.
 | Coverage accounting | **Unusual and load-bearing.** Every subject the engine enumerates is `pass`/`fail`/`undeterminable`/`allowlisted`, asserted arithmetically at runtime. Everything it sees but does not grade gets a declared row. |
 | Dataflow / injection (SQLi, XSS, SSRF) | **Delegated, on purpose.** See [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md). Without semgrep or Snyk installed, this surface depends on reviewer judgement. |
 | Business logic | **New, and capped.** Seven of ten taxonomy classes implemented; three declared unsupportable. Every finding is `judgement` → `likely`, never `confirmed`. |
+| Vibecoder hygiene | **Four cheap greps, graded, capped.** CG-HYG-001..004: a placeholder credential shipped in source, base64 used as encryption, an auth token in web storage, a TODO left in auth code. None may reach `confirmed` — the engine sees the sink but not whether it matters, so `likely` with a named assumption is the honest ceiling for a regex. Measured at **0 findings on 4 clean reference repos and 0 on this repository's own source**. |
 | Active probing (Tier 2) | **Four GET probes.** A smoke test, not a scanner. See below. |
 | Parser depth | **Regex plus lightweight parsing, not a type-aware AST.** Dynamic requires, barrel re-exports and unusual routing can escape it. Stated in `limits` on every model. |
+| **Compliance pillar (NEW)** | **Accessibility shipped, privacy documented.** A second pillar beside security: legal exposure, not breach. `pillar:'compliance'` findings never touch the security badge. Accessibility (ת"י 5568 / WCAG 2.0 AA): CG-A11Y-001..007 graded, statement + rendered-DOM declared, cry-wolf-tested. Privacy (data-security regs): CG-PRIV-* domain spec written, grader next. See below. |
 
 ### The benchmark, stated plainly
 
@@ -37,6 +39,44 @@ measured.**
 The earlier framing led with the percentages and read as a detection claim; it is retracted as
 **ERR-006** in [`ERRATA.md`](ERRATA.md). Growing the corpus with cases we did not write (§5 below) is
 the only thing that changes the underlying fact.
+
+---
+
+## The compliance pillar — a lawsuit is not a breach
+
+A vibecoded app gets its owner in trouble two ways, and only one of them is a hacker. The other is a
+**regulator or a plaintiff**, and for the Israeli audience it is often the more immediate risk. So
+findings now carry a `pillar: 'security' | 'compliance'` tag, and the two are kept rigorously apart:
+`summarize()` computes the security badge over security findings **only**, compliance gets its own
+`summary.compliance` block, and the benchmark's decision-rate ratchet and false-positive gate are
+scoped to the security pillar — a new compliance domain can never lower the security bar or redden the
+security badge. Compliance severity is **legal-exposure-if-unfixed** (stated in the statute's terms),
+and there is deliberately **no compliance P0**. Full model: [`core/severity-model.md#pillars`](core/severity-model.md).
+
+**Domain 1 — Accessibility (ת"י 5568 חלק 1 / WCAG 2.0 AA). Shipped.** A pure JSX/HTML tokenizer
+(`plugin/scripts/lib/a11y_scan.mjs`) feeds `gradeAccessibility`: **CG-A11Y-001** (img no alt),
+**-002** (html no lang), **-003** (form control no label), **-004** (icon-only control no name),
+**-005** (video no captions), **-006** (positive tabIndex), **-007** (non-keyboard-operable clickable).
+Every false-positive trap is encoded as engine data (empty `alt=""` is valid, `{...spread}` abstains,
+dynamic values abstain, decorative `role`/`aria-hidden` opt out). The legally-mandatory **accessibility
+statement is a *declared* row, not a fired finding** — a static scan cannot tell a real deployed site
+from a fresh scaffold, and a red P1 on `create-next-app` output is the cry-wolf failure the whole model
+forbids; the report's mandatory-artifacts reminder carries the "you must publish one" instead. The
+rendered-DOM half of WCAG (contrast, focus, ARIA-in-practice) is declared. Cry-wolf and detection twins
+in `test/accessibility.test.mjs` + `test/a11y_scan.test.mjs`.
+
+**Domain 2 — Privacy / data security (תקנות הגנת הפרטיות (אבטחת מידע) 2017). Documented; grader next.**
+[`core/checks/privacy-data-security.md`](core/checks/privacy-data-security.md) maps the regulation as a
+second compliance domain: a declared security-level classifier (basic/medium/high), a thin graded slice
+(**CG-PRIV-TLS** cleartext transit, **CG-PRIV-COOKIE** session-cookie flags), and ~19 declared
+obligation rows (audit logging, pen-testing, outsourcing contracts, breach process…) each tied to its
+תקנה. Because the regulation is overwhelmingly process and paperwork invisible to a repo, this domain is
+grade-or-declare taken to its limit — the graded checks are few and conservative, and their absence is
+never asserted as a violation.
+
+**Future compliance domains** could join under the same mechanism: cookie-consent, terms/privacy-policy
+presence, age-gating. Each would be its own statute-denominated severity axis, none ever touching the
+security badge.
 
 ---
 
@@ -81,18 +121,31 @@ Ordered. Each item says what "done" means.
 
 ### 1 · Wire up what is already built
 
-Three finished components have no invocation path:
+This section listed three unwired components. **Two of the three were wired and this file was not
+updated** — the entry stayed on the list long after the work landed, which is its own small version
+of the dishonesty this document is supposed to prevent. Both were re-verified end to end before
+being struck, rather than taken on trust a second time:
 
-- **The Snyk adapter.** `run_snyk.mjs` is complete and the grader already accepts `--snyk`, but no
-  skill passes it. Done when `/cg-scan` runs it where available and its four coverage rows render.
-- **The business-logic intent loop.** This one is structurally broken, not merely unwired: the grader
-  imports `loadIntent` and never calls it, and its CLI has no `--intent` flag, so
-  `claudeguard.intent.yml` **cannot be consumed even if a user writes one by hand.** The tier is
-  therefore incapable of ever reporting `confirmed`. Done when a user can produce the file through a
-  guided pass, the grader discovers it, and the report shows `assumed → confirmed`.
-- **`dynamic_gate.mjs`.** Deliberately left unwired — see the section above. It is a documented
-  dependency inversion, not an oversight, and the day a HexStrike or Strix adapter lands it is the
-  precondition that already exists.
+- ~~**The Snyk adapter.**~~ **Done.** `/cg-scan` runs `run_snyk.mjs` when `detect_tools.mjs` reports
+  Snyk installed *and* authenticated, and passes `--snyk` to the grader. Verified against the
+  recorded real payloads in `test/fixtures/snyk/`: 8 findings (CG-SNYK-001 dep-vulns, CG-SNYK-006 IaC
+  misconfigurations), **all at `needs-review`** — Snyk is a `JUDGEMENT_SOURCE`, so its output can
+  never reach `confirmed` — and all four `scan:snyk-*` coverage rows render, in the ran case *and* in
+  the unauthenticated one ("SNYK_TOKEN is not set, so the adapter did not run it"). The consent
+  boundary holds: Snyk Code is the only scan that sends source off the machine and stays off until
+  the user says yes.
+- ~~**The business-logic intent loop.**~~ **Done.** The claim here was the strongest in this file —
+  "structurally broken", "cannot be consumed even if a user writes one by hand", "incapable of ever
+  reporting `confirmed`" — and it is simply not true of the current code. The grader has `--intent`,
+  calls `loadIntent`, and auto-discovers `claudeguard.intent.yml` at the repo root. Verified as the
+  full round trip: no file → `assumed`; `--propose-intent` drafts one with `TODO:` markers for the
+  rules it refuses to invent; committing it at the root → **`confirmed`**, via auto-discovery and via
+  the explicit flag. The ceiling still holds — `CG-BIZ` findings stay capped at `likely` by a
+  module-load assertion, because a confirmed intent file does not turn a guess about business rules
+  into a proof.
+- **`dynamic_gate.mjs`.** Still unwired, and still **deliberately** so — see the section above. It is
+  a documented dependency inversion, not an oversight, and the day a HexStrike or Strix adapter lands
+  it is the precondition that already exists. This is the only genuine entry left in this section.
 
 ### 2 · Close the non-JS blind spot
 
@@ -187,6 +240,30 @@ testing for anything production-critical.
 A clean scan is not proof of safety. It is proof that nothing was proved.
 
 ---
+
+## Changelog since 0.2.0
+
+- **A second pillar: compliance.** Findings now carry `pillar: 'security' | 'compliance'`, held
+  rigorously apart — the security badge is computed over security findings only, and the benchmark's
+  decision-rate ratchet and false-positive gate are scoped to security, so a compliance domain can
+  never lower the security bar. There is deliberately no compliance P0; severity is
+  legal-exposure-if-unfixed. **Domain 1 — Accessibility (ת"י 5568 / WCAG 2.0 AA)** shipped:
+  CG-A11Y-001..007, with the mandatory accessibility statement handled as a *declared* row, not a
+  cry-wolf P1 on a fresh scaffold. **Domain 2 — Privacy / data security** documented (grader next).
+- **Vibecoder hygiene, wired and capped.** Four cheap high-signal checks — CG-HYG-001 placeholder
+  credential, -002 base64-as-encryption, -003 auth token in web storage, -004 auth TODO. None can
+  reach `confirmed` (a grep sees the sink, not whether it matters), so none reddens the badge alone.
+  Measured at 0 findings on four clean reference repos and 0 on this repo's own source.
+- **A benchmark we did not author.** `bench/wild.mjs`: 11 real repos at pinned SHAs, labelled by a
+  reviewer blind to the tool. First measured detection numbers (10/16 on covered categories, 83% on
+  the target profile), 0 candidate false positives — and it caught four real cry-wolf bugs on
+  reference code, all fixed. `bench/run.mjs`'s 100%-by-construction recall is retracted as a
+  detection claim (ERR-006); it is a regression gate, and stays green.
+- **SARIF 2.1.0 output** for GitHub Code Scanning, over the existing findings.
+- **Roadmap honesty pass.** Two "not wired yet" items (the Snyk adapter, the business-logic intent
+  loop) were struck after being re-verified end to end — they had been wired for some time and the
+  roadmap simply understated the tool. `dynamic_gate.mjs` remains deliberately unwired.
+- Tests **405 → 616**. The benchmark's regression gate stayed green throughout.
 
 ## Changelog since 0.1.0
 

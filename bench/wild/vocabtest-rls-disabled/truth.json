@@ -1,0 +1,21 @@
+{
+  "repo": "sen-priyansh/vocabtest",
+  "source_url": "https://github.com/sen-priyansh/vocabtest",
+  "ref": "d52c8990a9fe7bc458e867c8b269fcc44e9063d6",
+  "profile": "nextjs-supabase",
+  "fetched": [
+    "repo/final_database_setup.sql",
+    "repo/emergency_fix.sql",
+    "repo/fix_authentication.sql",
+    "repo/src/lib/supabase.ts",
+    "repo/package.json"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "rls-disabled", "cwe": "CWE-284", "file": "repo/final_database_setup.sql", "line": 86, "severity": "critical", "confidence": "certain", "note": "The canonical schema disables Row Level Security on public.profiles (line 86), public.test_results (87) and public.user_stats (88), and separately grants ALL privileges to the anon role (lines 48 and 54-56). Because the app ships the Supabase anon key to the browser (src/lib/supabase.ts line 19), any anonymous internet client can read/insert/update/delete every user's row -- e.g. harvest all users' emails from profiles or tamper with test_results -- through the auto-generated PostgREST API. The script's own notices confirm 'RLS disabled for development' / 'Full access granted to all roles' (lines 101-102)." },
+    { "id": "L2", "category": "rls-disabled", "cwe": "CWE-284", "file": "repo/emergency_fix.sql", "line": 24, "severity": "high", "confidence": "certain", "note": "This committed setup script also disables RLS on public.profiles (line 24, comment 'NO RLS (to eliminate permission issues)') and grants ALL on profiles to anon/authenticated (line 27) -- same public-exposure class as L1, applied to the PII-bearing profiles table." },
+    { "id": "L3", "category": "rls-disabled", "cwe": "CWE-284", "file": "repo/fix_authentication.sql", "line": 112, "severity": "high", "confidence": "certain", "note": "The auth-fix script likewise disables RLS on profiles/test_results/user_stats (lines 112-114) and grants ALL privileges to anon (line 69); it is titled '... Ensure RLS is properly disabled for development' (line 111), confirming the disable is intentional across every SQL setup file in the repo." }
+  ],
+  "expectClean": false,
+  "notes": "Provenance: sen-priyansh/vocabtest, a real public Next.js 15 + Supabase PWA (deps: next 15.5.3, @supabase/supabase-js, @supabase/ssr, @supabase/auth-ui-react) (recall case; NOT authored by us). All three committed database scripts disable Row Level Security on the user-data tables (profiles holds email PII; test_results/user_stats hold per-user data) AND explicitly grant the anonymous PostgREST role full privileges. The browser client is built with NEXT_PUBLIC_SUPABASE_ANON_KEY (src/lib/supabase.ts), so RLS-off makes the whole dataset publicly readable/writable -- the textbook Supabase rls-disabled footgun. Deliberate non-findings: NEXT_PUBLIC_SUPABASE_ANON_KEY (src/lib/supabase.ts) is public by design; no service_role key is exposed to the client here; there are no committed secret values (keys come from env). The three SQL files are alternative setup/repair scripts, each labeled at its profiles DISABLE-RLS line so the ground truth is complete regardless of which file a scanner inspects."
+}

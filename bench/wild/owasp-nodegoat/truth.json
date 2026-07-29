@@ -1,0 +1,35 @@
+{
+  "repo": "OWASP/NodeGoat",
+  "source_url": "https://github.com/OWASP/NodeGoat",
+  "ref": "c5cb68a7084e4ae7dcc60e6a98768720a81841e8",
+  "profile": "express-api",
+  "fetched": [
+    "repo/package.json",
+    "repo/server.js",
+    "repo/config/env/all.js",
+    "repo/config/env/development.js",
+    "repo/app/routes/index.js",
+    "repo/app/routes/contributions.js",
+    "repo/app/routes/research.js",
+    "repo/app/routes/allocations.js",
+    "repo/app/data/allocations-dao.js",
+    "repo/app/routes/session.js",
+    "repo/app/data/user-dao.js",
+    "repo/app/routes/profile.js",
+    "repo/app/data/profile-dao.js"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [
+    { "id": "L1", "category": "rce", "cwe": "CWE-95", "file": "repo/app/routes/contributions.js", "line": 32, "severity": "critical", "confidence": "certain", "note": "eval() is called directly on untrusted request body fields (req.body.preTax at line 32, req.body.afterTax at 33, req.body.roth at 34), giving server-side JavaScript injection / remote code execution." },
+    { "id": "L2", "category": "ssrf", "cwe": "CWE-918", "file": "repo/app/routes/research.js", "line": 15, "severity": "high", "confidence": "certain", "note": "The request handler builds a URL from user-controlled req.query.url and fetches it with needle.get (line 16), then streams the response body back to the client -- classic server-side request forgery." },
+    { "id": "L3", "category": "injection-sql", "cwe": "CWE-943", "file": "repo/app/data/allocations-dao.js", "line": 78, "severity": "high", "confidence": "certain", "note": "The user-supplied 'threshold' value is interpolated unescaped into a MongoDB $where JavaScript expression, allowing NoSQL/JS injection (e.g. 0';while(true){}' )." },
+    { "id": "L4", "category": "other", "cwe": "CWE-256", "file": "repo/app/data/user-dao.js", "line": 25, "severity": "high", "confidence": "certain", "note": "Passwords are stored in cleartext (the plaintext value from the request is inserted directly; the bcrypt hashing is commented out at line 29) and login compares them with a plain === at line 61 -- broken authentication / cleartext password storage." },
+    { "id": "L5", "category": "xss", "cwe": "CWE-79", "file": "repo/server.js", "line": 137, "severity": "high", "confidence": "likely", "note": "The Swig template engine is configured with autoescape:false, so user-controlled fields (e.g. profile first/last name rendered in the views) are emitted unescaped, enabling stored/reflected XSS." },
+    { "id": "L6", "category": "insecure-cookie", "cwe": "CWE-614", "file": "repo/server.js", "line": 78, "severity": "medium", "confidence": "certain", "note": "The express-session middleware is configured with no cookie options (the httpOnly/secure cookie block is commented out at lines 92-100), so the session cookie is set without HttpOnly or Secure flags." },
+    { "id": "L7", "category": "missing-security-headers", "cwe": "CWE-693", "file": "repo/server.js", "line": 68, "severity": "medium", "confidence": "certain", "note": "No security-header middleware is registered: helmet is imported-but-commented (line 10) and the CSP/HSTS/frameguard/noSniff calls are all disabled, so the app ships without CSP, HSTS, X-Frame-Options, or X-Content-Type-Options." },
+    { "id": "L8", "category": "cleartext-transit", "cwe": "CWE-319", "file": "repo/server.js", "line": 145, "severity": "medium", "confidence": "certain", "note": "The application (which handles 401k/retirement PII) is served over plain HTTP via http.createServer; the HTTPS server is commented out (lines 149-155)." },
+    { "id": "L9", "category": "exposed-secret", "cwe": "CWE-798", "file": "repo/config/env/all.js", "line": 8, "severity": "medium", "confidence": "likely", "note": "Hard-coded fallback secrets are committed in config: the session-signing cookieSecret (line 8) and a crypto key (line 9). These shipped default secrets are used to sign sessions when no env override is set." }
+  ],
+  "expectClean": false,
+  "notes": "OWASP NodeGoat -- the canonical intentionally-vulnerable Express/MongoDB training app (recall case; NOT authored by us). Findings labeled purely from reading the source; each vulnerable line is left uncommented while the accompanying 'Fix for Ax' block is commented out. Nine distinct issues across OWASP Top 10 categories: eval RCE, SSRF, NoSQL $where injection, cleartext password storage, XSS via disabled template autoescaping, insecure session cookie, missing security headers, cleartext HTTP transit of PII, and hard-coded secrets. profile.js/profile-dao.js and session.js were also fetched for context (session.js login handler additionally lacks any brute-force rate limiting)."
+}

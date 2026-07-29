@@ -204,6 +204,83 @@ findings and next to Coverage, or it is a lie by omission. See `report-template.
 
 ---
 
+<a id="pillars"></a>
+## The two pillars — a breach and a lawsuit are not the same light
+
+A vibecoded app gets its owner in trouble two ways, and they are not the same kind of trouble. A
+**breach** is someone reaching data or control they should not. A **lawsuit** is the app being, on
+its face, out of legal compliance — most immediately, for the Israeli audience, **web accessibility**
+(ת"י 5568 חלק 1 ≈ WCAG 2.0 AA), where a civil suit needs *no proof of harm* and the plaintiff bar is
+active. The second is often *more likely* than the first for a small site, and no security scanner
+touches it.
+
+So every finding carries a **`pillar`**:
+
+| `pillar` | Kind of trouble | Example |
+|----------|-----------------|---------|
+| `security` (default) | A breach — someone gets in. | An unauthenticated DELETE route; a `service_role` key in the bundle. |
+| `compliance` | A legal exposure — someone sues, or a regulator fines. | An `<img>` with no `alt`; no published הצהרת נגישות. |
+
+`finding()` defaults `pillar` to `'security'`, validates it against exactly those two values, and
+throws on anything else — a typo cannot invent a silent third pillar.
+
+**The load-bearing rule: a compliance finding never touches the security verdict.** `summarize()`
+computes the badge — `critical`/`high`/…/`unknown`/`clean`, `confirmedP0`, `confirmedLevel`, the LAW 4
+`clean`-vs-`unknown` decision — over **security findings only**. A real, confirmed accessibility
+violation must not redden the security badge, because "you might get sued" and "you might get hacked"
+are different colours of light and folding them together helps no one: a green security badge sitting
+beside an open accessibility lawsuit is not a contradiction, it is the honest picture.
+
+Compliance gets its **own** summary block, rendered as its own report section:
+
+```yaml
+compliance:
+  total:        3      # every pillar:'compliance' finding
+  violations:   2      # confidence 'confirmed' — a missing alt is definitive
+  needsReview:  1      # honestly uncertain (a label association we could not follow)
+  likely:       0
+  bySeverity:   { P0: 0, P1: 1, P2: 2, P3: 0, P4: 0 }
+```
+
+### Compliance severity = legal exposure if unfixed
+
+Severity still uses the P0–P4 labels — one scale keeps ordering and rendering uniform — but for a
+compliance finding the axis is **legal exposure if unfixed**, stated in those terms (the statute, the
+₪ range), never "an attacker gets X". The mapping for accessibility (ת"י 5568 / תקנות הנגישות 2013):
+
+| Level | Compliance meaning | Accessibility example |
+|-------|--------------------|-----------------------|
+| **P1** | A core, provable barrier a plaintiff can screenshot in seconds — the spine of the known lawsuit template. Civil suit **up to ₪50,000 with no proof of harm**, plus a ₪7,500/day accessibility order. | `<img>` with no `alt` on a content image; a form control with no accessible label; an icon-only control with no accessible name. |
+| **P2** | A real barrier that needs a particular user or assistive tech to bite, or a partial failure. | Positive `tabIndex` breaking focus order; `onClick` on a non-interactive `<div>` with no keyboard path; missing captions on a non-critical video. |
+| **P3** | Hygiene / robustness — correct-but-fragile, or best-practice. | `lang` present but set from a variable we could not resolve; an accessibility widget present but not a substitute for real conformance. |
+| **P4** | Informational — worth knowing, not itself a violation. | An accessibility toolbar detected (signals intent; its *absence* is not a finding — the law wants real conformance, not a widget). |
+
+There is deliberately **no compliance P0**: accessibility non-conformance is serious and expensive,
+but it is not the drop-everything-before-anyone-sees-the-URL emergency that a live data breach is, and
+inflating it to P0 would be the cry-wolf failure in a new costume.
+
+**The mandatory הצהרת נגישות is declared, not fired.** A published accessibility statement is legally
+required, but its absence is a *coverage row*, not a finding: a static scan cannot tell a real deployed
+site with no statement from a fresh scaffold that has not written one yet, and a red P1 on
+`create-next-app` output is precisely the cry-wolf failure the whole model exists to prevent. So a
+detected statement is a `pass`, its absence is `undeterminable` ("we could not confirm you publish
+one"), and the report's mandatory-artifacts reminder carries the legal "you must". Same logic retires
+the rendered-DOM half of ת"י 5568 (contrast, focus, ARIA-in-practice) to a declared row.
+
+**Confidence is computed exactly as for security** — a pure function of Evidence. A missing `alt` is
+`definitive` → `confirmed` (a *violation*); a label that might be associated through markup this pass
+does not follow is `weak` → `needs-review` (declared, not asserted). Grade-or-declare applies
+identically: the statically-checkable subset of WCAG is graded, and the rendered-DOM subset (contrast,
+focus-visible, reading order, live-region announcements) is **declared** in one honest row, never
+guessed. LAW 1–3 bind compliance rules the same as security rules: a token is not a pass, and the
+coverage ledger (`a11yImages`, `a11yForms`, …) must satisfy LAW 2 arithmetic like any other set.
+
+This is what makes "add some a11y rules" into a durable **pillar**: privacy-policy, cookie-consent and
+terms-of-service could later join it under the same `pillar:'compliance'` mechanism, each with its own
+statute-denominated severity, none of them ever reddening the security badge.
+
+---
+
 <a id="gate-mode"></a>
 ## Gate mode — the exit code *is* the verdict
 
@@ -260,7 +337,12 @@ id:           CG-<DOMAIN>-<NNN>       # stable and unique per rule; the prefix c
 subject:      route:app/api/orders/route.ts   # the exact thing graded — the join key to Coverage
 title_en:     Short imperative title
 title_he:     כותרת קצרה
-severity:     P0 | P1 | P2 | P3 | P4  # impact if true; never reduced for uncertainty
+severity:     P0 | P1 | P2 | P3 | P4  # impact if true; never reduced for uncertainty. For a
+                                      # compliance finding this is legal-exposure-if-unfixed (₪/statute),
+                                      # not attacker-action — see "The two pillars" above.
+pillar:       security | compliance   # security = a breach; compliance = a legal exposure (e.g.
+                                      # accessibility). Defaults to security. A compliance finding
+                                      # NEVER reddens the security badge nor counts in confirmedP0.
 confidence:   confirmed | likely | needs-review   # DERIVED from evidence.strength — never written
 provenance:   rule | reviewer         # a deterministic rule, or a reviewer walking the inventory
 source:       null | gitleaks | semgrep | snyk | npm …   # which external tool established it;

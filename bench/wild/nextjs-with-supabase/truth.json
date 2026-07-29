@@ -1,0 +1,19 @@
+{
+  "repo": "vercel/next.js",
+  "source_url": "https://github.com/vercel/next.js/tree/canary/examples/with-supabase",
+  "ref": "f6d094061e0c27ad74b3344065d203933021011c",
+  "profile": "nextjs-supabase",
+  "fetched": [
+    "repo/package.json",
+    "repo/.env.example",
+    "repo/proxy.ts",
+    "repo/lib/supabase/client.ts",
+    "repo/lib/supabase/server.ts",
+    "repo/lib/supabase/proxy.ts",
+    "repo/app/protected/page.tsx"
+  ],
+  "labeler": "blind independent review, generic OWASP rubric, no knowledge of the tool under test",
+  "labels": [],
+  "expectClean": true,
+  "notes": "Official Next.js 'with-supabase' starter example (the create-next-app --example with-supabase template), fetched from vercel/next.js monorepo path examples/with-supabase/ at canary HEAD; the examples/with-supabase/ path prefix was stripped so the case reads as a normal project root. Reviewed for Supabase/Next.js footguns and found none: only the publishable/anon key is referenced (NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY), never a service_role key; .env.example ships placeholder values only (no committed credential); the protected route (app/protected/page.tsx) calls supabase.auth.getClaims() and redirect()s unauthenticated users; the proxy/middleware (proxy.ts -> lib/supabase/proxy.ts) redirects any non-public, unauthenticated request to /auth/login. This starter has no DB migrations/rules bundled, so there is no RLS surface to evaluate here. Included as a precision test case."
+}
