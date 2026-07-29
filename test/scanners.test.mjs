@@ -1,5 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { grade } from '../plugin/scripts/grader.mjs'
 
 // The engine returns an empty-but-valid model for a repo with nothing in it. gradeScanners is
@@ -150,4 +155,55 @@ test('no scanner input means no scanner sets and no change to a clean verdict', 
   const r = grade(EMPTY_MODEL, {})
   assert.ok(!r.coverage.scanCoverage, 'scanCoverage only appears when a scanner ran')
   assert.equal(r.verdict.level, 'clean')
+})
+
+// ---------------------------------------------------------------------------
+// THE SEAM. Every other test in this file hands `grade()` a hand-written scanner payload, so all of
+// them would keep passing if the adapter's real output stopped matching that shape. This one runs
+// the adapter as a subprocess and feeds its ACTUAL stdout to the grader — the join every /cg-scan
+// run depends on and no test covered.
+//
+// The unauthenticated case is the right one to pin, because it is the failure that has to stay
+// LOUD: an adapter which reported "nothing found" for a scan that never ran would let a project with
+// eleven live CVEs print a clean dependency section. Four scans, four declared rows, no findings —
+// and a verdict that does not move, because "we could not look" is not evidence of anything.
+// ---------------------------------------------------------------------------
+
+test('run_snyk with no token yields four declared coverage rows, no findings, and a clean verdict', () => {
+  const HERE = dirname(fileURLToPath(import.meta.url))
+  const ADAPTER = join(HERE, '..', 'plugin', 'scripts', 'run_snyk.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'cg-snyk-'))
+  try {
+    writeFileSync(join(dir, 'package.json'), '{"name":"x","dependencies":{}}', 'utf8')
+
+    // SNYK_TOKEN is the adapter's ONLY grant. Removing it is what makes this deterministic on any
+    // machine: installed or not, authenticated interactively or not, the adapter refuses to run and
+    // has to say so — it never borrows a `snyk auth` session it was not handed.
+    const env = { ...process.env }
+    delete env.SNYK_TOKEN
+
+    const r = spawnSync(process.execPath, [ADAPTER, dir], {
+      cwd: dir, env, encoding: 'utf8', input: '', timeout: 180000, maxBuffer: 64 * 1024 * 1024,
+    })
+    if (r.error) throw r.error
+    assert.equal(r.status, 0, `the adapter must exit 0 and report the gap in JSON: ${r.stderr}`)
+
+    const snyk = JSON.parse(r.stdout)
+    assert.equal(snyk.authenticated, false)
+    assert.deepEqual(snyk.observations, [], 'a scan that did not run reports nothing, not zero issues')
+
+    const graded = grade(EMPTY_MODEL, { scanners: { snyk } })
+    const rows = graded.coverage.scanCoverage.undeterminable
+      .filter(s => s.subject.startsWith('scan:snyk-'))
+    assert.deepEqual(rows.map(s => s.subject).sort(),
+      ['scan:snyk-code', 'scan:snyk-container', 'scan:snyk-iac', 'scan:snyk-sca'],
+      'all four Snyk scans must be declared, or a skipped scan reads as a clean one')
+    for (const row of rows) {
+      assert.ok(row.note && row.note.trim(), `${row.subject} was declared with no reason`)
+    }
+    assert.ok(!graded.findings.some(f => f.id.startsWith('CG-SNYK-')),
+      'a scan that could not run must not manufacture findings')
+    assert.equal(graded.verdict.level, 'clean',
+      '"we could not look" must not move the badge in either direction')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
