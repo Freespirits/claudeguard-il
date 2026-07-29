@@ -169,8 +169,9 @@ CONTEXT.md     the domain model — the vocabulary this codebase is written in
 ## Why is there a "vulnerable app" in this repo?
 `sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be
 run against known-bad code. Its problems are at the **code** level (exposed `service_role` key,
-no RLS, IDOR, prompt injection, missing headers); its **dependencies are kept current**, so it
-shouldn't trip Dependabot. Never deploy it. See [`SECURITY.md`](SECURITY.md).
+no RLS, IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it
+does trip Dependabot — every alert on this repository points at a fixture, and none of them is
+reachable from anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md).
 
 ## Disclaimer
 Provided as-is, no warranty. A clean scan is **not** proof of safety. You are responsible for

@@ -27,10 +27,19 @@ against known-bad input:
 
 ### Why the Security tab shows a large alert count
 
-Their dependencies are deliberately **not** kept current. Known-vulnerable packages are what the
-dependency-scanning part of the tool is exercised against, so upgrading them would delete test
-coverage rather than add safety. Every Dependabot alert on this repository points at one of those
-two fixture trees.
+Their dependencies are **not** kept current, so Dependabot flags them. Every Dependabot alert on
+this repository points at one of those two fixture trees.
+
+An earlier version of this section claimed that upgrading them "would delete test coverage". **That
+was wrong, and it is worth correcting rather than quietly deleting**, because it is the same mistake
+this tool exists to catch: a confident statement nobody had checked. No `expected.json` in
+`bench/corpus` expects `CG-DEP-001`, and the dependency-scanning arm is exercised in
+`test/dep_audit_shapes.test.mjs` and `test/scanners.test.mjs` against **recorded tool output**,
+never against a fixture's installed versions. Several fixture bumps have since been merged and the
+benchmark stayed at recall 100% / precision 100% / zero false positives.
+
+So a fixture dependency bump is **noise, not a risk**. Merge it or ignore it as you prefer, and
+re-run `node bench/run.mjs` either way.
 
 ClaudeGuardIL itself has **zero runtime dependencies** — CI asserts this on every push, and the
 build fails if any are added. Nothing this tool ships depends on the flagged packages, and nothing

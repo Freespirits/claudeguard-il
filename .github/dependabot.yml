@@ -6,15 +6,27 @@
 #   sample-vulnerable-app/  — the known-bad app the engine is tested against
 #   bench/corpus/**         — the ground-truth benchmark pairs (vulnerable / fixed)
 #
-# Their dependencies are deliberately NOT kept current. A fixture with known-vulnerable packages is
-# what the dependency-scanning arm of the tool (CG-DEP-001) is exercised against, so updating them
-# would remove test coverage rather than add safety. Automated version-update PRs are therefore
-# disabled for both trees.
+# Their dependencies are not kept current, and their vulnerabilities are in the CODE — exposed keys,
+# missing RLS, IDOR, prompt injection — not in the packages.
+#
+# WHAT BUMPING A FIXTURE DOES AND DOES NOT COST, because an earlier version of this comment got it
+# wrong. It claimed that updating fixture dependencies "would remove test coverage". It does not:
+# no `expected.json` in bench/corpus expects CG-DEP-001, and the dependency-scanning arm is
+# exercised in test/dep_audit_shapes.test.mjs and test/scanners.test.mjs against RECORDED TOOL
+# OUTPUT, never against a fixture's real installed versions. Three such bumps were merged and the
+# benchmark stayed at recall 100% / precision 100% / zero false positives. So a fixture bump is
+# noise, not a risk — merge or ignore it on that basis, and re-run `node bench/run.mjs` either way.
+#
+# WHAT THIS FILE CAN AND CANNOT TURN OFF. `open-pull-requests-limit: 0` stops scheduled VERSION
+# updates. It does not stop SECURITY updates, which is what the `npm_and_yarn` group PRs are — those
+# are governed by a repository setting (Settings → Code security → Dependabot security updates) and
+# cannot be scoped by path from here. That is why PRs against these trees keep appearing despite the
+# limit below, and only sample-vulnerable-app is listed: adding bench/corpus would not change that
+# behaviour, so listing it would only restate the same false promise in a new place.
 #
 # Consequence to expect: GitHub's Security tab shows a large Dependabot ALERT count for this repo.
 # Those alerts are the fixtures, they are intentional, and none of them is reachable from anything
-# this tool ships. See SECURITY.md. Alert visibility is a repository setting and cannot be scoped by
-# path from this file.
+# this tool ships. See SECURITY.md. Alert visibility is also a repository setting.
 version: 2
 updates:
   - package-ecosystem: "npm"
