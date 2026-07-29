@@ -2,7 +2,7 @@
   "name": "sample-vulnerable-app",
   "version": "0.0.0",
   "private": true,
-  "description": "Deliberately CODE-insecure app used to test ClaudeGuardIL. The vulnerabilities are in the code (exposed keys, no RLS, IDOR, prompt injection) — NOT in the dependencies, which are kept current. Never deploy this.",
+  "description": "Deliberately CODE-insecure app used to test ClaudeGuardIL. The vulnerabilities are in the code (exposed keys, no RLS, IDOR, prompt injection), not in the dependencies. These versions are not kept current, so Dependabot flags them; see SECURITY.md. Never deploy this.",
   "scripts": { "dev": "next dev", "build": "next build", "start": "next start" },
   "dependencies": {
     "next": "^15.4.0",
