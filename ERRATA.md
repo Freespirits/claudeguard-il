@@ -190,6 +190,62 @@ the only thing that changes the underlying fact: a corpus we did not write.
 
 ---
 
+## ERR-007 — "every Dependabot alert points at one of those two fixture trees", while a third tree produced most of them
+
+**Claimed.** [`SECURITY.md`](SECURITY.md) named exactly two directories of intentionally insecure
+code — `sample-vulnerable-app/` and `bench/corpus/**` — and then stated: *"Every Dependabot alert on
+this repository points at one of those two fixture trees."* [`README.md`](README.md) made the
+narrower version of the same claim under *"Why is there a 'vulnerable app' in this repo?"*, naming
+only `sample-vulnerable-app/`: *"Its **dependencies are not kept current**, so it does trip
+Dependabot — every alert on this repository points at a fixture."*
+[`.github/dependabot.yml`](.github/dependabot.yml) listed the same two trees and told the reader what
+to expect: *"GitHub's Security tab shows a large Dependabot ALERT count for this repo. Those alerts
+are the fixtures."*
+
+**What is true.** There was a **third** fixture tree, unnamed in all three places, and it was the
+dominant source of the alerts: `bench/wild/*/repo/`, the real third-party source vendored for the
+wild benchmark in 0.3.0. Those nine manifests declared **429 dependency entries** between them —
+`bench/wild/chartgpt-service-role-client` alone had 96, `owasp-nodegoat` a deliberately ancient 2016
+Grunt/Mongo/Cypress toolchain — against **5** in `sample-vulnerable-app` and 1–6 per `bench/corpus`
+case. The repository's alert count stood at about **122**.
+
+So the conclusion each document reached was right — no alert was ever reachable from anything this
+tool ships, and this project still has zero runtime dependencies — but it was reached over an
+inventory that was missing the part that mattered. "A large count, and here are the two trees it
+comes from" is a false account of a number when a third tree produced most of it. Naming the trees
+is the whole content of the reassurance; getting that list wrong is not a detail.
+
+The second half of the claim was also a choice presented as a fact of nature. **Most of those 429
+entries could simply be deleted.** [`plugin/scripts/project_model.mjs`](plugin/scripts/project_model.mjs)
+reads a manifest in exactly two places — framework detection (`const deps = …`) and
+`SERVER_FRAMEWORKS[*].pkgs` — and both consult a closed, hard-coded set of names; every other pass
+keys off imports in the source. A dependency outside that set is invisible to the engine, so it buys
+the corpus no detection and costs it an alert. 0.3.1 keeps the observable ones at their real upstream
+pins and drops the other **429**, which cut the alert count by roughly an order of magnitude. The
+wild scorecard is **byte-identical** across the change (10/16 detected, 9/16 confirmed, 0 candidate
+false positives), the regression gate stayed green, and
+[`test/wild_manifest_hygiene.test.mjs`](test/wild_manifest_hygiene.test.mjs) now fails if a new case
+re-imports a full manifest, or if the engine renames something the allowlist still permits.
+
+Two honest residues, stated rather than rounded to zero:
+
+- **This is a fidelity trade.** The vendored `package.json` files are now a subset of upstream at the
+  pinned SHA. They always were a subset of the upstream *tree* — no wild case was ever a full clone
+  — but a trimmed file is a modified file, and a reader diffing against `source_url` will find it.
+  The rule is mechanical and recorded in
+  [`bench/wild/observable-packages.mjs`](bench/wild/observable-packages.mjs): nothing is bumped, and
+  nothing the engine can read is removed.
+- **The count is not zero and should not be.** `next 14.2.3`, `express ^4.13.4`, `electron ^36`,
+  `vite ^6.2.2` and friends are exactly what the engine reads, so they stay at the real pins and
+  keep raising alerts. A fixture-only residue is the correct end state, not a bug to drive to zero.
+
+**Corrected.** This entry, and the changes that land with it in 0.3.1: the trim and its guard test,
+and the inventory corrected in [`SECURITY.md`](SECURITY.md), [`README.md`](README.md),
+[`README.he.md`](README.he.md) and [`.github/dependabot.yml`](.github/dependabot.yml). Alert
+*visibility* remains a repository setting, which no file in this repo can change.
+
+---
+
 ## Adding an entry
 
 When a claim in this repository turns out to be wrong:

@@ -241,6 +241,25 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
 
 ---
 
+## Changelog since 0.3.0
+
+- **Our own Dependabot alert list, cut by roughly an order of magnitude — and finally described
+  accurately.** The wild corpus vendors real third-party source, and its nine `package.json` files
+  carried **429** dependency entries into GitHub's dependency graph, producing about **122** alerts
+  against fixtures that are never installed, built or shipped. `SECURITY.md`, `README.md` and
+  `.github/dependabot.yml` all told the reader to expect a large count from *two* fixture trees while
+  this third one, unnamed, produced most of it — retracted as **ERR-007**. The fix is mechanical:
+  `project_model.mjs` reads a manifest only for framework detection and `SERVER_FRAMEWORKS[*].pkgs`,
+  both closed sets of names, so every dependency outside `bench/wild/observable-packages.mjs` was
+  invisible to the engine and was deleted. Nothing was bumped — a `bench/wild` version is pinned to a
+  third-party commit and matched against blind labels written against it, so bumping falsifies the
+  corpus. `test/wild_manifest_hygiene.test.mjs` fails if a new case re-imports a full manifest or if
+  the engine renames what the allowlist permits. The residual count is fixture-only, intended, and
+  will not reach zero.
+- The wild scorecard is **byte-identical** across the change (10/16 detected, 9/16 confirmed, 0
+  candidate false positives, 12 coverage gaps) and the regression gate stayed green.
+- Tests **616 → 620**.
+
 ## Changelog since 0.2.0
 
 - **A second pillar: compliance.** Findings now carry `pillar: 'security' | 'compliance'`, held

@@ -18,27 +18,48 @@ Please do **not** open a public issue for a real vulnerability until it has been
 
 ## About the deliberately vulnerable code in this repo
 
-Two directories contain **intentionally insecure** code, and they exist so the tool can be tested
-against known-bad input:
+**Three** directories contain **intentionally insecure** code, and they exist so the tool can be
+tested against known-bad input:
 
 - `sample-vulnerable-app/` — the demonstration app. Its weaknesses are at the **code** level: an
   exposed Supabase `service_role` key, tables with no RLS, an IDOR API route, prompt injection,
   missing security headers.
 - `bench/corpus/**` — the ground-truth benchmark, where each case is a vulnerable/fixed pair used
   to measure precision and recall.
+- `bench/wild/*/repo/` — **real third-party source**, vendored at a pinned commit SHA and labelled
+  by a reviewer blind to this tool (`bench/wild.mjs`). Not ours, not fixed, and deliberately still
+  vulnerable: a case that got patched would stop measuring anything. Each case's `truth.json` names
+  its `source_url`.
 
-**Never install or deploy either of them.**
+**Never install or deploy any of them.**
 
-### Why the Security tab shows a large alert count
+### Why the Security tab shows a fixture-only alert count
 
 Their dependencies are **not** kept current, so Dependabot flags them. Every Dependabot alert on
-this repository points at one of those two fixture trees.
+this repository points at one of those three fixture trees, and none is reachable from anything the
+tool ships.
+
+An earlier version of this section named only the first two trees and told you to expect *"a large
+alert count"* — while `bench/wild/`, unnamed, was producing most of it (about 122 alerts, from 429
+vendored dependency entries). Both the inventory and the resignation are retracted as **ERR-007** in
+[`ERRATA.md`](ERRATA.md). 0.3.1 cut the count by roughly an order of magnitude by deleting the
+vendored dependencies the engine **cannot read** — `project_model.mjs` consults a closed set of
+package names, so anything outside it bought no detection and cost an alert. The wild scorecard is
+byte-identical across that change; `test/wild_manifest_hygiene.test.mjs` keeps it that way.
+
+**The remaining count is correct and will not go to zero.** The dependencies the engine *does* read
+(`next`, `express`, `firebase`, `electron`, `vite`, `openai`, …) stay at their real upstream pins,
+vulnerable versions included, because the pin is what the benchmark is measuring against.
 
 A fixture dependency bump is **noise, not a risk**. No `expected.json` in `bench/corpus` expects
 `CG-DEP-001`, and the dependency-scanning arm is exercised in `test/dep_audit_shapes.test.mjs` and
 `test/scanners.test.mjs` against **recorded tool output**, never against a fixture's installed
 versions. Several fixture bumps have since been merged with the benchmark's regression gate green
 throughout. Merge it or ignore it as you prefer, and re-run `node bench/run.mjs` either way.
+
+One exception worth stating: do **not** bump a `bench/wild/*/repo/` manifest. Those are pinned to a
+third-party commit and matched against labels written against that commit; changing a version there
+falsifies the corpus rather than tidying it.
 
 This section once justified the same conclusion with a reason that was false — that upgrading a
 fixture "would delete test coverage" — while `README.md` simultaneously claimed the dependencies

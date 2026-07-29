@@ -5,9 +5,18 @@
 #
 #   sample-vulnerable-app/  — the known-bad app the engine is tested against
 #   bench/corpus/**         — the ground-truth benchmark pairs (vulnerable / fixed)
+#   bench/wild/*/repo/      — REAL third-party source, vendored at a pinned commit SHA
 #
 # Their dependencies are not kept current, and their vulnerabilities are in the CODE — exposed keys,
 # missing RLS, IDOR, prompt injection — not in the packages.
+#
+# The third tree went unnamed here until 0.3.1 while producing MOST of the alerts; that omission is
+# ERR-007 in ERRATA.md. It also has a rule the other two do not: NEVER bump a bench/wild manifest.
+# Those versions are pinned to a third-party commit and matched against labels a blind reviewer wrote
+# against that commit, so a bump falsifies the corpus instead of tidying it. What was done instead:
+# every dependency the engine CANNOT read was deleted (429 of them — project_model.mjs consults a
+# closed set of package names, see bench/wild/observable-packages.mjs), leaving the observable ones at
+# their real pins. test/wild_manifest_hygiene.test.mjs fails if a new case re-imports a full manifest.
 #
 # WHAT BUMPING A FIXTURE DOES AND DOES NOT COST. Nothing: no `expected.json` in bench/corpus expects
 # CG-DEP-001, and the dependency-scanning arm is exercised in test/dep_audit_shapes.test.mjs and
@@ -26,9 +35,11 @@
 # limit below, and only sample-vulnerable-app is listed: adding bench/corpus would not change that
 # behaviour, so listing it would only restate the same false promise in a new place.
 #
-# Consequence to expect: GitHub's Security tab shows a large Dependabot ALERT count for this repo.
-# Those alerts are the fixtures, they are intentional, and none of them is reachable from anything
-# this tool ships. See SECURITY.md. Alert visibility is also a repository setting.
+# Consequence to expect: GitHub's Security tab shows a Dependabot ALERT count for this repo that
+# never reaches zero. Those alerts are the fixtures, they are intentional, and none of them is
+# reachable from anything this tool ships. The count is roughly an order of magnitude smaller since
+# 0.3.1 (see ERR-007), and what remains is the dependencies the engine actually reads, held at their
+# real upstream pins on purpose. See SECURITY.md. Alert visibility is also a repository setting.
 version: 2
 updates:
   - package-ecosystem: "npm"

@@ -6,7 +6,7 @@
 
 ### קלוד — הקהילה הישראלית · Claude — the Israeli Community
 
-**v0.3.0** · zero runtime dependencies · 616 tests · bilingual HE/EN
+**v0.3.1** · zero runtime dependencies · 620 tests · bilingual HE/EN
 
 </div>
 
@@ -256,28 +256,44 @@ plugin/        the Claude Code plugin (skills, agents, hooks, engine + grader sc
 skill-dist/    the claude.ai skill (assembled by build.mjs)
 bench/         run.mjs — the regression gate;  wild/ — 11 real repos, blind-labelled, real numbers
 scripts/       build.mjs
-test/          the 616-test suite, including the "correct app must stay quiet" fixture
+test/          the 620-test suite, including the "correct app must stay quiet" fixture
 sample-vulnerable-app/  a deliberately-insecure app to test against
 CONTEXT.md     the domain model — the vocabulary this codebase is written in
 ROADMAP.md · ERRATA.md   what's next, and every claim we made and later found wrong
 ```
 
-## Why is there a "vulnerable app" in this repo?
-`sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be run
-against known-bad code. Its problems are at the **code** level (exposed `service_role` key, no RLS,
-IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it does trip
-Dependabot — every alert on this repository points at a fixture, and none of them is reachable from
-anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md), and **ERR-002** in
-[`ERRATA.md`](ERRATA.md) for the contradictory claims this README used to make about those
-dependencies.
+## Why is there vulnerable code in this repo, and why does the Security tab have alerts?
+Three trees are **intentional test fixtures**, and none of them is installed, built or shipped:
+
+- `sample-vulnerable-app/` — the demo app. Its problems are at the **code** level (exposed
+  `service_role` key, no RLS, IDOR, prompt injection, missing headers).
+- `bench/corpus/**` — the vulnerable/fixed pairs behind the regression gate.
+- `bench/wild/*/repo/` — **real third-party source** at a pinned commit SHA, still vulnerable on
+  purpose: a case that got patched would stop measuring anything.
+
+Their dependencies are not kept current, so Dependabot flags them. **Every alert on this repository
+points at one of those three trees, and none is reachable from anything the tool ships** — the engine
+and grader have zero runtime dependencies, which CI enforces.
+
+That count does not go to zero, and shouldn't. The dependencies the engine actually reads (`next`,
+`express`, `firebase`, `electron`, `openai`, …) stay pinned to the real upstream versions, vulnerable
+ones included, because the pin is what the wild benchmark measures against. What 0.3.1 did remove
+were the **429** vendored dependencies the engine *cannot* read — `project_model.mjs` consults a
+closed set of package names, so those bought no detection and cost an alert each. Roughly an order of
+magnitude fewer alerts, wild scorecard byte-identical.
+
+Never deploy any of it. See [`SECURITY.md`](SECURITY.md); **ERR-002** in [`ERRATA.md`](ERRATA.md) for
+the contradictory claims this README used to make about fixture dependencies, and **ERR-007** for the
+fixture tree these documents forgot to name while it produced most of the alerts.
 
 ## Errata
 
 Claims this project made and later found wrong are retracted in the open, numbered, and kept:
-[`ERRATA.md`](ERRATA.md). It currently holds six — a gate of ours that checked one host and opened
+[`ERRATA.md`](ERRATA.md). It currently holds seven — a gate of ours that checked one host and opened
 another (ERR-001), the fixture-dependency claims (ERR-002), a credential leak in our own live probe
 found by external review (ERR-003), the Tier-2 overclaim (ERR-004), the half of that retraction that
-was announced before it was made (ERR-005), and the benchmark headline (ERR-006).
+was announced before it was made (ERR-005), the benchmark headline (ERR-006), and an account of our
+own Dependabot alerts that named two fixture trees while a third produced most of them (ERR-007).
 
 The ledger exists because the failure this tool is built to catch — a confident statement nobody
 checked — is one we keep making too. Nothing is quietly deleted; each entry quotes the old claim.
