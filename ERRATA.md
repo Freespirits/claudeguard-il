@@ -176,8 +176,9 @@ regression. Which is exactly what the gate is for, and is a real and useful thin
 Stated as what it is: **0 regressions across 18 pinned detections in 7 vulnerable scenarios, and 0
 unexpected confirmed findings across 8 clean variants — a corpus authored by this project.** That is
 excellent regression protection and a genuine cry-wolf gate. **The real-world detection rate is not
-yet measured.** Two external reviews discounted the tool over the old framing, and were right to:
-a security tool whose headline number cannot go down is quoting a tautology.
+yet measured.** A headline number that cannot go down is a tautology, not a result, and a security
+tool that leads with one invites being read as claiming a detection rate it has never measured —
+which is the misreading this retraction removes.
 
 The numbers themselves are real, reproducible and unchanged. Only the framing that made them read as
 a detection rate is retracted. Where they appear scoped to what they can support — *"the benchmark's
