@@ -10,6 +10,10 @@
 # Their dependencies are not kept current, and their vulnerabilities are in the CODE — exposed keys,
 # missing RLS, IDOR, prompt injection — not in the packages.
 #
+# Not npm-only: bench/wild/breakableflask-python/repo/requirements.txt and
+# database-requirements.txt are pip manifests that feed the same dependency graph. The same rules
+# apply — floored `>=` pins, never bumped, and any alert they raise is fixture noise.
+#
 # The third tree went unnamed here until 0.3.1 while producing MOST of the alerts; that omission is
 # ERR-007 in ERRATA.md. It also has a rule the other two do not: NEVER bump a bench/wild manifest.
 # Those versions are pinned to a third-party commit and matched against labels a blind reviewer wrote
