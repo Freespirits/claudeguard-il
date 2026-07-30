@@ -1,0 +1,100 @@
+# Mirror `main` and tags to a GitLab project.
+#
+# WHY A WORKFLOW AND NOT GITLAB'S OWN MIRRORING. GitLab has built-in repository mirroring, but the
+# direction matters: PUSH mirroring (GitLab → elsewhere) is free, and PULL mirroring (elsewhere →
+# GitLab, which is what a GitHub-primary repo needs) is a Premium feature. On a free GitLab account
+# the practical route for GitHub → GitLab is this: a workflow that pushes after every merge to main.
+#
+# SETUP — two settings, both on the GitHub side:
+#   1. Repository VARIABLE  `GITLAB_MIRROR_URL`   e.g. https://gitlab.com/<namespace>/claudeguard-il.git
+#      (Settings → Secrets and variables → Actions → Variables)
+#   2. Repository SECRET    `GITLAB_MIRROR_TOKEN` a GitLab Project or Personal Access Token whose ONLY
+#      scope is `write_repository`. Not `api`, not `sudo` — this job pushes commits and needs nothing
+#      else, and a token that can do more is a token that leaks more.
+#      (Settings → Secrets and variables → Actions → Secrets)
+#
+# Until both exist the job no-ops with a notice instead of failing, so adding this file changes
+# nothing about a red/green CI until someone deliberately configures it.
+#
+# THIS FILE IS SUBJECT TO THE RULES THIS REPOSITORY ENFORCES ON OTHER PEOPLE. ClaudeGuardIL grades
+# CI workflows CG-CI-001..006, and a mirroring job is exactly the shape those rules exist to catch —
+# a privileged credential in a workflow that touches a remote. So, deliberately:
+#
+#   CG-CI-001  no `pull_request_target`, and no fork-triggered path at all. `push: branches: [main]`
+#              only fires on the upstream repo, and the `if:` below is a second, explicit guard so a
+#              fork that copies this file cannot reach the token even if its default branch is main.
+#   CG-CI-002  no `${{ github.event.* }}` — no attacker-controlled text is interpolated into a shell.
+#              The two inputs are a repository variable and a secret, neither writable by a PR author.
+#   CG-CI-003  first-party `actions/*` only, so there is no third-party action to pin by SHA.
+#   CG-CI-004  `ubuntu-latest`, never a self-hosted runner.
+#   CG-CI-005  an explicit `permissions:` block, `contents: read` — this job reads this repo and
+#              writes only to the remote, so it needs no write scope on GitHub at all.
+#   CG-CI-006  the token is NEVER interpolated into the script body. It arrives via `env:` and is
+#              referenced as a shell variable, which keeps it out of the expanded command line that
+#              `set -x`, a crash, or an `echo` would otherwise reveal.
+#
+# It is also kept out of the remote URL. `git push https://oauth2:$TOKEN@gitlab.com/...` is the usual
+# one-liner and it is a credential leak: that URL is recorded by `git remote -v`, printed verbatim in
+# git's own error messages, and shows up in the runner log the moment anything goes wrong. The token
+# goes into a local `http.extraheader` instead — the same mechanism `actions/checkout` uses — set in
+# the repository-local config that dies with the workspace, and unset immediately afterwards.
+
+name: Mirror to GitLab
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One mirror push at a time, and never cancel one midway: a half-finished push is a mirror that
+# disagrees with its source, which is worse than a slightly stale one.
+concurrency:
+  group: mirror-to-gitlab
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: push main + tags to GitLab
+    runs-on: ubuntu-latest
+    # Second guard behind the trigger (CG-CI-001). A fork keeps its workflows; this makes sure a fork
+    # pushing to its own main cannot start a job that reads the upstream mirror credential.
+    if: github.repository == 'Freespirits/claudeguard-il'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A mirror needs the real history and the tags, not the single-commit default.
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        env:
+          GITLAB_URL: ${{ vars.GITLAB_MIRROR_URL }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GITLAB_URL:-}" ] || [ -z "${GITLAB_TOKEN:-}" ]; then
+            echo "::notice title=Mirror skipped::Set the GITLAB_MIRROR_URL variable and the GITLAB_MIRROR_TOKEN secret to enable mirroring. See the comments in this workflow."
+            exit 0
+          fi
+
+          # Basic auth, GitLab's documented token form: username `oauth2`, password the token.
+          # Built with printf (no trailing newline) and never echoed.
+          auth_header="Authorization: Basic $(printf 'oauth2:%s' "$GITLAB_TOKEN" | base64 -w0)"
+
+          # Local config only — it lives in .git/config inside the runner workspace and is discarded
+          # with it. Passing this via `git -c` would put the credential in the process argv, where
+          # anything reading /proc or a crash dump can see it.
+          git config --local http.extraheader "$auth_header"
+          trap 'git config --local --unset-all http.extraheader || true' EXIT
+
+          # Explicit refspecs rather than `--mirror`: `--mirror` DELETES refs on the target that are
+          # absent here, which would let a bad run wipe branches someone was keeping on GitLab.
+          # This pushes exactly main and the tags, force-updating only those.
+          git push "$GITLAB_URL" \
+            "+refs/heads/main:refs/heads/main" \
+            "+refs/tags/*:refs/tags/*"
+
+          echo "Mirrored main and tags."
