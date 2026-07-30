@@ -20,6 +20,10 @@ non-expert can act on.
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic. Built for the
 > [Claude Israeli community](https://www.facebook.com/groups/cladue). MIT licensed.
 
+**Also on GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il)
+— GitHub stays primary; `main` and tags are pushed there by
+[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) once its token is set.
+
 ---
 
 ## What the numbers mean, before anyone quotes them

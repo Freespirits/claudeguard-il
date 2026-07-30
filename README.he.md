@@ -17,6 +17,10 @@ Supabase/Firebase, אנדרואיד, iOS, Electron, backend/IaC ו-CI/CD.
 > **פרויקט קהילתי — אינו מוצר רשמי של Anthropic.**
 > נבנה עבור [קהילת Claude הישראלית](https://www.facebook.com/groups/cladue).
 
+**גם ב-GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il)
+— GitHub נשאר הראשי; `main` והתגיות נדחפים לשם על ידי
+[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) ברגע שהטוקן מוגדר.
+
 **מה המספרים אומרים, לפני שמצטטים אותם.** הפרויקט מודד את עצמו בשתי דרכים ומקפיד להפריד ביניהן.
 
 **שער הרגרסיה** (`bench/run.mjs`) עומד על **אפס רגרסיות ב-19 ממצאים מקובעים, ואפס ממצאים מאושרים
