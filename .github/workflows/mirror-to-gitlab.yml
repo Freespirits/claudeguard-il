@@ -92,9 +92,18 @@ jobs:
 
           # Explicit refspecs rather than `--mirror`: `--mirror` DELETES refs on the target that are
           # absent here, which would let a bad run wipe branches someone was keeping on GitLab.
-          # This pushes exactly main and the tags, force-updating only those.
-          git push "$GITLAB_URL" \
-            "+refs/heads/main:refs/heads/main" \
-            "+refs/tags/*:refs/tags/*"
+          #
+          # And NOT force-pushed. The first version of this used `+refs/heads/main:refs/heads/main`,
+          # which is the conventional choice for a downstream mirror and wrong here: GitLab is a live
+          # project with its own web editor and its own SSH keys, so a commit made there would be
+          # silently overwritten by the next run of this job, with force-pushed history unrecoverable.
+          # Without the `+`, a diverged mirror makes this job FAIL — loud, visible, and nothing lost.
+          # A failed mirror is a nuisance; a silently destroyed commit is not.
+          if ! git push "$GITLAB_URL" \
+                 "refs/heads/main:refs/heads/main" \
+                 "refs/tags/*:refs/tags/*"; then
+            echo "::error title=Mirror push rejected::GitLab has commits or tags that GitHub does not, so this was NOT force-pushed and nothing was overwritten. Reconcile by hand: add the GitLab remote locally, fetch it, and either merge its commits into main here or reset the GitLab side deliberately. GitHub is the primary; GitLab is meant to be downstream and read-only."
+            exit 1
+          fi
 
           echo "Mirrored main and tags."
