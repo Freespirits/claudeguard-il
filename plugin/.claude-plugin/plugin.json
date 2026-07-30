@@ -1,6 +1,6 @@
 {
   "name": "claudeguard-il",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Security auditor and guard-builder for vibecoded apps. Finds vulnerabilities and missing guards across web, AI/LLM, Supabase/Firebase, Android, iOS, Electron, backend/IaC and CI/CD, then generates paste-ready hardening code. Community project, not an official Anthropic product.",
   "author": {
     "name": "ClaudeGuardIL",

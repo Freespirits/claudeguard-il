@@ -241,6 +241,38 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
 
 ---
 
+## Changelog since 0.3.1
+
+- **The delegated half of the engine is now scoreable, and the benchmark stopped mislabelling it.**
+  ADR 0007 delegates rce / ssrf / injection-sql / xss to semgrep instead of building `taint.mjs`.
+  `bench/wild.mjs` never invoked that delegate — it called `grade(model)` with no `scanners` — and
+  printed all 12 affected labels as *"no rule for this category (known)"*. Two things were wrong: the
+  words (the project does claim to cover them, by delegation) and the arithmetic (the delegated arm
+  could not have scored above zero anyway, because `run_semgrep.mjs` discarded
+  `extra.metadata.cwe` and `CG-SAST-001` has no `ID_CATEGORY` entry, so a semgrep hit on the exact
+  labelled line agreed on place and failed on weakness). Retracted as **ERR-008**.
+- **The fix, and its own bug.** `run_semgrep.mjs` now forwards `cwe`/`owasp` as facts; the grader
+  stamps them on `CG-SAST-001` and still owns severity and confidence. `bench/wild.mjs` gained
+  `--sast` (opt-in — `--config auto` fetches rules from semgrep.dev, and defaulting it on would trade
+  this harness's determinism for a number that drifts with a remote registry) and a third label state,
+  `◍ DELEG`, counted in neither recall nor gaps. The first version keyed coverage on the *flag*, so
+  `--sast` without semgrep installed turned nine undeterminables into nine misses; coverage now keys
+  on whether the delegate actually **ran**, and `sastRan()` is tested for all four outcomes.
+- **Both denominators, always.** The scorecard printed only *"10/16 (63%), covered categories only"*.
+  Over every label the blind labeller wrote it is **10/28 (36%)**. Both now print together with
+  *"quote both or neither"* — selecting the flattering denominator is the ERR-006 move, and this
+  benchmark had quietly reintroduced it.
+- The 12 former "gaps" now read honestly as **9 delegated-but-unmeasured + 3 with no rule and no
+  delegate**. In-scope recall is unchanged at 10/16; the regression gate stayed green.
+- `README.he.md` caught up with 0.3.0: it still described the gate as 18 detections over 8 clean
+  variants and said real-world detection *"טרם נמדד"* — the wild benchmark had existed for two
+  releases.
+- Tests **620 → 629**.
+- **Still not measured, and not claimed:** how many of those 9 labels semgrep actually catches.
+  `semgrep.dev` was unreachable from the environment this was built in, and hand-writing local rules
+  for the labelled weaknesses would have made the measurement self-fulfilling. One
+  `node bench/wild.mjs --sast` on a host that can reach the registry produces the number.
+
 ## Changelog since 0.3.0
 
 - **Our own Dependabot alert list, cut by roughly an order of magnitude — and finally described

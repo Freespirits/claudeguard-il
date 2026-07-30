@@ -3121,6 +3121,14 @@ function gradeScanners(scanners, ledger, findings, allow) {
           exploit: 'See the rule\'s own description; semgrep matched a pattern it associates with this weakness.',
           impact: 'Varies by rule. Treat as a lead for a reviewer, not a proven finding.',
           guard: 'guard-recipes/zod-validation.md',
+          // The weakness identity the RULE declares, forwarded by run_semgrep.mjs from
+          // `extra.metadata`. Not a severity input — `SAST_POLICY` above already fixed that from
+          // `engineSeverity`, and the grader stays the only severity authority (ADR 0001).
+          //
+          // It is load-bearing for one thing: ADR 0007 delegates rce/ssrf/injection-sql/xss to
+          // semgrep, and CWE is the only vocabulary a delegated finding and an independent labeller
+          // share. Dropped, it made the whole delegated arm unscoreable — ERR-008.
+          cwe: f.cwe ?? null, owasp: f.owasp ?? null,
           tier: 'static', autofixable: false, source: 'semgrep',
           assumption: 'That the semgrep rule matched real behaviour and not a shape that only looks like it.',
         }))
