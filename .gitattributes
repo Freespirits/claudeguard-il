@@ -3,3 +3,9 @@
 *.png binary
 *.jpg binary
 *.zip binary
+
+# Fixture trees are intentionally vulnerable benchmark/test data, not shippable
+# code. Mark them as documentation so repo stats and classifiers don't treat
+# them as the project's application source.
+sample-vulnerable-app/** linguist-documentation
+bench/** linguist-documentation
