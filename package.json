@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\"",
+    "test": "node --test test/",
     "build": "node scripts/build.mjs",
     "scan": "node plugin/scripts/project_model.mjs"
   }
