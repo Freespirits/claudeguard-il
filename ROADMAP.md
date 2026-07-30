@@ -268,10 +268,19 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
   variants and said real-world detection *"טרם נמדד"* — the wild benchmark had existed for two
   releases.
 - Tests **620 → 630**.
-- **Still not measured, and not claimed:** how many of those 9 labels semgrep actually catches.
-  `semgrep.dev` was unreachable from the environment this was built in, and hand-writing local rules
-  for the labelled weaknesses would have made the measurement self-fulfilling. One
-  `node bench/wild.mjs --sast` on a host that can reach the registry produces the number.
+- **The delegated arm, first measurement (2026-07-30, semgrep 1.172.0, `--config auto`): 3/9
+  detected, 0/9 confirmed.** All three hits are command injection (two in breakableflask, one in
+  NodeGoat); the six misses are the framework-depth cases the registry's `auto` set does not
+  model — a Jinja2 `render_template_string` SSTI, a MongoDB `$where`, a Swig `autoescape:false`, a
+  `needle` SSRF, a string-formatted SQL and one `popen` shell-concat. Zero confirmed is by design
+  (CG-SAST-001 is a judgement source). With the delegate running the scorecard reads 14/25 (56%)
+  in-scope and 14/28 (50%) over all labels — semgrep also caught one own-category label the rules
+  had missed (cleartext-transit, NodeGoat) — and candidate false positives stayed 0. The number
+  drifts with the semgrep build and the remote registry, so it is recorded here with its date
+  rather than folded into the deterministic headline, and `--sast` stays opt-in for the same
+  reason. (`semgrep.dev` was unreachable from the environment 0.3.2 was built in; this first
+  measurement came from a host that could reach the registry. Hand-writing local rules for the
+  labelled weaknesses would still make the measurement self-fulfilling.)
 
 ## Changelog since 0.3.0
 
