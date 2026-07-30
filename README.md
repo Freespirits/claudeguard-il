@@ -8,6 +8,8 @@
 
 **v0.3.2** · zero runtime dependencies · 629 tests · bilingual HE/EN
 
+[**GitHub**](https://github.com/Freespirits/claudeguard-il) · [**GitLab**](https://gitlab.com/FreeSpirity/claudeguard-il)
+
 </div>
 
 **A security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
@@ -20,9 +22,11 @@ non-expert can act on.
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic. Built for the
 > [Claude Israeli community](https://www.facebook.com/groups/cladue). MIT licensed.
 
-**Also on GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il)
-— GitHub stays primary; `main` and tags are pushed there by
-[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) once its token is set.
+**Also on GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il).
+`main` and tags are mirrored there on every merge by
+[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml). GitHub is primary —
+the mirror is push-only and never force-pushed, so it fails loudly rather than overwrite anything
+committed on the GitLab side.
 
 ---
 

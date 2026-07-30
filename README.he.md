@@ -17,9 +17,10 @@ Supabase/Firebase, אנדרואיד, iOS, Electron, backend/IaC ו-CI/CD.
 > **פרויקט קהילתי — אינו מוצר רשמי של Anthropic.**
 > נבנה עבור [קהילת Claude הישראלית](https://www.facebook.com/groups/cladue).
 
-**גם ב-GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il)
-— GitHub נשאר הראשי; `main` והתגיות נדחפים לשם על ידי
-[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) ברגע שהטוקן מוגדר.
+**גם ב-GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il).
+`main` והתגיות ממוררים לשם בכל merge על ידי
+[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml). GitHub הוא הראשי —
+המראה היא דחיפה בלבד ולעולם לא force, ולכן היא נכשלת בקול רם במקום לדרוס משהו שנכתב בצד של GitLab.
 
 **מה המספרים אומרים, לפני שמצטטים אותם.** הפרויקט מודד את עצמו בשתי דרכים ומקפיד להפריד ביניהן.
 
