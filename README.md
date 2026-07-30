@@ -8,6 +8,12 @@
 
 **v0.3.2** · zero runtime dependencies · 630 tests · bilingual HE/EN
 
+[![CI](https://github.com/Freespirits/claudeguard-il/actions/workflows/ci.yml/badge.svg)](https://github.com/Freespirits/claudeguard-il/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Freespirits/claudeguard-il)](https://github.com/Freespirits/claudeguard-il/releases)
+[![License: MIT](https://img.shields.io/github/license/Freespirits/claudeguard-il)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/Freespirits/claudeguard-il)](https://github.com/Freespirits/claudeguard-il/commits/main)
+[![Stars](https://img.shields.io/github/stars/Freespirits/claudeguard-il?style=social)](https://github.com/Freespirits/claudeguard-il/stargazers)
+
 </div>
 
 **A security auditor & guard-builder for vibecoded apps.** Point it at your project, get a ranked
@@ -334,3 +340,9 @@ Provided as-is, no warranty. A clean scan is **not** proof of safety. You are re
 scan and for the scope of any live/DAST testing. Not affiliated with Anthropic.
 
 MIT licensed — see `LICENSE`.
+
+---
+
+**If this caught something real for you, a ⭐ helps the next vibecoder find it.** A false-positive
+report is the other gift — the cry-wolf tests exist because people file them. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).

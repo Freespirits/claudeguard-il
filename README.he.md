@@ -10,6 +10,16 @@
 
 </div>
 
+<div align="center" dir="ltr">
+
+[![CI](https://github.com/Freespirits/claudeguard-il/actions/workflows/ci.yml/badge.svg)](https://github.com/Freespirits/claudeguard-il/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Freespirits/claudeguard-il)](https://github.com/Freespirits/claudeguard-il/releases)
+[![License: MIT](https://img.shields.io/github/license/Freespirits/claudeguard-il)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/Freespirits/claudeguard-il)](https://github.com/Freespirits/claudeguard-il/commits/main)
+[![Stars](https://img.shields.io/github/stars/Freespirits/claudeguard-il?style=social)](https://github.com/Freespirits/claudeguard-il/stargazers)
+
+</div>
+
 **כלי אבטחה לאפליקציות vibecoding.** מפנים אותו לפרויקט ומקבלים דוח מדורג של פרצות אבטחה אמיתיות
 עם ראיות, ולצידן קוד הגנה מוכן להדבקה — לאתרים ואפליקציות web, פיצ'רים של AI/LLM,
 Supabase/Firebase, אנדרואיד, iOS, Electron, backend/IaC ו-CI/CD.
@@ -186,5 +196,10 @@ RLS, IDOR, prompt injection ו-denial of wallet — בלי קשר לסריקה �
 
 מסופק כמות שהוא, ללא אחריות. דוח נקי **אינו** הוכחה לבטיחות. אתם אחראים על מה שאתם סורקים ועל
 ההיקף של כל בדיקת live/DAST. אין קשר ל-Anthropic. רישיון MIT.
+
+---
+
+**אם הכלי תפס משהו אמיתי אצלכם, ⭐ יעזור ל-vibecoder הבא למצוא אותו.** דיווח על התרעת שווא הוא
+מתנה לא פחות טובה — מבחני cry-wolf קיימים בזכות אנשים שמדווחים. ראו [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 </div>
