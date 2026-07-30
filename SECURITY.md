@@ -29,7 +29,9 @@ tested against known-bad input:
 - `bench/wild/*/repo/` — **real third-party source**, vendored at a pinned commit SHA and labelled
   by a reviewer blind to this tool (`bench/wild.mjs`). Not ours, not fixed, and deliberately still
   vulnerable: a case that got patched would stop measuring anything. Each case's `truth.json` names
-  its `source_url`.
+  its `source_url`. One case (`breakableflask-python`) is Python — its `requirements.txt` and
+  `database-requirements.txt` are pip manifests that feed the same dependency graph, and the same
+  never-bump rule applies to them.
 
 **Never install or deploy any of them.**
 

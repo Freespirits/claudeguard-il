@@ -21,13 +21,19 @@ const ENGINE_SRC = readFileSync(join(HERE, '..', 'plugin', 'scripts', 'project_m
 // a noisy scan must both mean something. Retracted and explained as ERR-007 in ERRATA.md.
 //
 // The fix was to keep, at their upstream-pinned versions, exactly the dependencies the engine can
-// OBSERVE — and drop the rest, which no pass can read. These two tests are what keep that true:
-// the first stops a newly-added case from re-importing a 90-dependency manifest, the second stops
+// OBSERVE — and drop the rest, which no pass can read. The name tests below keep that true:
+// one stops a newly-added case from re-importing a 90-dependency manifest, another stops
 // the allowlist from silently narrowing if the engine renames what it looks for.
 //
-// Neither test asserts anything about VERSIONS. Fidelity to upstream is the point of the corpus, so
-// a dependency that survives the trim keeps the real pin — including a vulnerable one, which is why
-// this repository still carries a small, genuine, fixture-only alert count rather than zero.
+// Those name tests assert nothing about VERSIONS. Fidelity to upstream is the point of the corpus,
+// so a dependency that survives the trim keeps the real pin — including a vulnerable one, which is
+// why this repository still carries a small, genuine, fixture-only alert count rather than zero.
+// But "any version is allowed" left one door open: Dependabot SECURITY-update PRs against these
+// manifests keep appearing (dependabot.yml explains why the limit cannot stop them), and a merged
+// bump would move a pin the blind labels were written against — falsifying the corpus while every
+// test stayed green. So the pins are snapshotted in EXPECTED_VERSION_PINS below: a version that
+// MOVES fails loudly, and a human decides — close the Dependabot PR, or bless an intentional
+// corpus change by updating the snapshot and the case's truth.json notes.
 // ---------------------------------------------------------------------------
 
 /** Every vendored wild manifest, as [caseName, parsedPkg]. */
@@ -93,6 +99,95 @@ test('the trim preserved the framework signal each wild case is labelled against
     for (const dep of expected) {
       assert.ok(Object.prototype.hasOwnProperty.call(declared, dep),
         `${name} lost '${dep}' — the framework signal the blind labels were matched against`)
+    }
+  }
+})
+
+// ---------------------------------------------------------------------------
+// The upstream pin every vendored wild manifest held at the ERR-007 trim (0.3.1). A Dependabot
+// security-update PR merged against bench/wild changes exactly one of these — and fails here.
+// ---------------------------------------------------------------------------
+const EXPECTED_VERSION_PINS = {
+  'chartgpt-service-role-client': {
+    dependencies: {
+      '@supabase/supabase-js': '^2.21.0',
+      'ajv': '^8.12.0',
+      'express': '^4.18.2',
+      'express-rate-limit': '^6.7.0',
+      'next': 'latest',
+      'openai': '^3.2.1',
+      'react': '^18.2.0',
+    },
+  },
+  'chordmini-firebase-open-rules': {
+    dependencies: {
+      'firebase': '^11.10.0',
+      'firebase-admin': '^13.8.0',
+      'next': '^16.2.12',
+      'react': '^19.0.0',
+    },
+  },
+  'lyrictor-firebase-clean': {
+    dependencies: { 'firebase': '^12.10.0', 'react': '^19' },
+    devDependencies: { 'electron': '^36.0.0', 'vite': '^6.2.2' },
+  },
+  'nextjs-subscription-payments': {
+    dependencies: {
+      '@supabase/ssr': '^0.1.0',
+      '@supabase/supabase-js': '^2.43.4',
+      'next': '14.2.3',
+      'react': '^18.3.1',
+    },
+  },
+  'nextjs-with-supabase': {
+    dependencies: {
+      '@supabase/ssr': 'latest',
+      '@supabase/supabase-js': 'latest',
+      'next': 'latest',
+      'react': '^19.0.0',
+    },
+  },
+  'owasp-nodegoat': {
+    dependencies: { 'express': '^4.13.4' },
+  },
+  'promptos-forgeable-admin-session': {
+    dependencies: {
+      '@ai-sdk/openai': '^4.0.8',
+      '@google/generative-ai': '^0.24.0',
+      '@supabase/ssr': '^0.7.0',
+      '@supabase/supabase-js': '^2.49.4',
+      'ai': '^4.3.9',
+      'next': '15.5.9',
+      'openai': '^5.19.1',
+      'react': '^19.0.0',
+      'zod': '^3.25.76',
+    },
+  },
+  'react-openai-client-key': {
+    dependencies: { 'openai': '^5.20.0', 'react': '^19.1.1' },
+    devDependencies: { 'vite': '^7.1.2' },
+  },
+  'vocabtest-rls-disabled': {
+    dependencies: {
+      '@supabase/ssr': '^0.7.0',
+      '@supabase/supabase-js': '^2.57.4',
+      'next': '15.5.3',
+      'react': '19.1.0',
+    },
+  },
+}
+
+test('vendored wild manifests hold their recorded upstream version pins', () => {
+  for (const [name, pkg] of vendoredManifests()) {
+    const expected = EXPECTED_VERSION_PINS[name]
+    assert.ok(expected,
+      `${name} has no recorded version pins — a new case? Record its upstream pins in EXPECTED_VERSION_PINS.`)
+    for (const key of ['dependencies', 'devDependencies']) {
+      assert.deepEqual(pkg[key] || {}, expected[key] || {},
+        `${name}: ${key} moved. bench/wild pins must NEVER move (ERR-007, dependabot.yml): each is pinned ` +
+        `to the third-party commit the blind labels were written against, so a bump falsifies the corpus. ` +
+        `If this is a Dependabot security-update PR, close it unmerged. If it is an intentional corpus ` +
+        `change, update EXPECTED_VERSION_PINS and record the reason in ${name}/truth.json.`)
     }
   }
 })
