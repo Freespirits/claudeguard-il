@@ -6,7 +6,7 @@
 
 ### קלוד — הקהילה הישראלית · Claude — the Israeli Community
 
-**v0.3.2** · zero runtime dependencies · 629 tests · bilingual HE/EN
+**v0.3.2** · zero runtime dependencies · 630 tests · bilingual HE/EN
 
 </div>
 
@@ -269,7 +269,7 @@ plugin/        the Claude Code plugin (skills, agents, hooks, engine + grader sc
 skill-dist/    the claude.ai skill (assembled by build.mjs)
 bench/         run.mjs — the regression gate;  wild/ — 11 real repos, blind-labelled, real numbers
 scripts/       build.mjs
-test/          the 629-test suite, including the "correct app must stay quiet" fixture
+test/          the 630-test suite, including the "correct app must stay quiet" fixture
 sample-vulnerable-app/  a deliberately-insecure app to test against
 CONTEXT.md     the domain model — the vocabulary this codebase is written in
 ROADMAP.md · ERRATA.md   what's next, and every claim we made and later found wrong

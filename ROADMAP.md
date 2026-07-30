@@ -4,7 +4,7 @@ What is built, what is deliberately not, and what comes next. Kept honest on pur
 tool that overstates its own reach is doing the exact thing this project argues against. Where that
 happened anyway, the claim is quoted and retracted in [`ERRATA.md`](ERRATA.md) rather than deleted.
 
-Current version: **0.3.0**. See [CHANGELOG](#changelog-since-020) at the bottom.
+Current version: **0.3.2**. See [CHANGELOG](#changelog-since-020) at the bottom.
 
 ---
 
@@ -267,7 +267,7 @@ A clean scan is not proof of safety. It is proof that nothing was proved.
 - `README.he.md` caught up with 0.3.0: it still described the gate as 18 detections over 8 clean
   variants and said real-world detection *"טרם נמדד"* — the wild benchmark had existed for two
   releases.
-- Tests **620 → 629**.
+- Tests **620 → 630**.
 - **Still not measured, and not claimed:** how many of those 9 labels semgrep actually catches.
   `semgrep.dev` was unreachable from the environment this was built in, and hand-writing local rules
   for the labelled weaknesses would have made the measurement self-fulfilling. One
