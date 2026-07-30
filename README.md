@@ -43,14 +43,23 @@ exactly the overclaim it exists to prevent.
     (Next.js/Supabase/Firebase/AI), **0 candidate false positives**.
   - **10/28 (36%)** over *every* label the blind reviewer wrote. The difference is scope, not
     detection: 3 labels are in categories with no rule and no delegate, and **9 are delegated to
-    semgrep by [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md) and are
-    currently UNMEASURED** — run `node bench/wild.mjs --sast` on a host that can reach semgrep.dev to
-    put a number on them.
+    semgrep by [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md)**.
 
-  Until then, that arm is unmeasured and this README will not imply otherwise. The harness used to
-  print those 9 as *"no rule for this category"* and report only the 63% — both retracted as
-  **ERR-008** in [`ERRATA.md`](ERRATA.md). It also caught four real cry-wolf bugs on reference code,
-  all fixed. This is a measurement, not a gate — and every repo added tightens it.
+  The delegated arm, measured once so far (semgrep 1.172.0, `--config auto`, registry of
+  2026-07-30): **3/9 detected — all three command injection — and 0/9 confirmed**, the latter by
+  design: CG-SAST-001 is a judgement source and cannot reach `confirmed`. The six misses are the
+  framework-depth cases the registry's `auto` set does not model — a Jinja2
+  `render_template_string` SSTI, a MongoDB `$where`, a Swig `autoescape:false`, a `needle` SSRF, a
+  string-formatted SQL, and one `popen` shell-concat. With the delegate running, the same scorecard
+  reads **14/25 (56%)** in-scope and **14/28 (50%)** over all labels — semgrep also caught one
+  own-category label the rules had missed (cleartext-transit, NodeGoat) — and candidate false
+  positives stayed 0. That number **drifts with the semgrep build and the remote registry**, which
+  is exactly why `--sast` is opt-in and why the measurement lives here with its date instead of in
+  the headline. Reproduce: `node bench/wild.mjs --sast` on a host that can reach semgrep.dev.
+
+  The harness used to print those 9 as *"no rule for this category"* and report only the 63% — both
+  retracted as **ERR-008** in [`ERRATA.md`](ERRATA.md). It also caught four real cry-wolf bugs on
+  reference code, all fixed. This is a measurement, not a gate — and every repo added tightens it.
 
 **A clean scan is not proof of safety. It is proof that nothing was proved.**
 
