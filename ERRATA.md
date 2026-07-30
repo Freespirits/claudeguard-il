@@ -190,6 +190,135 @@ the only thing that changes the underlying fact: a corpus we did not write.
 
 ---
 
+## ERR-007 — "every Dependabot alert points at one of those two fixture trees", while a third tree produced most of them
+
+**Claimed.** [`SECURITY.md`](SECURITY.md) named exactly two directories of intentionally insecure
+code — `sample-vulnerable-app/` and `bench/corpus/**` — and then stated: *"Every Dependabot alert on
+this repository points at one of those two fixture trees."* [`README.md`](README.md) made the
+narrower version of the same claim under *"Why is there a 'vulnerable app' in this repo?"*, naming
+only `sample-vulnerable-app/`: *"Its **dependencies are not kept current**, so it does trip
+Dependabot — every alert on this repository points at a fixture."*
+[`.github/dependabot.yml`](.github/dependabot.yml) listed the same two trees and told the reader what
+to expect: *"GitHub's Security tab shows a large Dependabot ALERT count for this repo. Those alerts
+are the fixtures."*
+
+**What is true.** There was a **third** fixture tree, unnamed in all three places, and it was the
+dominant source of the alerts: `bench/wild/*/repo/`, the real third-party source vendored for the
+wild benchmark in 0.3.0. Those nine manifests declared **429 dependency entries** between them —
+`bench/wild/chartgpt-service-role-client` alone had 96, `owasp-nodegoat` a deliberately ancient 2016
+Grunt/Mongo/Cypress toolchain — against **5** in `sample-vulnerable-app` and 1–6 per `bench/corpus`
+case. The repository's alert count stood at about **122**.
+
+So the conclusion each document reached was right — no alert was ever reachable from anything this
+tool ships, and this project still has zero runtime dependencies — but it was reached over an
+inventory that was missing the part that mattered. "A large count, and here are the two trees it
+comes from" is a false account of a number when a third tree produced most of it. Naming the trees
+is the whole content of the reassurance; getting that list wrong is not a detail.
+
+The second half of the claim was also a choice presented as a fact of nature. **Most of those 429
+entries could simply be deleted.** [`plugin/scripts/project_model.mjs`](plugin/scripts/project_model.mjs)
+reads a manifest in exactly two places — framework detection (`const deps = …`) and
+`SERVER_FRAMEWORKS[*].pkgs` — and both consult a closed, hard-coded set of names; every other pass
+keys off imports in the source. A dependency outside that set is invisible to the engine, so it buys
+the corpus no detection and costs it an alert. 0.3.1 keeps the observable ones at their real upstream
+pins and drops the other **429**, which cut the alert count by roughly an order of magnitude. The
+wild scorecard is **byte-identical** across the change (10/16 detected, 9/16 confirmed, 0 candidate
+false positives), the regression gate stayed green, and
+[`test/wild_manifest_hygiene.test.mjs`](test/wild_manifest_hygiene.test.mjs) now fails if a new case
+re-imports a full manifest, or if the engine renames something the allowlist still permits.
+
+Two honest residues, stated rather than rounded to zero:
+
+- **This is a fidelity trade.** The vendored `package.json` files are now a subset of upstream at the
+  pinned SHA. They always were a subset of the upstream *tree* — no wild case was ever a full clone
+  — but a trimmed file is a modified file, and a reader diffing against `source_url` will find it.
+  The rule is mechanical and recorded in
+  [`bench/wild/observable-packages.mjs`](bench/wild/observable-packages.mjs): nothing is bumped, and
+  nothing the engine can read is removed.
+- **The count is not zero and should not be.** `next 14.2.3`, `express ^4.13.4`, `electron ^36`,
+  `vite ^6.2.2` and friends are exactly what the engine reads, so they stay at the real pins and
+  keep raising alerts. A fixture-only residue is the correct end state, not a bug to drive to zero.
+
+**Corrected.** This entry, and the changes that land with it in 0.3.1: the trim and its guard test,
+and the inventory corrected in [`SECURITY.md`](SECURITY.md), [`README.md`](README.md),
+[`README.he.md`](README.he.md) and [`.github/dependabot.yml`](.github/dependabot.yml). Alert
+*visibility* remains a repository setting, which no file in this repo can change.
+
+---
+
+## ERR-008 — the delegated half of the engine scored zero by construction, and the benchmark called it "no rule"
+
+**Claimed.** [`bench/wild.mjs`](bench/wild.mjs) printed, for every labelled `rce`, `ssrf`,
+`injection-sql` and `xss` finding it did not match: *"○ GAP [category] file:line — no rule for this
+category (known)"*, and its header explained the convention: *"Categories ClaudeGuardIL has no rule
+for (open-cors, ssrf, …) are reported separately as known COVERAGE GAPS, so 'missed because no rule'
+is not blamed on detection quality."* The scorecard totalled them as *"labels in categories with NO
+rule (coverage gaps): 12"*, and [`README.md`](README.md) carried the same 12 onward.
+
+**What is true.** Those four categories are not categories this project has no rule for. They are the
+four it *decided to cover by delegation*. [`docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md`](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md)
+— accepted, and still the standing decision — says: *"Do not build `taint.mjs`. Delegate generic
+dataflow to external scanners"*, Semgrep OSS by default and Snyk Code behind a consent gate, *"wired
+through the grader"* and entering *"the coverage ledger as its own subject set"*, so that *"a scanner
+that did not run is a loud `undeterminable`, not a silent hole."*
+
+The wild harness never invoked that delegate. It called `grade(model)` with no `scanners` argument at
+all, so `gradeScanners` returned on its first line every time. The honest status of those 12 labels
+was therefore neither *covered* nor *no rule* but **unmeasured** — and an unmeasured surface printed
+as a known, accepted gap is the exact silent-clean failure grade-or-declare exists to kill. The ADR
+even names this risk and the project failed to apply it to its own benchmark.
+
+Worse, the delegated arm could not have scored above zero if it had been wired. Three facts had to
+line up and one was missing:
+
+1. `bench/wild.mjs` establishes weakness by category **or** by CWE, and calls CWE *"the robust
+   cross-taxonomy key — both sides speak it."*
+2. `CG-SAST-001` — the id every semgrep result is graded under — has no entry in `ID_CATEGORY`, so it
+   resolves to no category.
+3. [`plugin/scripts/run_semgrep.mjs`](plugin/scripts/run_semgrep.mjs) forwarded `file`, `line`,
+   `rule`, `engineSeverity` and `message`, and **discarded `extra.metadata.cwe`** — so the grader
+   stamped every semgrep finding `cwe: null`.
+
+With no category and no CWE, a semgrep hit on the exact labelled line agreed on **place** and failed
+on **weakness**. Demonstrated before the fix: a synthetic hit at the labelled RCE site in
+`bench/wild/owasp-nodegoat` (`app/routes/contributions.js:32`) produced
+`evidence.at = [{file:"app/routes/contributions.js",line:32}]`, `cwe: null`, and matched nothing. And
+because such a finding is graded `likely` rather than `confirmed`, it was not even counted as a
+candidate false positive. It was invisible in both directions. The bridge existed on both sides and
+nothing connected it.
+
+**Also retracted: the single-denominator headline.** The scorecard printed one recall figure,
+*"overall (covered categories only) — recall, detected at all: 10/16 (63%)"*, and the 12 excluded
+labels appeared only as a separate count. 63% is a defensible number over a defensible scope, and the
+gaps were disclosed — but a lone percentage is what gets quoted, and over every label the blind
+labeller actually wrote the figure is **10/28 = 36%**. Selecting the denominator that flatters is the
+move **ERR-006** already retracted once, in this same file, about this same benchmark.
+
+**Corrected.** In this release:
+
+- `run_semgrep.mjs` forwards `cwe` (and `owasp`) from the rule's metadata as a fact, normalised out of
+  semgrep's prose form; the grader stamps it on `CG-SAST-001` and still owns severity and confidence
+  (ADR 0001, ADR 0003).
+- `bench/wild.mjs` runs the delegated pass under `--sast`, off by default because `--config auto`
+  fetches rules from semgrep.dev and would make this harness's output depend on a remote registry.
+- Delegated categories are a third state, `◍ DELEG`, counted in neither recall nor gaps. The 12
+  former "gaps" now read honestly as **9 delegated-but-unmeasured and 3 with no rule and no delegate**.
+- Coverage keys on whether the delegate **ran**, never on whether it was asked for. The first version
+  of this fix used the flag, and `--sast` on a machine without semgrep turned nine undeterminables
+  into nine misses — the same error inverted. `sastRan()` and its tests exist because of that.
+- Both denominators are printed, always, with the note *"quote both or neither."*
+- [`test/delegated_sast.test.mjs`](test/delegated_sast.test.mjs) asserts the bridge end to end from
+  recorded semgrep payloads, and pins the old failure so it cannot return.
+
+**Still not measured, and not claimed.** How many of those 12 labels the delegate *actually* catches
+is unknown. `semgrep --config auto` needs `semgrep.dev`, which was unreachable from the environment
+this fix was written in (`403` to `CONNECT`, confirmed at the proxy, not inferred). Hand-writing local
+rules for the labelled weaknesses and reporting the result as semgrep's reach would have been a
+self-fulfilling measurement, so it was not done. What ships here is the wiring, tested; the number
+needs one run of `node bench/wild.mjs --sast` on a host that can reach the registry.
+
+---
+
 ## Adding an entry
 
 When a claim in this repository turns out to be wrong:

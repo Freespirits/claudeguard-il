@@ -6,7 +6,7 @@
 
 ### קלוד — הקהילה הישראלית · Claude — the Israeli Community
 
-**v0.3.0** · zero runtime dependencies · 616 tests · bilingual HE/EN
+**v0.3.2** · zero runtime dependencies · 629 tests · bilingual HE/EN
 
 </div>
 
@@ -19,6 +19,10 @@ non-expert can act on.
 > **Community project — NOT an official Anthropic product.**
 > פרויקט קהילתי — אינו מוצר רשמי של Anthropic. Built for the
 > [Claude Israeli community](https://www.facebook.com/groups/cladue). MIT licensed.
+
+**Also on GitLab:** [gitlab.com/FreeSpirity/claudeguard-il](https://gitlab.com/FreeSpirity/claudeguard-il)
+— GitHub stays primary; `main` and tags are pushed there by
+[`.github/workflows/mirror-to-gitlab.yml`](.github/workflows/mirror-to-gitlab.yml) once its token is set.
 
 ---
 
@@ -33,11 +37,20 @@ exactly the overclaim it exists to prevent.
   *by construction*, so it is **not** a detection rate. The earlier "recall 100% / precision 100%"
   framing read as one and is retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md).
 - **The wild benchmark** (`bench/wild.mjs`) is the honest answer: **11 real repos at pinned commit
-  SHAs, labelled by a reviewer blind to this tool**, in a neutral CWE vocabulary. First measured
-  numbers: **10/16 detected on covered categories (63%), 83% on the target profile
-  (Next.js/Supabase/Firebase/AI), 0 candidate false positives.** It also caught four real cry-wolf
-  bugs on reference code, all fixed. This is a measurement, not a gate — and every repo added
-  tightens it.
+  SHAs, labelled by a reviewer blind to this tool**, in a neutral CWE vocabulary. Measured numbers,
+  and **both denominators, because a lone percentage is what gets quoted**:
+  - **10/16 (63%)** over the categories this tool has a rule for — 83% on the target profile
+    (Next.js/Supabase/Firebase/AI), **0 candidate false positives**.
+  - **10/28 (36%)** over *every* label the blind reviewer wrote. The difference is scope, not
+    detection: 3 labels are in categories with no rule and no delegate, and **9 are delegated to
+    semgrep by [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md) and are
+    currently UNMEASURED** — run `node bench/wild.mjs --sast` on a host that can reach semgrep.dev to
+    put a number on them.
+
+  Until then, that arm is unmeasured and this README will not imply otherwise. The harness used to
+  print those 9 as *"no rule for this category"* and report only the 63% — both retracted as
+  **ERR-008** in [`ERRATA.md`](ERRATA.md). It also caught four real cry-wolf bugs on reference code,
+  all fixed. This is a measurement, not a gate — and every repo added tightens it.
 
 **A clean scan is not proof of safety. It is proof that nothing was proved.**
 
@@ -256,28 +269,46 @@ plugin/        the Claude Code plugin (skills, agents, hooks, engine + grader sc
 skill-dist/    the claude.ai skill (assembled by build.mjs)
 bench/         run.mjs — the regression gate;  wild/ — 11 real repos, blind-labelled, real numbers
 scripts/       build.mjs
-test/          the 616-test suite, including the "correct app must stay quiet" fixture
+test/          the 629-test suite, including the "correct app must stay quiet" fixture
 sample-vulnerable-app/  a deliberately-insecure app to test against
 CONTEXT.md     the domain model — the vocabulary this codebase is written in
 ROADMAP.md · ERRATA.md   what's next, and every claim we made and later found wrong
 ```
 
-## Why is there a "vulnerable app" in this repo?
-`sample-vulnerable-app/` is an **intentional test fixture** — it exists only so the tool can be run
-against known-bad code. Its problems are at the **code** level (exposed `service_role` key, no RLS,
-IDOR, prompt injection, missing headers). Its **dependencies are not kept current**, so it does trip
-Dependabot — every alert on this repository points at a fixture, and none of them is reachable from
-anything the tool ships. Never deploy it. See [`SECURITY.md`](SECURITY.md), and **ERR-002** in
-[`ERRATA.md`](ERRATA.md) for the contradictory claims this README used to make about those
-dependencies.
+## Why is there vulnerable code in this repo, and why does the Security tab have alerts?
+Three trees are **intentional test fixtures**, and none of them is installed, built or shipped:
+
+- `sample-vulnerable-app/` — the demo app. Its problems are at the **code** level (exposed
+  `service_role` key, no RLS, IDOR, prompt injection, missing headers).
+- `bench/corpus/**` — the vulnerable/fixed pairs behind the regression gate.
+- `bench/wild/*/repo/` — **real third-party source** at a pinned commit SHA, still vulnerable on
+  purpose: a case that got patched would stop measuring anything.
+
+Their dependencies are not kept current, so Dependabot flags them. **Every alert on this repository
+points at one of those three trees, and none is reachable from anything the tool ships** — the engine
+and grader have zero runtime dependencies, which CI enforces.
+
+That count does not go to zero, and shouldn't. The dependencies the engine actually reads (`next`,
+`express`, `firebase`, `electron`, `openai`, …) stay pinned to the real upstream versions, vulnerable
+ones included, because the pin is what the wild benchmark measures against. What 0.3.1 did remove
+were the **429** vendored dependencies the engine *cannot* read — `project_model.mjs` consults a
+closed set of package names, so those bought no detection and cost an alert each. Roughly an order of
+magnitude fewer alerts, wild scorecard byte-identical.
+
+Never deploy any of it. See [`SECURITY.md`](SECURITY.md); **ERR-002** in [`ERRATA.md`](ERRATA.md) for
+the contradictory claims this README used to make about fixture dependencies, and **ERR-007** for the
+fixture tree these documents forgot to name while it produced most of the alerts.
 
 ## Errata
 
 Claims this project made and later found wrong are retracted in the open, numbered, and kept:
-[`ERRATA.md`](ERRATA.md). It currently holds six — a gate of ours that checked one host and opened
+[`ERRATA.md`](ERRATA.md). It currently holds eight — a gate of ours that checked one host and opened
 another (ERR-001), the fixture-dependency claims (ERR-002), a credential leak in our own live probe
 found by external review (ERR-003), the Tier-2 overclaim (ERR-004), the half of that retraction that
-was announced before it was made (ERR-005), and the benchmark headline (ERR-006).
+was announced before it was made (ERR-005), the benchmark headline (ERR-006), an account of our own
+Dependabot alerts that named two fixture trees while a third produced most of them (ERR-007), and a
+delegated half of the engine that scored zero by construction while the benchmark called it "no rule"
+(ERR-008).
 
 The ledger exists because the failure this tool is built to catch — a confident statement nobody
 checked — is one we keep making too. Nothing is quietly deleted; each entry quotes the old claim.

@@ -1,6 +1,6 @@
 {
   "name": "claudeguard-il",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Security auditor and guard-builder for vibecoded apps. Community project, not an official Anthropic product.",
