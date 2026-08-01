@@ -9,6 +9,7 @@ import { cpSync, rmSync, mkdirSync, copyFileSync, existsSync, readFileSync } fro
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execSync } from 'node:child_process'
+import { zipDir } from './zipdir.mjs'
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..')
 const core = join(repo, 'core')
@@ -57,17 +58,14 @@ mkdirSync(distSkill, { recursive: true })
 assemble(distRefs)
 copyFileSync(skillMd, join(distSkill, 'SKILL.md'))
 
-// Zip the claude.ai skill with SKILL.md at the archive root.
+// Zip the claude.ai skill with SKILL.md at the archive root. Pure-Node (scripts/zipdir.mjs):
+// one code path on every OS, forward-slash entry names guaranteed, byte-reproducible output —
+// the old Windows path (PowerShell Compress-Archive) wrote backslash names, which the ZIP spec
+// forbids and claude.ai's uploader reads as a flattened tree.
 const zip = join(repo, 'claudeguard-skill.zip')
 try { rmSync(zip, { force: true }) } catch {}
 try {
-  if (process.platform === 'win32') {
-    execSync(
-      `powershell -NoProfile -Command "Compress-Archive -Path '${join(distSkill, '*')}' -DestinationPath '${zip}' -Force"`,
-      { stdio: 'ignore' })
-  } else {
-    execSync(`cd "${distSkill}" && zip -r -q "${zip}" .`, { stdio: 'ignore' })
-  }
+  zipDir(distSkill, zip)
   console.log('• wrote ' + zip)
 } catch (e) {
   fail('zip step failed: ' + String(e.message || e).slice(0, 120) +
