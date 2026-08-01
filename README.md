@@ -36,42 +36,65 @@ committed on the GitLab side.
 
 ---
 
-## What the numbers mean, before anyone quotes them
+## See it in 30 seconds
 
-This project measures itself two ways, and keeps them strictly apart — because conflating them is
-exactly the overclaim it exists to prevent.
+Install the plugin in Claude Code and point it at a project:
 
-- **The regression gate** (`bench/run.mjs`, a corpus this project wrote) stands at **0 regressions
-  across 19 pinned detections, and 0 unexpected confirmed findings across 9 clean variants**,
-  deterministic. That is genuine regression protection and a cry-wolf gate — but its recall is 100%
-  *by construction*, so it is **not** a detection rate. The earlier "recall 100% / precision 100%"
-  framing read as one and is retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md).
-- **The wild benchmark** (`bench/wild.mjs`) is the honest answer: **11 real repos at pinned commit
-  SHAs, labelled by a reviewer blind to this tool**, in a neutral CWE vocabulary. Measured numbers,
-  and **both denominators, because a lone percentage is what gets quoted**:
-  - **10/16 (63%)** over the categories this tool has a rule for — 83% on the target profile
-    (Next.js/Supabase/Firebase/AI), **0 candidate false positives**.
-  - **10/28 (36%)** over *every* label the blind reviewer wrote. The difference is scope, not
-    detection: 3 labels are in categories with no rule and no delegate, and **9 are delegated to
-    semgrep by [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md)**.
+```
+/plugin marketplace add Freespirits/claudeguard-il
+/plugin install claudeguard-il@claudeguard-il
+/cg-scan
+```
 
-  The delegated arm, measured once so far (semgrep 1.172.0, `--config auto`, registry of
-  2026-07-30): **3/9 detected — all three command injection — and 0/9 confirmed**, the latter by
-  design: CG-SAST-001 is a judgement source and cannot reach `confirmed`. The six misses are the
-  framework-depth cases the registry's `auto` set does not model — a Jinja2
-  `render_template_string` SSTI, a MongoDB `$where`, a Swig `autoescape:false`, a `needle` SSRF, a
-  string-formatted SQL, and one `popen` shell-concat. With the delegate running, the same scorecard
-  reads **14/25 (56%)** in-scope and **14/28 (50%)** over all labels — semgrep also caught one
-  own-category label the rules had missed (cleartext-transit, NodeGoat) — and candidate false
-  positives stayed 0. That number **drifts with the semgrep build and the remote registry**, which
-  is exactly why `--sast` is opt-in and why the measurement lives here with its date instead of in
-  the headline. Reproduce: `node bench/wild.mjs --sast` on a host that can reach semgrep.dev.
+Against this repo's bundled [`sample-vulnerable-app/`](sample-vulnerable-app/) — a deliberately
+insecure demo app — the real report opens with:
 
-  The harness used to print those 9 as *"no rule for this category"* and report only the 63% — both
-  retracted as **ERR-008** in [`ERRATA.md`](ERRATA.md). It also caught four real cry-wolf bugs on
-  reference code, all fixed. This is a measurement, not a gate — and every repo added tightens it.
+```
+🔴 CRITICAL — 7 confirmed P0, 0 confirmed P1. Do not go public until the P0 issues are fixed.
+🔴 קריטי — 7 ממצאי P0 מאומתים, 0 ממצאי P1 מאומתים. אין לעלות לאוויר עד לתיקון בעיות ה-P0.
+```
 
-**A clean scan is not proof of safety. It is proof that nothing was proved.**
+Every finding ships with evidence (`file:line`), an attack scenario, and paste-ready hardening
+code — in Hebrew and English, with a jargon-free "בפשטות / In plain words" line for non-experts.
+Full example report: [`examples/sample-report.md`](examples/sample-report.md).
+
+---
+
+## Two ways to use it
+
+### 1) Claude Code plugin (full engine)
+Scans your whole repo, runs scanners, and can generate & apply fixes.
+
+```
+/plugin marketplace add Freespirits/claudeguard-il
+/plugin install claudeguard-il@claudeguard-il
+```
+Then, in your project:
+```
+/cg-scan            # static audit (Tier 0) — safe, read-only, the default.
+                    #   Grades security AND compliance (accessibility) in one pass.
+/cg-intent          # build/correct claudeguard.intent.yml in a few plain questions — turns the
+                    #   business-logic audit from a guess (assumed) into a review (confirmed)
+/cg-harden          # generate paste-ready guards for the findings
+/cg-fix             # apply guards (dry-run diff first, you confirm)
+/cg-live  <url>     # Tier 1 passive live checks (target you own)
+/cg-dast  <url>     # Tier 2 active probes — a smoke test (target you own + authorized)
+```
+
+Local test without installing:
+```
+claude --plugin-dir ./plugin
+```
+
+### 2) claude.ai / Claude Desktop skill (knowledge + report)
+For people who don't use the terminal. Build the skill zip, then upload it in claude.ai
+(Settings → Capabilities → Skills) or Claude Desktop.
+
+```
+node scripts/build.mjs          # produces claudeguard-skill.zip (SKILL.md at the root)
+```
+Then paste or upload your code/config and ask: *"בדוק את האבטחה של האפליקציה"* / *"check my app's
+security"*. Same knowledge and bilingual report; no repo scanning, subagents, or auto-fix here.
 
 ---
 
@@ -113,44 +136,6 @@ security bar or redden the security badge.
   graded slice (cleartext transit, session-cookie flags) plus declared obligation rows tied to each
   תקנה — grade-or-declare taken to its limit, because most of the regulation is paperwork invisible
   to a repo.
-
----
-
-## Two ways to use it
-
-### 1) Claude Code plugin (full engine)
-Scans your whole repo, runs scanners, and can generate & apply fixes.
-
-```
-/plugin marketplace add Freespirits/claudeguard-il
-/plugin install claudeguard-il@claudeguard-il
-```
-Then, in your project:
-```
-/cg-scan            # static audit (Tier 0) — safe, read-only, the default.
-                    #   Grades security AND compliance (accessibility) in one pass.
-/cg-intent          # build/correct claudeguard.intent.yml in a few plain questions — turns the
-                    #   business-logic audit from a guess (assumed) into a review (confirmed)
-/cg-harden          # generate paste-ready guards for the findings
-/cg-fix             # apply guards (dry-run diff first, you confirm)
-/cg-live  <url>     # Tier 1 passive live checks (target you own)
-/cg-dast  <url>     # Tier 2 active probes — a smoke test (target you own + authorized)
-```
-
-Local test without installing:
-```
-claude --plugin-dir ./plugin
-```
-
-### 2) claude.ai / Claude Desktop skill (knowledge + report)
-For people who don't use the terminal. Build the skill zip, then upload it in claude.ai
-(Settings → Capabilities → Skills) or Claude Desktop.
-
-```
-node scripts/build.mjs          # produces claudeguard-skill.zip (SKILL.md at the root)
-```
-Then paste or upload your code/config and ask: *"בדוק את האבטחה של האפליקציה"* / *"check my app's
-security"*. Same knowledge and bilingual report; no repo scanning, subagents, or auto-fix here.
 
 ---
 
@@ -278,6 +263,45 @@ aren't — it never force-installs anything, and a tool that could not run becom
 `undeterminable` coverage row, never a silent pass. Findings also render to **SARIF 2.1.0** for GitHub
 Code Scanning. The engine and grader have **zero** runtime dependencies, which CI enforces; you can
 run them with nothing but Node ≥ 20.
+
+---
+
+## What the numbers mean, before anyone quotes them
+
+This project measures itself two ways, and keeps them strictly apart — because conflating them is
+exactly the overclaim it exists to prevent.
+
+- **The regression gate** (`bench/run.mjs`, a corpus this project wrote) stands at **0 regressions
+  across 19 pinned detections, and 0 unexpected confirmed findings across 9 clean variants**,
+  deterministic. That is genuine regression protection and a cry-wolf gate — but its recall is 100%
+  *by construction*, so it is **not** a detection rate. The earlier "recall 100% / precision 100%"
+  framing read as one and is retracted as **ERR-006** in [`ERRATA.md`](ERRATA.md).
+- **The wild benchmark** (`bench/wild.mjs`) is the honest answer: **11 real repos at pinned commit
+  SHAs, labelled by a reviewer blind to this tool**, in a neutral CWE vocabulary. Measured numbers,
+  and **both denominators, because a lone percentage is what gets quoted**:
+  - **10/16 (63%)** over the categories this tool has a rule for — 83% on the target profile
+    (Next.js/Supabase/Firebase/AI), **0 candidate false positives**.
+  - **10/28 (36%)** over *every* label the blind reviewer wrote. The difference is scope, not
+    detection: 3 labels are in categories with no rule and no delegate, and **9 are delegated to
+    semgrep by [ADR 0007](docs/adr/0007-taint-is-cut-generic-dataflow-is-delegated.md)**.
+
+  The delegated arm, measured once so far (semgrep 1.172.0, `--config auto`, registry of
+  2026-07-30): **3/9 detected — all three command injection — and 0/9 confirmed**, the latter by
+  design: CG-SAST-001 is a judgement source and cannot reach `confirmed`. The six misses are the
+  framework-depth cases the registry's `auto` set does not model — a Jinja2
+  `render_template_string` SSTI, a MongoDB `$where`, a Swig `autoescape:false`, a `needle` SSRF, a
+  string-formatted SQL, and one `popen` shell-concat. With the delegate running, the same scorecard
+  reads **14/25 (56%)** in-scope and **14/28 (50%)** over all labels — semgrep also caught one
+  own-category label the rules had missed (cleartext-transit, NodeGoat) — and candidate false
+  positives stayed 0. That number **drifts with the semgrep build and the remote registry**, which
+  is exactly why `--sast` is opt-in and why the measurement lives here with its date instead of in
+  the headline. Reproduce: `node bench/wild.mjs --sast` on a host that can reach semgrep.dev.
+
+  The harness used to print those 9 as *"no rule for this category"* and report only the 63% — both
+  retracted as **ERR-008** in [`ERRATA.md`](ERRATA.md). It also caught four real cry-wolf bugs on
+  reference code, all fixed. This is a measurement, not a gate — and every repo added tightens it.
+
+**A clean scan is not proof of safety. It is proof that nothing was proved.**
 
 ---
 
